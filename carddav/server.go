@@ -10,6 +10,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/emersion/go-vcard"
 	"github.com/emersion/go-webdav"
@@ -913,6 +914,14 @@ func (b *backend) Move(r *http.Request, dest *internal.Href, overwrite bool) (cr
 	}
 	opts := MoveAddressObjectOptions{NoOverwrite: !overwrite}
 	return cm.MoveAddressObject(r.Context(), r.URL.Path, dest.Path, &opts)
+}
+
+func (b *backend) Lock(r *http.Request, depth internal.Depth, timeout time.Duration, refreshToken string) (lock *internal.Lock, created bool, err error) {
+	return nil, false, internal.HTTPErrorf(http.StatusMethodNotAllowed, "carddav: unsupported method")
+}
+
+func (b *backend) Unlock(r *http.Request, tokenHref string) error {
+	return internal.HTTPErrorf(http.StatusMethodNotAllowed, "webdav: unsupported method")
 }
 
 // PreconditionType as defined in https://tools.ietf.org/rfcmarkup?doc=6352#section-6.3.2.1
