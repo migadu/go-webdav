@@ -137,9 +137,11 @@ type backend struct {
 }
 
 func (b *backend) Options(r *http.Request) (caps []string, allow []string, err error) {
+	caps = []string{"2"}
+
 	fi, err := b.FileSystem.Stat(r.Context(), r.URL.Path)
 	if internal.IsNotFound(err) {
-		return nil, []string{http.MethodOptions, http.MethodPut, "MKCOL"}, nil
+		return caps, []string{http.MethodOptions, http.MethodPut, "MKCOL"}, nil
 	} else if err != nil {
 		return nil, nil, err
 	}
@@ -160,7 +162,7 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 		allow = append(allow, http.MethodHead, http.MethodGet, http.MethodPut)
 	}
 
-	return nil, allow, nil
+	return caps, allow, nil
 }
 
 func (b *backend) HeadGet(w http.ResponseWriter, r *http.Request) error {
@@ -245,6 +247,13 @@ func (b *backend) propFindFile(ctx context.Context, propfind *internal.PropFind,
 		}
 		return internal.NewResourceType(types...), nil
 	}
+
+	props[internal.SupportedLockName] = internal.PropFindValue(&internal.SupportedLock{
+		LockEntries: []internal.LockEntry{{
+			LockScope: internal.LockScope{Exclusive: &struct{}{}},
+			LockType:  internal.LockType{Write: &struct{}{}},
+		}},
+	})
 
 	if !fi.IsDir {
 		props[internal.GetContentLengthName] = internal.PropFindValue(&internal.GetContentLength{
