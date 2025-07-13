@@ -392,6 +392,16 @@ func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*
 }
 
 func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
+	if lock := b.resourceLock(r.URL.Path); lock != nil {
+		token, err := internal.ParseSubmittedToken(r.Header)
+		if err != nil {
+			return err
+		}
+		if token != lock.Href {
+			return &internal.HTTPError{Code: http.StatusLocked}
+		}
+	}
+
 	ifNoneMatch := ConditionalMatch(r.Header.Get("If-None-Match"))
 	ifMatch := ConditionalMatch(r.Header.Get("If-Match"))
 
@@ -424,6 +434,16 @@ func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (b *backend) Delete(r *http.Request) error {
+	if lock := b.resourceLock(r.URL.Path); lock != nil {
+		token, err := internal.ParseSubmittedToken(r.Header)
+		if err != nil {
+			return err
+		}
+		if token != lock.Href {
+			return &internal.HTTPError{Code: http.StatusLocked}
+		}
+	}
+
 	ifNoneMatch := ConditionalMatch(r.Header.Get("If-None-Match"))
 	ifMatch := ConditionalMatch(r.Header.Get("If-Match"))
 
@@ -454,6 +474,16 @@ func (b *backend) Mkcol(r *http.Request) error {
 }
 
 func (b *backend) Copy(r *http.Request, dest *internal.Href, recursive, overwrite bool) (created bool, err error) {
+	if lock := b.resourceLock(dest.Path); lock != nil {
+		token, err := internal.ParseSubmittedToken(r.Header)
+		if err != nil {
+			return false, err
+		}
+		if token != lock.Href {
+			return false, &internal.HTTPError{Code: http.StatusLocked}
+		}
+	}
+
 	options := CopyOptions{
 		NoRecursive: !recursive,
 		NoOverwrite: !overwrite,
@@ -466,6 +496,37 @@ func (b *backend) Copy(r *http.Request, dest *internal.Href, recursive, overwrit
 }
 
 func (b *backend) Move(r *http.Request, dest *internal.Href, overwrite bool) (created bool, err error) {
+	// Check source and destination locks
+	var conditions [][]internal.Condition
+	hif := r.Header.Get("If")
+	if hif == "" {
+		conditions = nil
+	} else {
+		var err error
+		conditions, err = internal.ParseConditions(hif)
+		if err != nil {
+			return false, &internal.HTTPError{http.StatusBadRequest, err}
+		}
+	}
+	srcLock := b.resourceLock(r.URL.Path)
+	destLock := b.resourceLock(dest.Path)
+	for _, conds := range conditions {
+		if len(conds) == 0 {
+			continue
+		}
+		if len(conds) > 1 {
+			return false, internal.HTTPErrorf(http.StatusBadRequest, "webdav: multiple conditions are not supported in the If header field")
+		}
+		if (conds[0].Resource == "" || conds[0].Resource == r.URL.Path) && srcLock != nil && conds[0].Token == srcLock.Href {
+			srcLock = nil
+		} else if (conds[0].Resource == dest.Path) && destLock != nil && conds[0].Token == destLock.Href {
+			destLock = nil
+		}
+	}
+	if srcLock != nil || destLock != nil {
+		return false, &internal.HTTPError{Code: http.StatusLocked}
+	}
+
 	options := MoveOptions{
 		NoOverwrite: !overwrite,
 	}
