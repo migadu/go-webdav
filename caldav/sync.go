@@ -48,7 +48,7 @@ func (h *Handler) handleSyncCollection(r *http.Request, w http.ResponseWriter, s
 		Prefix:  strings.TrimSuffix(h.Prefix, "/"),
 	}
 	syncBackend, ok := h.Backend.(SyncBackend)
-	if !ok || b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendar {
+	if !ok || b.resourceTypeAtPath(r.Context(), r.URL.Path) != resourceTypeCalendar {
 		return internal.NewConditionError(http.StatusForbidden, internal.SupportedReportName)
 	}
 

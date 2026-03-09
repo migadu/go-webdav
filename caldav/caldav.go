@@ -179,3 +179,8 @@ type SyncResponse struct {
 	// early; the client sets it when the server reports a truncated result.
 	Truncated bool
 }
+
+type Inbox struct {
+	Path           string
+	UserAddressSet []string
+}
