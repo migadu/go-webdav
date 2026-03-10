@@ -114,11 +114,11 @@ type CalendarObjectCopyMover interface {
 // 1. It adds the `calendar-auto-schedule` capability
 // 2. It returns `schedule-inbox-URL` and `calendar-user-address-set` based on the `GetInbox` result.
 // 3. It adds an inbox-calendar to the `PROPFIND` for all collections.
-// 4. It returns the `CalendarObject`:s from `ListInboxInvites` when getting a `REPORT` towards the inbox.
+// 4. It returns the `CalendarObject`:s using `ListCalendarObjects` when getting a `REPORT` towards the inbox.
 //
 // To properly implement this, you need to.
 // 1. Implement `GetInbox`, and return a list of addresses for the users that can be invited, e.g. on the form: `mailto:test@example.com`.
-// 2. Implement `ListInboxInvites`, which returns `CalendarObject`:s that have an attendee that matches one of the addresses returned from `GetInbox`. e.g.
+// 2. Implement `ListCalendarObjects`, which returns `CalendarObject`:s that have an attendee that matches one of the addresses returned from `GetInbox`. e.g.
 // ```go
 // attendee := ical.NewProp(ical.PropAttendee)
 // attendee.Params.Set(ical.ParamCommonName, name)
@@ -131,7 +131,6 @@ type CalendarObjectCopyMover interface {
 // Doing this should make it possible to accept/decline invitations in your client, which would trigger a `PutCalendarObject` towards the invite, with an updateded `ParamParticipationStatus`.
 type InboxBackend interface {
 	GetInbox(ctx context.Context) (*Inbox, error)
-	ListInboxInvites(ctx context.Context, path string) ([]CalendarObject, error)
 }
 
 // Handler handles CalDAV HTTP requests. It can be used to create a CalDAV
@@ -649,7 +648,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		}
 		resps = append(resps, *resp)
 		if depth != internal.DepthZero {
-			resps_, err := b.propFindAllCalendarObjects(r.Context(), propfind, ab)
+			resps_, err := b.propFindAllCalendarObjects(r.Context(), propfind, ab.Path)
 			if err != nil {
 				return nil, err
 			}
@@ -678,17 +677,11 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 			}
 			resps = append(resps, *resp)
 			if depth != internal.DepthZero {
-				aos, err := inboxBackend.ListInboxInvites(r.Context(), inbox.Path)
+				resps_, err := b.propFindAllCalendarObjects(r.Context(), propfind, inbox.Path)
 				if err != nil {
 					return nil, err
 				}
-				for _, ao := range aos {
-					resp, err := b.propFindCalendarObject(r.Context(), propfind, false, &ao)
-					if err != nil {
-						return nil, err
-					}
-					resps = append(resps, *resp)
-				}
+				resps = append(resps, resps_...)
 			}
 		}
 	}
@@ -872,7 +865,7 @@ func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.P
 		}
 		resps = append(resps, *resp)
 		if recurse {
-			resps_, err := b.propFindAllCalendarObjects(ctx, propfind, &ab)
+			resps_, err := b.propFindAllCalendarObjects(ctx, propfind, ab.Path)
 			if err != nil {
 				return nil, err
 			}
@@ -941,9 +934,9 @@ func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal
 	return internal.NewPropFindResponse(co.Path, propfind, props)
 }
 
-func (b *backend) propFindAllCalendarObjects(ctx context.Context, propfind *internal.PropFind, cal *Calendar) ([]internal.Response, error) {
+func (b *backend) propFindAllCalendarObjects(ctx context.Context, propfind *internal.PropFind, path string) ([]internal.Response, error) {
 	var dataReq CalendarCompRequest
-	aos, err := b.Backend.ListCalendarObjects(ctx, cal.Path, &dataReq)
+	aos, err := b.Backend.ListCalendarObjects(ctx, path, &dataReq)
 	errResps, err := internal.HrefErrorResponses(err)
 	if err != nil {
 		return nil, err
