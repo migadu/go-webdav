@@ -74,6 +74,13 @@ type Calendar struct {
 	ReadOnly bool
 }
 
+// CalendarUpdate holds the changes a PROPPATCH request makes to a calendar.
+// A nil field is left as is; removing a property sets it to the empty string.
+type CalendarUpdate struct {
+	Name        *string
+	Description *string
+}
+
 type CalendarCompRequest struct {
 	Name string
 
