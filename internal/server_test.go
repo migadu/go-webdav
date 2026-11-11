@@ -1,0 +1,148 @@
+package internal
+
+import (
+	"bytes"
+	"compress/gzip"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"testing"
+)
+
+type closeRecorder struct {
+	io.Reader
+	closed bool
+}
+
+func (c *closeRecorder) Close() error {
+	c.closed = true
+	return nil
+}
+
+func gzipData(t *testing.T, b []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(b); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestDecodeRequestBody(t *testing.T) {
+	content := []byte("Hello, world!")
+	encoded := gzipData(t, content)
+	src := &closeRecorder{Reader: bytes.NewReader(encoded)}
+
+	r := httptest.NewRequest(http.MethodPut, "/", nil)
+	r.Body = src
+	r.ContentLength = int64(len(encoded))
+	r.Header.Set("Content-Length", strconv.Itoa(len(encoded)))
+	r.Header.Set("Content-Encoding", "gzip")
+
+	w := httptest.NewRecorder()
+	r2, err := DecodeRequestBody(w, r)
+	if err != nil {
+		t.Fatalf("DecodeRequestBody() = %v", err)
+	}
+
+	if v := r2.Header.Get("Content-Encoding"); v != "" {
+		t.Errorf("decoded request has Content-Encoding %q", v)
+	}
+	if v := r2.Header.Get("Content-Length"); v != "" {
+		t.Errorf("decoded request has Content-Length header %q", v)
+	}
+	if r2.ContentLength != -1 {
+		t.Errorf("decoded request ContentLength = %d, want -1", r2.ContentLength)
+	}
+	if r.Header.Get("Content-Encoding") != "gzip" || r.ContentLength != int64(len(encoded)) {
+		t.Errorf("original request was modified")
+	}
+
+	if IsRequestBodyEmpty(r2) {
+		t.Errorf("IsRequestBodyEmpty() = true for a non-empty body")
+	}
+	got, err := io.ReadAll(r2.Body)
+	if err != nil {
+		t.Fatalf("failed to read decoded body: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Errorf("decoded body = %q, want %q", got, content)
+	}
+	if err := r2.Body.Close(); err != nil {
+		t.Errorf("Close() = %v", err)
+	}
+	if !src.closed {
+		t.Errorf("closing the decoded body didn't close the original body")
+	}
+}
+
+func TestDecodeRequestBody_noEncoding(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader([]byte("plain")))
+	r2, err := DecodeRequestBody(httptest.NewRecorder(), r)
+	if err != nil {
+		t.Fatalf("DecodeRequestBody() = %v", err)
+	}
+	if r2 != r {
+		t.Errorf("DecodeRequestBody() returned a new request for a request without Content-Encoding")
+	}
+}
+
+func TestDecodeRequestBody_identity(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader([]byte("plain")))
+	r.Header.Set("Content-Encoding", "identity")
+	r2, err := DecodeRequestBody(httptest.NewRecorder(), r)
+	if err != nil {
+		t.Fatalf("DecodeRequestBody() = %v", err)
+	}
+	if v := r2.Header.Get("Content-Encoding"); v != "" {
+		t.Errorf("decoded request has Content-Encoding %q", v)
+	}
+	if r2.ContentLength != 5 {
+		t.Errorf("ContentLength = %d, want unchanged length 5", r2.ContentLength)
+	}
+	if got, err := io.ReadAll(r2.Body); err != nil || string(got) != "plain" {
+		t.Errorf("body = %q, %v, want %q", got, err, "plain")
+	}
+}
+
+func TestDecodeRequestBody_unsupported(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader([]byte("data")))
+	r.Header.Add("Content-Encoding", "gzip")
+	r.Header.Add("Content-Encoding", "br")
+	w := httptest.NewRecorder()
+	_, err := DecodeRequestBody(w, r)
+
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("DecodeRequestBody() = %v, want HTTP 415", err)
+	}
+	if got := w.Header().Get("Accept-Encoding"); got != acceptedContentCodings {
+		t.Errorf("Accept-Encoding = %q, want %q", got, acceptedContentCodings)
+	}
+}
+
+func TestDecodeRequestBody_corrupt(t *testing.T) {
+	encoded := gzipData(t, []byte("Hello, world!"))
+	for name, body := range map[string][]byte{
+		"not gzip":  []byte("this is not gzip data"),
+		"truncated": encoded[:len(encoded)-4],
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(body))
+			r.Header.Set("Content-Encoding", "gzip")
+			r2, err := DecodeRequestBody(httptest.NewRecorder(), r)
+			if err != nil {
+				t.Fatalf("DecodeRequestBody() = %v", err)
+			}
+			if _, err := io.ReadAll(r2.Body); err == nil {
+				t.Errorf("reading a corrupt body succeeded")
+			}
+		})
+	}
+}

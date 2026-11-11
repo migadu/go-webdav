@@ -365,6 +365,11 @@ func ServePrincipal(w http.ResponseWriter, r *http.Request, options *ServePrinci
 }
 
 func servePrincipalPropfind(w http.ResponseWriter, r *http.Request, options *ServePrincipalOptions) error {
+	r, err := internal.DecodeRequestBody(w, r)
+	if err != nil {
+		return err
+	}
+
 	var propfind internal.PropFind
 	if err := internal.DecodeXMLRequest(r, &propfind); err != nil {
 		return err

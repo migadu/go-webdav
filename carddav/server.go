@@ -66,7 +66,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var err error
+	r, err := internal.DecodeRequestBody(w, r)
+	if err != nil {
+		internal.ServeError(w, err)
+		return
+	}
+
 	switch r.Method {
 	case "REPORT":
 		err = h.handleReport(w, r)

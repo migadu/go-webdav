@@ -1,6 +1,9 @@
 package internal
 
 import (
+	"bufio"
+	"compress/gzip"
+	"compress/zlib"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -49,6 +52,114 @@ func IsRequestBodyEmpty(r *http.Request) bool {
 	return err == io.EOF
 }
 
+// acceptedContentCodings lists the request content codings supported by
+// DecodeRequestBody, besides "identity".
+const acceptedContentCodings = "gzip, deflate"
+
+// DecodeRequestBody undoes the content codings listed in the Content-Encoding
+// header of a request (RFC 9110 section 8.4), so that the request body can be
+// read as-is.
+//
+// The returned request is a shallow copy of r without the Content-Encoding
+// header. If the body needs to be decoded, the Content-Length header is
+// dropped as well, since it refers to the encoded body. If r has no
+// Content-Encoding header, r itself is returned.
+//
+// If a content coding isn't supported, an HTTP 415 error is returned and an
+// Accept-Encoding header listing the supported content codings is added to w
+// (RFC 7694 section 3).
+func DecodeRequestBody(w http.ResponseWriter, r *http.Request) (*http.Request, error) {
+	values := r.Header.Values("Content-Encoding")
+	if len(values) == 0 {
+		return r, nil
+	}
+
+	var codings []string
+	for _, v := range values {
+		for _, coding := range strings.Split(v, ",") {
+			// Content codings are case-insensitive (RFC 9110 section 8.4.1)
+			coding = strings.ToLower(strings.TrimSpace(coding))
+			switch coding {
+			case "", "identity":
+				// Nothing to decode
+			case "gzip", "x-gzip", "deflate":
+				codings = append(codings, coding)
+			default:
+				w.Header().Set("Accept-Encoding", acceptedContentCodings)
+				return r, HTTPErrorf(http.StatusUnsupportedMediaType, "webdav: unsupported Content-Encoding %q", coding)
+			}
+		}
+	}
+
+	r2 := new(http.Request)
+	*r2 = *r
+	r2.Header = r.Header.Clone()
+	r2.Header.Del("Content-Encoding")
+	if len(codings) == 0 {
+		return r2, nil
+	}
+
+	src := r.Body
+	if src == nil {
+		src = http.NoBody
+	}
+	var body io.Reader = src
+	// Codings are listed in the order in which they were applied, so they
+	// have to be undone in reverse order
+	for i := len(codings) - 1; i >= 0; i-- {
+		body = &contentDecoder{coding: codings[i], r: body}
+	}
+	r2.Body = &decodedBody{Reader: body, Closer: src}
+	r2.ContentLength = -1
+	r2.Header.Del("Content-Length")
+	return r2, nil
+}
+
+// contentDecoder decodes a content coding. It doesn't read anything until the
+// first Read call, so that handlers can reject a request before consuming its
+// body.
+type contentDecoder struct {
+	coding string
+	r      io.Reader
+	dec    io.Reader
+	err    error
+}
+
+func (d *contentDecoder) Read(p []byte) (int, error) {
+	if d.dec == nil && d.err == nil {
+		d.dec, d.err = newContentDecoder(d.coding, d.r)
+	}
+	if d.err != nil {
+		return 0, d.err
+	}
+	return d.dec.Read(p)
+}
+
+func newContentDecoder(coding string, r io.Reader) (io.Reader, error) {
+	br := bufio.NewReader(r)
+	// Leave an empty body empty, even though it's not valid encoded data, so
+	// that e.g. a PROPFIND request without a body is still accepted
+	if _, err := br.Peek(1); err != nil {
+		return nil, err
+	}
+
+	switch coding {
+	case "gzip", "x-gzip":
+		return gzip.NewReader(br)
+	case "deflate":
+		// "deflate" is the zlib format (RFC 9110 section 8.4.1.2)
+		return zlib.NewReader(br)
+	default:
+		panic(fmt.Sprintf("webdav: unexpected content coding %q", coding))
+	}
+}
+
+// decodedBody reads the decoded request body and closes the original one.
+type decodedBody struct {
+	io.Reader
+	io.Closer
+}
+
 func ServeXML(w http.ResponseWriter) *xml.Encoder {
 	w.Header().Add("Content-Type", "application/xml; charset=\"utf-8\"")
 	w.Write([]byte(xml.Header))
@@ -78,7 +189,12 @@ type Handler struct {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	var err error
+	r, err := DecodeRequestBody(w, r)
+	if err != nil {
+		ServeError(w, err)
+		return
+	}
+
 	if h.Backend == nil {
 		err = fmt.Errorf("webdav: no backend available")
 	} else {
