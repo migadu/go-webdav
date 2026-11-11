@@ -438,8 +438,10 @@ func (c *Client) GetCalendarObject(ctx context.Context, path string) (*CalendarO
 // (create only if absent) precondition. A failed precondition surfaces as an
 // *webdav.HTTPError with code 412 Precondition Failed.
 //
-// The values of opts are sent as is, so they must be quoted entity-tags as in
-// the header fields, e.g. `"` + co.ETag + `"`, or "*".
+// The values of opts are sent as is, so they must be in header form: a quoted
+// strong entity-tag such as "abc", a weak one such as W/"abc", a
+// comma-separated list of these, or "*". If-Match uses the strong comparison,
+// so a weak entity-tag never matches it.
 func (c *Client) PutCalendarObject(ctx context.Context, path string, cal *ical.Calendar, opts *PutCalendarObjectOptions) (*CalendarObject, error) {
 	// TODO: some servers want a Content-Length header, so we can't stream the
 	// request body here. See the Radicale issue:
