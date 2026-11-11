@@ -221,18 +221,16 @@ func (c *Client) Create(ctx context.Context, name string) (io.WriteCloser, error
 
 // RemoveAll deletes a file. If the file is a directory, all of its descendants
 // are recursively deleted as well.
+//
+// If the server fails to delete some of the descendants, the returned error
+// lists each of them.
 func (c *Client) RemoveAll(ctx context.Context, name string) error {
 	req, err := c.ic.NewRequest(http.MethodDelete, name, nil)
 	if err != nil {
 		return err
 	}
 
-	resp, err := c.ic.Do(req.WithContext(ctx))
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	return nil
+	return c.ic.DoAndCheckMultiStatus(req.WithContext(ctx))
 }
 
 // Mkdir creates a new directory.
@@ -253,7 +251,8 @@ func (c *Client) Mkdir(ctx context.Context, name string) error {
 // Copy copies a file.
 //
 // By default, if the file is a directory, all descendants are recursively
-// copied as well.
+// copied as well. If the server fails to copy some of them, the returned error
+// lists each of them.
 func (c *Client) Copy(ctx context.Context, name, dest string, options *CopyOptions) error {
 	if options == nil {
 		options = new(CopyOptions)
@@ -273,15 +272,13 @@ func (c *Client) Copy(ctx context.Context, name, dest string, options *CopyOptio
 	req.Header.Set("Overwrite", internal.FormatOverwrite(!options.NoOverwrite))
 	req.Header.Set("Depth", depth.String())
 
-	resp, err := c.ic.Do(req.WithContext(ctx))
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	return nil
+	return c.ic.DoAndCheckMultiStatus(req.WithContext(ctx))
 }
 
 // Move moves a file.
+//
+// If the file is a directory and the server fails to move some of its
+// descendants, the returned error lists each of them.
 func (c *Client) Move(ctx context.Context, name, dest string, options *MoveOptions) error {
 	if options == nil {
 		options = new(MoveOptions)
@@ -295,10 +292,5 @@ func (c *Client) Move(ctx context.Context, name, dest string, options *MoveOptio
 	req.Header.Set("Destination", c.ic.ResolveHref(dest).String())
 	req.Header.Set("Overwrite", internal.FormatOverwrite(!options.NoOverwrite))
 
-	resp, err := c.ic.Do(req.WithContext(ctx))
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	return nil
+	return c.ic.DoAndCheckMultiStatus(req.WithContext(ctx))
 }
