@@ -270,12 +270,15 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
 	return internal.HTTPErrorf(http.StatusBadRequest, "caldav: expected calendar-query, calendar-multiget or sync-collection element in REPORT request")
 }
 
-func decodeTextMatch(el *textMatch) *TextMatch {
-	// TODO: handle the collation attribute
+func decodeTextMatch(el *textMatch) (*TextMatch, error) {
+	if !internal.IsSupportedCollation(el.Collation) {
+		return nil, newPreconditionError(http.StatusForbidden, PreconditionSupportedCollation)
+	}
 	return &TextMatch{
 		Text:            el.Text,
+		Collation:       el.Collation,
 		NegateCondition: bool(el.NegateCondition),
-	}
+	}, nil
 }
 
 func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {
@@ -287,7 +290,11 @@ func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {
 		pf.IsNotDefined = true
 	}
 	if el.TextMatch != nil {
-		pf.TextMatch = decodeTextMatch(el.TextMatch)
+		tm, err := decodeTextMatch(el.TextMatch)
+		if err != nil {
+			return nil, err
+		}
+		pf.TextMatch = tm
 	}
 	return pf, nil
 }
@@ -301,7 +308,11 @@ func decodePropFilter(el *propFilter) (*PropFilter, error) {
 		pf.IsNotDefined = true
 	}
 	if el.TextMatch != nil {
-		pf.TextMatch = decodeTextMatch(el.TextMatch)
+		tm, err := decodeTextMatch(el.TextMatch)
+		if err != nil {
+			return nil, err
+		}
+		pf.TextMatch = tm
 	}
 	if el.TimeRange != nil {
 		pf.Start, pf.End = el.TimeRange.bounds()

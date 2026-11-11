@@ -265,6 +265,7 @@ func encodeParamFilter(pf *ParamFilter) (*paramFilter, error) {
 func encodeTextMatch(tm *TextMatch) *textMatch {
 	return &textMatch{
 		Text:            tm.Text,
+		Collation:       tm.Collation,
 		NegateCondition: negateCondition(tm.NegateCondition),
 		MatchType:       matchType(tm.MatchType),
 	}
