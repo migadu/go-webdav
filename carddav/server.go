@@ -134,7 +134,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Path == "/.well-known/carddav" {
+	if internal.SamePath(r.URL.Path, "/.well-known/carddav") {
 		principalPath, err := h.Backend.CurrentUserPrincipal(r.Context())
 		if err != nil {
 			http.Error(w, "carddav: failed to determine current user principal", http.StatusInternalServerError)
