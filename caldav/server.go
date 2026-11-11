@@ -675,6 +675,9 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 
 	if b.resourceTypeAtPath(r.Context(), r.URL.Path) != resourceTypeCalendarObject {
 		allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "MKCOL", "MKCALENDAR"}
+		if _, ok := b.Backend.(CalendarUpdater); ok {
+			allow = append(allow, "PROPPATCH")
+		}
 		// Advertise WebDAV-Push for the collections supporting it
 		// (draft-bitfire-webdav-push section 2)
 		if info, err := b.pushInfo(r.Context(), r.URL.Path); err != nil {
@@ -927,9 +930,6 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 			return &internal.CurrentUserPrincipal{Href: internal.Href{Path: path}}, nil
 		},
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, calendarName)),
-		calendarDescriptionName: internal.PropFindValue(&calendarDescription{
-			Description: cal.Description,
-		}),
 		supportedCalendarDataName: internal.PropFindValue(&supportedCalendarData{
 			Types: []calendarDataType{
 				{ContentType: ical.MIMEType, Version: "2.0"},
@@ -1235,8 +1235,33 @@ func (b *backend) propPatchCalendar(r *http.Request, updater CalendarUpdater, up
 				}
 			}
 			calUpdate.Description = &v.Description
+		case calendarColorName:
+			var color string
+			if !remove {
+				var v calendarColor
+				if err := raw.Decode(&v); err != nil {
+					return &internal.HTTPError{Code: http.StatusConflict, Err: err}
+				}
+				color = strings.TrimSpace(v.Color)
+			}
+			calUpdate.Color = &color
+		case calendarTimezoneName:
+			if remove {
+				calUpdate.Timezone = nil
+				calUpdate.RemoveTimezone = true
+				break
+			}
+			var v calendarTimezone
+			if err := raw.Decode(&v); err != nil {
+				return &internal.HTTPError{Code: http.StatusConflict, Err: err}
+			}
+			tz, err := decodeCalendarTimezone(strings.TrimSpace(v.Timezone))
+			if err != nil {
+				return err
+			}
+			calUpdate.Timezone = tz
+			calUpdate.RemoveTimezone = false
 		default:
-			// TODO: calendar-color and calendar-timezone
 			return internal.HTTPErrorf(http.StatusForbidden, "caldav: property cannot be modified")
 		}
 		return nil
