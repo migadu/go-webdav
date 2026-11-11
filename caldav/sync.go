@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/xml"
 	"net/http"
-	"strings"
 
 	"github.com/emersion/go-webdav/internal"
 )
@@ -43,10 +42,7 @@ type SyncBackend interface {
 // calendar. The Depth header is ignored: the report always applies to the
 // calendar's members.
 func (h *Handler) handleSyncCollection(r *http.Request, w http.ResponseWriter, sc *internal.SyncCollectionQuery) error {
-	b := backend{
-		Backend: h.Backend,
-		Prefix:  strings.TrimSuffix(h.Prefix, "/"),
-	}
+	b := h.newBackend()
 	syncBackend, ok := h.Backend.(SyncBackend)
 	if !ok || b.resourceTypeAtPath(r.Context(), r.URL.Path) != resourceTypeCalendar {
 		return internal.NewConditionError(http.StatusForbidden, internal.SupportedReportName)

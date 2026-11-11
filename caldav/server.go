@@ -186,6 +186,21 @@ type Handler struct {
 	Prefix  string
 }
 
+func (h *Handler) newBackend() backend {
+	p := h.Prefix
+	if p != "" {
+		p = path.Clean(p)
+		if !strings.HasPrefix(p, "/") {
+			p = "/" + p
+		}
+		p = strings.TrimSuffix(p, "/")
+	}
+	return backend{
+		Backend: h.Backend,
+		Prefix:  p,
+	}
+}
+
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.Backend == nil {
@@ -201,6 +216,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		http.Redirect(w, r, principalPath, http.StatusPermanentRedirect)
+		return
+	}
+
+	b := h.newBackend()
+	if !b.inPrefix(r.URL.Path) {
+		if r.Method == http.MethodDelete {
+			if pb, ok := h.Backend.(PushBackend); ok {
+				if handled, err := h.servePush(w, r, pb); handled {
+					if err != nil {
+						internal.ServeError(w, err)
+					}
+					return
+				}
+			}
+		}
+		internal.ServeError(w, internal.HTTPErrorf(http.StatusNotFound, "caldav: resource outside handler prefix"))
 		return
 	}
 
@@ -222,10 +253,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
-		b := backend{
-			Backend: h.Backend,
-			Prefix:  strings.TrimSuffix(h.Prefix, "/"),
-		}
 		hh := internal.Handler{Backend: &b}
 		hh.ServeHTTP(w, r)
 	}
@@ -237,10 +264,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handleMkcalendar handles MKCALENDAR requests, see RFC 4791 section 5.3.1.
 func (h *Handler) handleMkcalendar(w http.ResponseWriter, r *http.Request) error {
-	b := backend{
-		Backend: h.Backend,
-		Prefix:  strings.TrimSuffix(h.Prefix, "/"),
-	}
+	b := h.newBackend()
 	if b.resourceTypeAtPath(r.Context(), r.URL.Path) != resourceTypeCalendar {
 		return newPreconditionError(http.StatusForbidden, PreconditionCalendarCollectionLocationOk)
 	}
@@ -508,10 +532,7 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *cal
 		return err
 	}
 
-	b := backend{
-		Backend: h.Backend,
-		Prefix:  strings.TrimSuffix(h.Prefix, "/"),
-	}
+	b := h.newBackend()
 	return internal.StreamMultiStatus(w, r, func(mw *internal.MultiStatusWriter) error {
 		for i := range cos {
 			resp, err := b.propFindCalendarObject(r.Context(), &propfind, true, &cos[i])
@@ -562,36 +583,46 @@ func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multige
 		dataReq = *decoded
 	}
 
+	b := h.newBackend()
+
 	var objects map[string]*CalendarObject
 	var objErrResps map[string]internal.Response
 	if mb, ok := h.Backend.(CalendarObjectsBackend); ok {
-		paths := make([]string, len(multiget.Hrefs))
-		for i, href := range multiget.Hrefs {
-			paths[i] = href.Path
+		paths := make([]string, 0, len(multiget.Hrefs))
+		for _, href := range multiget.Hrefs {
+			if b.inPrefix(href.Path) {
+				paths = append(paths, href.Path)
+			}
 		}
-		l, err := mb.GetCalendarObjects(ctx, paths, &dataReq)
-		errResps, err := internal.HrefErrorResponses(err)
-		if err != nil {
-			return err
-		}
-		objects = make(map[string]*CalendarObject, len(l))
-		for i := range l {
-			objects[l[i].Path] = &l[i]
-		}
-		objErrResps = make(map[string]internal.Response, len(errResps))
-		for _, resp := range errResps {
-			if len(resp.Hrefs) > 0 {
-				objErrResps[resp.Hrefs[0].Path] = resp
+		objects = make(map[string]*CalendarObject, len(paths))
+		if len(paths) > 0 {
+			l, err := mb.GetCalendarObjects(ctx, paths, &dataReq)
+			errResps, err := internal.HrefErrorResponses(err)
+			if err != nil {
+				return err
+			}
+			for i := range l {
+				objects[l[i].Path] = &l[i]
+			}
+			objErrResps = make(map[string]internal.Response, len(errResps))
+			for _, resp := range errResps {
+				if len(resp.Hrefs) > 0 {
+					objErrResps[resp.Hrefs[0].Path] = resp
+				}
 			}
 		}
 	}
 
-	b := backend{
-		Backend: h.Backend,
-		Prefix:  strings.TrimSuffix(h.Prefix, "/"),
-	}
 	return internal.StreamMultiStatus(w, r, func(mw *internal.MultiStatusWriter) error {
 		for _, href := range multiget.Hrefs {
+			if !b.inPrefix(href.Path) {
+				resp := internal.NewErrorResponse(href.Path, internal.HTTPErrorf(http.StatusNotFound, "caldav: calendar object not found"))
+				if err := mw.WriteResponse(resp); err != nil {
+					return err
+				}
+				continue
+			}
+
 			var co *CalendarObject
 			var err error
 			if objects != nil {
@@ -647,8 +678,13 @@ const (
 // found by its path rather than by its depth.
 const resourceTypeScheduleInbox resourceType = -1
 
+const resourceTypeInvalid resourceType = -2
+
 func (b *backend) resourceTypeAtPath(ctx context.Context, reqPath string) resourceType {
 	reqPath = path.Clean(reqPath)
+	if !b.inPrefix(reqPath) {
+		return resourceTypeInvalid
+	}
 	p := strings.TrimPrefix(reqPath, b.Prefix)
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
@@ -692,6 +728,11 @@ func (b *backend) scheduleInbox(ctx context.Context) (*Inbox, error) {
 }
 
 func (b *backend) Options(r *http.Request) (caps []string, allow []string, err error) {
+	resType := b.resourceTypeAtPath(r.Context(), r.URL.Path)
+	if resType == resourceTypeInvalid {
+		return nil, nil, internal.HTTPErrorf(http.StatusNotFound, "caldav: resource outside handler prefix")
+	}
+
 	caps = []string{"calendar-access"}
 
 	// The capability asserts that the backend performs implicit scheduling,
@@ -702,7 +743,7 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 		caps = append(caps, "calendar-auto-schedule")
 	}
 
-	if b.resourceTypeAtPath(r.Context(), r.URL.Path) != resourceTypeCalendarObject {
+	if resType != resourceTypeCalendarObject {
 		allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "MKCOL", "MKCALENDAR"}
 		if _, ok := b.Backend.(CalendarUpdater); ok {
 			allow = append(allow, "PROPPATCH")
@@ -778,6 +819,8 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 	var dataReq CalendarCompRequest
 
 	switch resType {
+	case resourceTypeInvalid:
+		return internal.HTTPErrorf(http.StatusNotFound, "caldav: resource outside handler prefix")
 	case resourceTypeRoot:
 		resp, err := b.propFindRoot(ctx, r.URL.Path, propfind)
 		if err != nil {

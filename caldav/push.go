@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/xml"
 	"net/http"
-	"strings"
 
 	"github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/internal"
@@ -118,10 +117,7 @@ func (b *backend) addPushProps(ctx context.Context, propfind *internal.PropFind,
 func (h *Handler) servePush(w http.ResponseWriter, r *http.Request, pb PushBackend) (bool, error) {
 	switch r.Method {
 	case http.MethodPost:
-		b := backend{
-			Backend: h.Backend,
-			Prefix:  strings.TrimSuffix(h.Prefix, "/"),
-		}
+		b := h.newBackend()
 		info, err := b.pushInfo(r.Context(), r.URL.Path)
 		if err != nil {
 			return true, err

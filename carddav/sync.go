@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/xml"
 	"net/http"
-	"strings"
 
 	"github.com/emersion/go-webdav/internal"
 )
@@ -47,10 +46,7 @@ type SyncBackend interface {
 // address book. The Depth header is ignored: the report always applies to the
 // address book's members.
 func (h *Handler) handleSyncCollection(r *http.Request, w http.ResponseWriter, sc *internal.SyncCollectionQuery) error {
-	b := backend{
-		Backend: h.Backend,
-		Prefix:  strings.TrimSuffix(h.Prefix, "/"),
-	}
+	b := h.newBackend()
 	syncBackend, ok := h.Backend.(SyncBackend)
 	if !ok || b.resourceTypeAtPath(r.URL.Path) != resourceTypeAddressBook {
 		return internal.NewConditionError(http.StatusForbidden, internal.SupportedReportName)
