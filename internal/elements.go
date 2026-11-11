@@ -382,12 +382,21 @@ type GetETag struct {
 	ETag    ETag     `xml:",chardata"`
 }
 
+// ETag is an entity-tag's opaque-tag, without the surrounding double quotes.
+//
+// An opaque-tag is a quoted string without escapes: a backslash is an ordinary
+// character in it (RFC 7232 section 2.3).
 type ETag string
 
 func (etag *ETag) UnmarshalText(b []byte) error {
-	s, err := strconv.Unquote(string(b))
-	if err != nil {
-		return fmt.Errorf("webdav: failed to unquote ETag: %v", err)
+	s := strings.TrimSpace(string(b))
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = s[1 : len(s)-1]
+	}
+	// A value without the surrounding double quotes is out of spec, but some
+	// servers send it so and it is still usable as an opaque-tag.
+	if strings.Contains(s, `"`) {
+		return fmt.Errorf("webdav: malformed ETag %q", b)
 	}
 	*etag = ETag(s)
 	return nil
@@ -398,7 +407,7 @@ func (etag ETag) MarshalText() ([]byte, error) {
 }
 
 func (etag ETag) String() string {
-	return fmt.Sprintf("%q", string(etag))
+	return `"` + string(etag) + `"`
 }
 
 // https://tools.ietf.org/html/rfc4918#section-14.5

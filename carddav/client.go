@@ -323,12 +323,12 @@ func populateAddressObject(ao *AddressObject, h http.Header) error {
 		}
 		ao.Path = u.Path
 	}
-	if etag := h.Get("ETag"); etag != "" {
-		etag, err := strconv.Unquote(etag)
-		if err != nil {
+	if s := h.Get("ETag"); s != "" {
+		var etag internal.ETag
+		if err := etag.UnmarshalText([]byte(s)); err != nil {
 			return err
 		}
-		ao.ETag = etag
+		ao.ETag = string(etag)
 	}
 	if contentLength := h.Get("Content-Length"); contentLength != "" {
 		n, err := strconv.ParseInt(contentLength, 10, 64)
