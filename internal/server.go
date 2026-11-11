@@ -502,6 +502,11 @@ func (h *Handler) handlePropfind(w http.ResponseWriter, r *http.Request) error {
 	} else {
 		return HTTPErrorf(http.StatusBadRequest, "webdav: unsupported request body")
 	}
+	// Check it before the backend looks for resources: otherwise the
+	// request fails only if one is found
+	if err := CheckPropFind(&propfind); err != nil {
+		return err
+	}
 
 	depth := DepthInfinity
 	if s := r.Header.Get("Depth"); s != "" {
