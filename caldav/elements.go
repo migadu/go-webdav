@@ -236,10 +236,11 @@ func (t *dateWithUTCTime) MarshalText() ([]byte, error) {
 
 // Request variant of https://tools.ietf.org/html/rfc4791#section-9.6
 type calendarDataReq struct {
-	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav calendar-data"`
-	Comp    *comp    `xml:"comp,omitempty"`
-	Expand  *expand  `xml:"expand,omitempty"`
-	// TODO: limit-recurrence-set, limit-freebusy-set
+	XMLName            xml.Name            `xml:"urn:ietf:params:xml:ns:caldav calendar-data"`
+	Comp               *comp               `xml:"comp,omitempty"`
+	Expand             *expand             `xml:"expand,omitempty"`
+	LimitRecurrenceSet *limitRecurrenceSet `xml:"limit-recurrence-set,omitempty"`
+	LimitFreeBusySet   *limitFreeBusySet   `xml:"limit-freebusy-set,omitempty"`
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.6.1
@@ -254,17 +255,35 @@ type comp struct {
 	Comp    []comp    `xml:"comp,omitempty"`
 }
 
-type expand struct {
-	XMLName xml.Name        `xml:"urn:ietf:params:xml:ns:caldav expand"`
-	Start   dateWithUTCTime `xml:"start,attr"`
-	End     dateWithUTCTime `xml:"end,attr"`
+// requiredTimeRange holds the start and end attributes of the expand,
+// limit-recurrence-set and limit-freebusy-set elements. Both are required;
+// they are pointers to tell a missing attribute from a zero time.
+type requiredTimeRange struct {
+	Start *dateWithUTCTime `xml:"start,attr,omitempty"`
+	End   *dateWithUTCTime `xml:"end,attr,omitempty"`
 }
 
-func (e *expand) request() *CalendarExpandRequest {
-	return &CalendarExpandRequest{
-		Start: time.Time(e.Start),
-		End:   time.Time(e.End),
-	}
+func newRequiredTimeRange(start, end time.Time) requiredTimeRange {
+	s, e := dateWithUTCTime(start), dateWithUTCTime(end)
+	return requiredTimeRange{Start: &s, End: &e}
+}
+
+// https://tools.ietf.org/html/rfc4791#section-9.6.5
+type expand struct {
+	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav expand"`
+	requiredTimeRange
+}
+
+// https://tools.ietf.org/html/rfc4791#section-9.6.6
+type limitRecurrenceSet struct {
+	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav limit-recurrence-set"`
+	requiredTimeRange
+}
+
+// https://tools.ietf.org/html/rfc4791#section-9.6.7
+type limitFreeBusySet struct {
+	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav limit-freebusy-set"`
+	requiredTimeRange
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.6.4

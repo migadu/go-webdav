@@ -119,10 +119,34 @@ type CalendarCompRequest struct {
 	AllComps bool
 	Comps    []CalendarCompRequest
 
+	// The fields below apply to the whole calendar data, so only the
+	// outermost request has them. The server passes them on: applying them
+	// to the calendar objects returned is up to the backend.
+
+	// Expand asks for recurring components to be expanded into the instances
+	// overlapping the time range (RFC 4791 section 9.6.5).
 	Expand *CalendarExpandRequest
+	// LimitRecurrenceSet asks for, of the overridden instances of each
+	// recurring component, only those which impact the time range: their
+	// current or original time overlaps it, or, through the RANGE parameter
+	// of their RECURRENCE-ID, they change instances which do. The master
+	// component is still returned (RFC 4791 section 9.6.6). It can't be used
+	// with Expand.
+	LimitRecurrenceSet *CalendarLimitRequest
+	// LimitFreeBusySet asks for only the FREEBUSY property values of
+	// VFREEBUSY components which overlap the time range (RFC 4791 section
+	// 9.6.7).
+	LimitFreeBusySet *CalendarLimitRequest
 }
 
 type CalendarExpandRequest struct {
+	Start, End time.Time
+}
+
+// CalendarLimitRequest is the time range of a limit-recurrence-set or
+// limit-freebusy-set request. Start is inclusive, End is exclusive and after
+// Start.
+type CalendarLimitRequest struct {
 	Start, End time.Time
 }
 

@@ -262,6 +262,10 @@ func encodeCalendarCompReq(c *CalendarCompRequest) (*comp, error) {
 }
 
 func encodeCalendarReq(c *CalendarCompRequest) (*internal.Prop, error) {
+	if c.Expand != nil && c.LimitRecurrenceSet != nil {
+		// See RFC 4791 section 9.6
+		return nil, fmt.Errorf("caldav: only one of Expand or LimitRecurrenceSet can be set in a calendar data request")
+	}
 	if !c.isEmpty() && c.Name == "" {
 		// The outermost component is the calendar itself (RFC 4791 section
 		// 9.6.1), and the name attribute is required
@@ -274,9 +278,16 @@ func encodeCalendarReq(c *CalendarCompRequest) (*internal.Prop, error) {
 		return nil, err
 	}
 
-	expandReq := encodeExpandRequest(c.Expand)
-
-	calDataReq := calendarDataReq{Comp: compReq, Expand: expandReq}
+	calDataReq := calendarDataReq{Comp: compReq}
+	if e := c.Expand; e != nil {
+		calDataReq.Expand = &expand{requiredTimeRange: newRequiredTimeRange(e.Start, e.End)}
+	}
+	if l := c.LimitRecurrenceSet; l != nil {
+		calDataReq.LimitRecurrenceSet = &limitRecurrenceSet{requiredTimeRange: newRequiredTimeRange(l.Start, l.End)}
+	}
+	if l := c.LimitFreeBusySet; l != nil {
+		calDataReq.LimitFreeBusySet = &limitFreeBusySet{requiredTimeRange: newRequiredTimeRange(l.Start, l.End)}
+	}
 
 	getLastModReq := internal.NewRawXMLElement(internal.GetLastModifiedName, nil, nil)
 	getETagReq := internal.NewRawXMLElement(internal.GetETagName, nil, nil)
@@ -341,17 +352,6 @@ func encodeTextMatch(tm *TextMatch) *textMatch {
 		NegateCondition: negateCondition(tm.NegateCondition),
 	}
 	return encoded
-}
-
-func encodeExpandRequest(e *CalendarExpandRequest) *expand {
-	if e == nil {
-		return nil
-	}
-	encoded := expand{
-		Start: dateWithUTCTime(e.Start),
-		End:   dateWithUTCTime(e.End),
-	}
-	return &encoded
 }
 
 // doCalendarObjectList performs req, a calendar-query or calendar-multiget
