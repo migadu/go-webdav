@@ -82,6 +82,34 @@ func (c *Client) FindAddressBookHomeSet(ctx context.Context, principal string) (
 	return resp.HrefPath(&prop.Href), nil
 }
 
+// FindMeCard returns the path of the address object holding the user's own
+// contact, the "me card" of Apple's address book clients, which servers such
+// as SabreDAV and CalendarServer report with the CalendarServer me-card
+// property of the address book home set (see
+// https://sabre.io/dav/carddav-me-card/). It returns an empty path if the
+// server doesn't report a me card.
+func (c *Client) FindMeCard(ctx context.Context, addressBookHomeSet string) (string, error) {
+	propfind := internal.NewPropNamePropFind(meCardName)
+	resp, err := c.ic.PropFindFlat(ctx, addressBookHomeSet, propfind)
+	if err != nil {
+		return "", err
+	}
+	if err := resp.Err(); err != nil {
+		return "", err
+	}
+
+	var prop meCard
+	if err := resp.DecodeProp(&prop); internal.IsNotFound(err) {
+		return "", nil
+	} else if err != nil {
+		return "", err
+	}
+	if prop.Href == (internal.Href{}) {
+		return "", nil
+	}
+	return resp.HrefPath(&prop.Href), nil
+}
+
 func decodeSupportedAddressData(supported *supportedAddressData) []AddressDataType {
 	l := make([]AddressDataType, len(supported.Types))
 	for i, t := range supported.Types {

@@ -112,6 +112,19 @@ type AddressObjectCopyMover interface {
 	MoveAddressObject(ctx context.Context, src, dst string, opts *MoveAddressObjectOptions) (created bool, err error)
 }
 
+// MeCardBackend is an optional interface a Backend can implement to report
+// which address object holds the current user's own contact, the "me card" of
+// Apple's address book clients. The Handler serves it as the CalendarServer
+// me-card property of the address book home set, where these clients look
+// for it (see https://sabre.io/dav/carddav-me-card/), to the PROPFIND
+// requests naming the property: it isn't returned for allprop. The property
+// can't be modified with PROPPATCH.
+type MeCardBackend interface {
+	// MeCardPath returns the path of the address object holding the current
+	// user's own contact, or an empty string if there's none.
+	MeCardPath(ctx context.Context) (string, error)
+}
+
 // Handler handles CardDAV HTTP requests. It can be used to create a CardDAV
 // server.
 //
@@ -676,7 +689,48 @@ func (b *backend) propFindHomeSet(ctx context.Context, propfind *internal.PropFi
 	}
 	b.addACLProps(ctx, props)
 	b.addPushProps(ctx, propfind, homeSetPath, props)
+	b.addMeCardProp(ctx, propfind, props)
 	return internal.NewPropFindResponse(homeSetPath, propfind, props)
+}
+
+// addMeCardProp adds the me-card property to props, the properties of the
+// address book home set, if the backend implements MeCardBackend and reports a
+// me card. The backend is only asked for it if the PROPFIND request may
+// return the property.
+func (b *backend) addMeCardProp(ctx context.Context, propfind *internal.PropFind, props map[xml.Name]internal.PropFindFunc) {
+	mb, ok := b.Backend.(MeCardBackend)
+	if !ok || !propFindMayReturn(propfind, meCardName) {
+		return
+	}
+	p, err := mb.MeCardPath(ctx)
+	if err != nil {
+		props[meCardName] = func(*internal.RawXMLValue) (interface{}, error) {
+			return nil, err
+		}
+	} else if p != "" {
+		props[meCardName] = internal.PropFindValue(&meCard{Href: internal.Href{Path: p}})
+	}
+}
+
+// propFindMayReturn reports whether propfind may return the property name,
+// which allprop doesn't return: the request names it, or asks for the names
+// of all the properties.
+func propFindMayReturn(propfind *internal.PropFind, name xml.Name) bool {
+	if propfind.PropName != nil {
+		return true
+	}
+	var raws []internal.RawXMLValue
+	if propfind.Prop != nil {
+		raws = propfind.Prop.Raw
+	} else if propfind.AllProp != nil && propfind.Include != nil {
+		raws = propfind.Include.Raw
+	}
+	for i := range raws {
+		if n, ok := raws[i].XMLName(); ok && n == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *backend) propFindAddressBook(ctx context.Context, propfind *internal.PropFind, ab *AddressBook) (*internal.Response, error) {
