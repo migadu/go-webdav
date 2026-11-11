@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -300,8 +301,56 @@ func (c *Client) NewXMLRequest(method string, path string, v interface{}) (*http
 	return req, nil
 }
 
+// maxRedirects is the number of redirects a request follows at most, as with
+// http.Client.
+const maxRedirects = 10
+
+// sensitiveHeaders are the request header fields http.Client doesn't copy to
+// the request following a redirect to another domain than the one of the
+// request, or than one of its subdomains.
+var sensitiveHeaders = []string{
+	"Authorization",
+	"Www-Authenticate",
+	"Cookie",
+	"Cookie2",
+	"Proxy-Authorization",
+	"Proxy-Authenticate",
+}
+
+// isDomainOrSubdomain reports whether host is the domain parent or one of
+// its subdomains, as http.Client checks it to copy the sensitive header
+// fields to the request following a redirect. An IP address only matches
+// itself.
+func isDomainOrSubdomain(host, parent string) bool {
+	host, parent = strings.ToLower(host), strings.ToLower(parent)
+	if host == parent {
+		return true
+	}
+	if strings.ContainsAny(host, ":%") {
+		return false
+	}
+	return strings.HasSuffix(host, "."+parent)
+}
+
+// Do sends req with the HTTP client, and returns its response, or an
+// *HTTPError if its status isn't 2xx.
+//
+// http.Client follows a 301 Moved Permanently or 302 Found redirect with a GET
+// request, whatever the method of the request, but RFC 9110 sections 15.4.2
+// and 15.4.3 only allow changing POST to GET. Apache, for instance, redirects
+// a PROPFIND request for a collection without its trailing slash this way. Do
+// discards the response to such a GET request, and sends req again to its URL
+// with the method, header fields and body of req. The body is sent again with
+// req.GetBody, which http.NewRequest sets for in-memory bodies: without it, Do
+// returns an *HTTPError with the redirect status, as http.Client does for a
+// 307 or 308 redirect. As with http.Client, at most 10 redirects are followed,
+// and the sensitive header fields, such as Authorization and Cookie, are left
+// out once a redirect leaves the domain of req and its subdomains; an HTTP
+// client adding credentials to every request, such as the one returned by
+// webdav.HTTPClientWithBasicAuth, adds them anyway. A 303 See Other redirect,
+// which asks for a GET request, and a POST request are left to the HTTP client.
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
-	resp, err := c.http.Do(req)
+	resp, err := c.send(req)
 	if err != nil {
 		return nil, err
 	}
@@ -337,6 +386,108 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		return nil, &HTTPError{Code: resp.StatusCode, Err: wrappedErr}
 	}
 	return resp, nil
+}
+
+// send sends req with the HTTP client, keeping its method across 301 and 302
+// redirects (see Do).
+func (c *Client) send(req *http.Request) (*http.Response, error) {
+	switch req.Method {
+	case "", http.MethodGet, http.MethodHead, http.MethodPost:
+		return c.http.Do(req)
+	}
+
+	r := req
+	redirects := 0
+	stripSensitive := false
+	for {
+		resp, err := c.http.Do(r)
+		if err != nil {
+			return nil, err
+		}
+
+		// The requests the HTTP client sent to follow redirects, in order,
+		// and the first one with another method than req
+		hops := redirectHops(resp)
+		i := slices.IndexFunc(hops, func(hop *http.Request) bool {
+			return hop.Method != req.Method
+		})
+		if i < 0 {
+			return resp, nil
+		}
+		hop := hops[i]
+		if code := hop.Response.StatusCode; code != http.StatusMovedPermanently && code != http.StatusFound {
+			// E.g. 303 See Other: the response is to be fetched with GET
+			return resp, nil
+		}
+		discardResponse(resp)
+
+		redirects += i + 1
+		if redirects > maxRedirects {
+			return nil, fmt.Errorf("webdav: %v %v: stopped after %v redirects", req.Method, req.URL.Redacted(), maxRedirects)
+		}
+		for _, h := range hops[:i+1] {
+			if !isDomainOrSubdomain(h.URL.Hostname(), req.URL.Hostname()) {
+				stripSensitive = true
+			}
+		}
+
+		r, err = redirectedRequest(req, hop, stripSensitive)
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+// redirectHops returns the requests an HTTP client sent to follow redirects
+// before getting resp, in order: none if resp is the response to the request
+// it was given. They're found with Request.Response, which http.Client sets.
+func redirectHops(resp *http.Response) []*http.Request {
+	var hops []*http.Request
+	for r := resp.Request; r != nil && r.Response != nil; r = r.Response.Request {
+		hops = append(hops, r)
+	}
+	slices.Reverse(hops)
+	return hops
+}
+
+// discardResponse closes the body of resp, reading a small one first so that
+// the connection can be reused, as http.Client does with a redirect.
+func discardResponse(resp *http.Response) {
+	const maxBodySlurpSize = 2 << 10
+	if resp.ContentLength == -1 || resp.ContentLength <= maxBodySlurpSize {
+		io.CopyN(io.Discard, resp.Body, maxBodySlurpSize)
+	}
+	resp.Body.Close()
+}
+
+// redirectedRequest returns a copy of req, with a new body, to send to the URL
+// of hop, the request an HTTP client sent with another method than req to
+// follow a redirect. If stripSensitive is true, the sensitive header fields of
+// req are left out.
+func redirectedRequest(req, hop *http.Request, stripSensitive bool) (*http.Request, error) {
+	u := *hop.URL
+	r := req.Clone(req.Context())
+	r.URL = &u
+	r.Host = hop.Host
+	if req.Body != nil && req.Body != http.NoBody {
+		if req.GetBody == nil {
+			return nil, &HTTPError{
+				Code: hop.Response.StatusCode,
+				Err:  fmt.Errorf("webdav: can't send the body of the %v request again to follow the redirect to %v", req.Method, u.Redacted()),
+			}
+		}
+		body, err := req.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		r.Body = body
+	}
+	if stripSensitive {
+		for _, k := range sensitiveHeaders {
+			r.Header.Del(k)
+		}
+	}
+	return r, nil
 }
 
 func (c *Client) DoMultiStatus(req *http.Request) (*MultiStatus, error) {

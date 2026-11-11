@@ -58,6 +58,14 @@ type Client struct {
 // in the endpoint URL are only sent to the endpoint's scheme and host, but an
 // HTTPClient adding credentials to its requests, such as the one returned by
 // HTTPClientWithBasicAuth, adds them for any host.
+//
+// http.Client follows a 301 Moved Permanently or 302 Found redirect with a GET
+// request, which RFC 9110 only allows for a POST request. A request of the
+// client redirected this way, e.g. a PROPFIND request for a collection without
+// its trailing slash, is sent again to the redirect target with its own
+// method, and the response to the GET request is discarded. The body of a file
+// written with Create can't be sent again: such a redirect is returned by its
+// Close, as an *HTTPError with the redirect status.
 func NewClient(c HTTPClient, endpoint string) (*Client, error) {
 	ic, err := internal.NewClient(c, endpoint)
 	if err != nil {
