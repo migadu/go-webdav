@@ -384,18 +384,20 @@ func (c *Client) GetAddressObject(ctx context.Context, path string) (*AddressObj
 	return ao, nil
 }
 
-func (c *Client) PutAddressObject(ctx context.Context, path string, card vcard.Card) (*AddressObject, error) {
-	// TODO: add support for If-None-Match and If-Match
-
+// PutAddressObject stores card as the address object resource at path. A nil
+// opts performs an unconditional PUT; a non-nil opts may carry an If-Match
+// (overwrite only if the resource still has this ETag) or If-None-Match
+// (create only if absent) precondition. A failed precondition surfaces as an
+// *webdav.HTTPError with code 412 Precondition Failed.
+//
+// The values of opts are sent as is, so they must be in header form: a quoted
+// strong entity-tag such as "abc", a weak one such as W/"abc", a
+// comma-separated list of these, or "*". If-Match uses the strong comparison,
+// so a weak entity-tag never matches it.
+func (c *Client) PutAddressObject(ctx context.Context, path string, card vcard.Card, opts *PutAddressObjectOptions) (*AddressObject, error) {
 	// TODO: some servers want a Content-Length header, so we can't stream the
 	// request body here. See the Radicale issue:
 	// https://github.com/Kozea/Radicale/issues/1016
-
-	//pr, pw := io.Pipe()
-	//go func() {
-	//	err := vcard.NewEncoder(pw).Encode(card)
-	//	pw.CloseWithError(err)
-	//}()
 
 	var buf bytes.Buffer
 	if err := vcard.NewEncoder(&buf).Encode(card); err != nil {
@@ -404,10 +406,17 @@ func (c *Client) PutAddressObject(ctx context.Context, path string, card vcard.C
 
 	req, err := c.ic.NewRequest(http.MethodPut, path, &buf)
 	if err != nil {
-		//pr.Close()
 		return nil, err
 	}
 	req.Header.Set("Content-Type", vcard.MIMEType)
+	if opts != nil {
+		if opts.IfMatch.IsSet() {
+			req.Header.Set("If-Match", string(opts.IfMatch))
+		}
+		if opts.IfNoneMatch.IsSet() {
+			req.Header.Set("If-None-Match", string(opts.IfNoneMatch))
+		}
+	}
 
 	resp, err := c.ic.Do(req.WithContext(ctx))
 	if err != nil {
