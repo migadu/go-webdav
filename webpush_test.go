@@ -463,15 +463,27 @@ func TestSendWebPushInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	vapidKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	msg := &PushMessage{Topic: "t", ContentUpdate: true}
+	withPushResource := func(s string) WebPushSubscription {
+		return WebPushSubscription{PushResource: s, PublicKey: sub.PublicKey, AuthSecret: sub.AuthSecret}
+	}
 
 	for _, tc := range []struct {
 		name string
 		sub  WebPushSubscription
 		opts *WebPushOptions
 	}{
-		{"push resource over HTTP", WebPushSubscription{PushResource: "http://push.example.net/sub", PublicKey: sub.PublicKey, AuthSecret: sub.AuthSecret}, nil},
-		{"relative push resource", WebPushSubscription{PushResource: "/sub", PublicKey: sub.PublicKey, AuthSecret: sub.AuthSecret}, nil},
+		{"push resource over HTTP", withPushResource("http://push.example.net/sub"), nil},
+		{"relative push resource", withPushResource("/sub"), nil},
+		{"push resource with userinfo", withPushResource(strings.Replace(srv.URL, "https://", "https://user:secret@", 1) + "/push/sub"), nil},
+		{"push resource with fragment", withPushResource(srv.URL + "/push/sub#frag"), nil},
+		{"VAPID subject without scheme", *sub, &WebPushOptions{VAPIDKey: vapidKey, VAPIDSubject: "push@example.com"}},
+		{"VAPID subject over HTTP", *sub, &WebPushOptions{VAPIDKey: vapidKey, VAPIDSubject: "http://example.com/contact"}},
+		{"empty mailto VAPID subject", *sub, &WebPushOptions{VAPIDKey: vapidKey, VAPIDSubject: "mailto:"}},
 		{"invalid urgency", *sub, &WebPushOptions{Urgency: "urgent"}},
 		{"topic too long", *sub, &WebPushOptions{Topic: strings.Repeat("a", 33)}},
 		{"topic outside base64url alphabet", *sub, &WebPushOptions{Topic: "a b"}},
@@ -486,5 +498,147 @@ func TestSendWebPushInvalid(t *testing.T) {
 	}
 	if n := len(requests()); n != 0 {
 		t.Errorf("push service received %d requests, want none", n)
+	}
+}
+
+// The aud claim of VAPID tokens is the serialization of the origin of the
+// push resource (RFC 8292 section 2, RFC 6454 section 6.1): a lowercase
+// host, and the port in base ten unless it's the default one.
+func TestVAPIDAudience(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		pushResource string
+		want         string
+	}{
+		{"https://push.example.net/sub", "https://push.example.net"},
+		{"https://Push.Example.NET/sub", "https://push.example.net"},
+		{"https://push.example.net:443/sub", "https://push.example.net"},
+		{"https://push.example.net:0443/sub", "https://push.example.net"},
+		{"https://push.example.net:/sub", "https://push.example.net"},
+		{"https://push.example.net:8443/sub", "https://push.example.net:8443"},
+		{"https://push.example.net:08443/sub", "https://push.example.net:8443"},
+		{"https://user@push.example.net/sub", "https://push.example.net"},
+		{"https://192.0.2.1/sub", "https://192.0.2.1"},
+		{"https://[2001:DB8::1]:443/sub", "https://[2001:db8::1]"},
+		{"https://[2001:db8::1]:8443/sub", "https://[2001:db8::1]:8443"},
+	} {
+		u, err := url.Parse(tc.pushResource)
+		if err != nil {
+			t.Fatal(err)
+		}
+		auth, err := vapidAuthorization(key, "", u, time.Now().Add(time.Hour))
+		if err != nil {
+			t.Errorf("%v: vapidAuthorization() = %v", tc.pushResource, err)
+			continue
+		}
+		token, k := parseVAPIDAuthorization(t, auth)
+		if claims := verifyVAPID(t, token, k); claims.Aud != tc.want {
+			t.Errorf("%v: aud = %q, want %q", tc.pushResource, claims.Aud, tc.want)
+		}
+	}
+
+	u, _ := url.Parse("https://push.example.net:65536/sub")
+	if auth, err := vapidAuthorization(key, "", u, time.Now().Add(time.Hour)); err == nil {
+		t.Errorf("port 65536: vapidAuthorization() = %q, want an error", auth)
+	}
+}
+
+// The sub claim of VAPID tokens is a mailto: or an https: URI (RFC 8292
+// section 2.1).
+func TestVAPIDSubject(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse("https://push.example.net/sub")
+	for _, subject := range []string{"", "mailto:push@example.com", "MAILTO:push@example.com", "https://example.com/contact"} {
+		auth, err := vapidAuthorization(key, subject, u, time.Now().Add(time.Hour))
+		if err != nil {
+			t.Errorf("%q: vapidAuthorization() = %v", subject, err)
+			continue
+		}
+		token, k := parseVAPIDAuthorization(t, auth)
+		if claims := verifyVAPID(t, token, k); claims.Sub != subject {
+			t.Errorf("sub = %q, want %q", claims.Sub, subject)
+		}
+	}
+	for _, subject := range []string{"push@example.com", "http://example.com/contact", "mailto:", "https:///contact", "urn:example:contact", "%"} {
+		if _, err := vapidAuthorization(key, subject, u, time.Now().Add(time.Hour)); err == nil {
+			t.Errorf("%q: vapidAuthorization() succeeded, want an error", subject)
+		}
+	}
+}
+
+// newTestRedirectServer starts a server replying to every request with a
+// redirect to location, with code.
+func newTestRedirectServer(t *testing.T, code int, location string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Location", location)
+		w.WriteHeader(code)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// Without an HTTP client, SendWebPush doesn't follow redirects: the message
+// mustn't go to another origin, or over HTTP (draft-bitfire-webdav-push
+// section 7.3). RFC 8030 doesn't use redirects for delivery requests (section
+// 5).
+func TestSendWebPushRedirect(t *testing.T) {
+	target, targetRequests := newTestPushService(t, http.StatusCreated)
+	var mu sync.Mutex
+	plainRequests := 0
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		plainRequests++
+		mu.Unlock()
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(plain.Close)
+
+	// SendWebPush uses http.DefaultClient: make it trust the certificate of
+	// the test servers
+	defaultClient := http.DefaultClient
+	http.DefaultClient = target.Client()
+	t.Cleanup(func() { http.DefaultClient = defaultClient })
+
+	msg := &PushMessage{Topic: "t", ContentUpdate: true}
+	for _, code := range []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	} {
+		for _, tc := range []struct {
+			name     string
+			location string
+		}{
+			{"other origin", target.URL + "/push/sub"},
+			{"HTTP", plain.URL + "/push/sub"},
+			{"same origin", "/push/other"},
+		} {
+			srv := newTestRedirectServer(t, code, tc.location)
+			sub, _ := newTestWebPushSubscription(t, srv.URL+"/push/sub")
+			err := SendWebPush(context.Background(), nil, sub, msg, nil)
+			var httpErr *HTTPError
+			if !errors.As(err, &httpErr) || httpErr.Code != code {
+				t.Errorf("%v to %v: SendWebPush() = %v, want an HTTPError with code %v", code, tc.name, err, code)
+			}
+		}
+	}
+
+	if n := len(targetRequests()); n != 0 {
+		t.Errorf("other origin received %d requests, want none", n)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if plainRequests != 0 {
+		t.Errorf("HTTP server received %d requests, want none", plainRequests)
 	}
 }

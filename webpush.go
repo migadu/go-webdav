@@ -133,7 +133,8 @@ type WebPushOptions struct {
 	// (draft-bitfire-webdav-push section 6.2).
 	VAPIDKey *ecdsa.PrivateKey
 	// VAPIDSubject is the optional contact URI of the server, a mailto: or an
-	// https: URI, sent in the token (RFC 8292 section 2.1).
+	// https: URI, sent in the token (RFC 8292 section 2.1). Other URIs are
+	// refused.
 	VAPIDSubject string
 	// TTL is how long the push service should keep the message while the
 	// client can't be reached (RFC 8030 section 5.2). It's rounded down to
@@ -156,13 +157,20 @@ type WebPushOptions struct {
 // SendWebPush sends a push message to a Web Push subscription: it encrypts
 // the XML document of msg for the subscription (RFC 8291), and requests its
 // delivery with a POST request to the push resource (RFC 8030 section 5),
-// over TLS (draft-bitfire-webdav-push section 7.3). If c is nil,
-// http.DefaultClient is used.
+// over TLS (draft-bitfire-webdav-push section 7.3). The push resource must be
+// an https URL without userinfo or a fragment.
 //
 // A status other than 2xx from the push service is returned as an
 // *HTTPError. Push services reply 404 Not Found or 410 Gone for subscriptions
 // which are no longer valid: the backend should remove those, possibly after
 // a while (draft-bitfire-webdav-push section 4.4).
+//
+// If c is nil, http.DefaultClient is used, but redirects aren't followed:
+// they're returned as an *HTTPError too. RFC 8030 doesn't use redirects for
+// delivery requests, and following one could send the message to another
+// origin, or over plain HTTP. SendWebPush can't change the redirect policy of
+// c: an *http.Client should have a CheckRedirect function returning
+// http.ErrUseLastResponse.
 //
 // Push resources are provided by clients: backends may want c to refuse to
 // connect to the addresses of their internal network.
@@ -176,6 +184,15 @@ func SendWebPush(ctx context.Context, c HTTPClient, sub *WebPushSubscription, ms
 	}
 	if pushResource.Scheme != "https" || pushResource.Host == "" {
 		return fmt.Errorf("webdav: push resource %q isn't an https URL", sub.PushResource)
+	}
+	// The push resource is the target URI of the request: it can't have
+	// userinfo (RFC 9110 section 4.2.4), which the HTTP client would send as
+	// credentials, and a fragment isn't part of the resource
+	if pushResource.User != nil {
+		return fmt.Errorf("webdav: push resource %q has userinfo", pushResource.Redacted())
+	}
+	if pushResource.Fragment != "" {
+		return fmt.Errorf("webdav: push resource %q has a fragment", sub.PushResource)
 	}
 
 	header := make(http.Header)
@@ -226,7 +243,11 @@ func SendWebPush(ctx context.Context, c HTTPClient, sub *WebPushSubscription, ms
 	req.Header.Set("Content-Encoding", "aes128gcm")
 
 	if c == nil {
-		c = http.DefaultClient
+		noRedirect := *http.DefaultClient
+		noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+		c = &noRedirect
 	}
 	resp, err := c.Do(req)
 	if err != nil {
@@ -267,17 +288,20 @@ func vapidAuthorization(key *ecdsa.PrivateKey, subject string, pushResource *url
 	if err != nil {
 		return "", err
 	}
+	aud, err := vapidAudience(pushResource)
+	if err != nil {
+		return "", err
+	}
+	if subject != "" && !isVAPIDSubject(subject) {
+		return "", fmt.Errorf("webdav: VAPID subject %q isn't a mailto: or an https: URI", subject)
+	}
 
-	// The audience is the origin of the push resource (RFC 6454 section
-	// 6.1), without the default port
-	host := strings.ToLower(pushResource.Host)
-	host = strings.TrimSuffix(host, ":443")
 	claims, err := json.Marshal(struct {
 		Aud string `json:"aud"`
 		Exp int64  `json:"exp"`
 		Sub string `json:"sub,omitempty"`
 	}{
-		Aud: "https://" + host,
+		Aud: aud,
 		Exp: exp.Unix(),
 		Sub: subject,
 	})
@@ -299,4 +323,41 @@ func vapidAuthorization(key *ecdsa.PrivateKey, subject string, pushResource *url
 	s.FillBytes(sig[32:])
 
 	return "vapid t=" + input + "." + enc.EncodeToString(sig) + ", k=" + enc.EncodeToString(pub), nil
+}
+
+// vapidAudience returns the aud claim of the VAPID tokens of requests to
+// pushResource, an https URL: the serialization of its origin (RFC 8292
+// section 2, RFC 6454 section 6.1), with the host in lowercase, and the port
+// in base ten if it isn't the default one.
+func vapidAudience(pushResource *url.URL) (string, error) {
+	host := strings.ToLower(pushResource.Hostname())
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if s := pushResource.Port(); s != "" {
+		port, err := strconv.ParseUint(s, 10, 16)
+		if err != nil {
+			return "", fmt.Errorf("webdav: invalid push resource port %q", s)
+		}
+		if port != 443 {
+			host += ":" + strconv.FormatUint(port, 10)
+		}
+	}
+	return "https://" + host, nil
+}
+
+// isVAPIDSubject reports whether s is a mailto: or an https: URI, the contact
+// URIs of the sub claim of VAPID tokens (RFC 8292 section 2.1).
+func isVAPIDSubject(s string) bool {
+	u, err := url.Parse(s)
+	if err != nil {
+		return false
+	}
+	switch u.Scheme {
+	case "mailto":
+		return u.Opaque != ""
+	case "https":
+		return u.Host != ""
+	}
+	return false
 }
