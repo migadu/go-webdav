@@ -150,9 +150,36 @@ func (nc negateCondition) MarshalText() ([]byte, error) {
 
 // https://tools.ietf.org/html/rfc4791#section-9.9
 type timeRange struct {
-	XMLName xml.Name        `xml:"urn:ietf:params:xml:ns:caldav time-range"`
-	Start   dateWithUTCTime `xml:"start,attr,omitempty"`
-	End     dateWithUTCTime `xml:"end,attr,omitempty"`
+	XMLName xml.Name         `xml:"urn:ietf:params:xml:ns:caldav time-range"`
+	Start   *dateWithUTCTime `xml:"start,attr,omitempty"`
+	End     *dateWithUTCTime `xml:"end,attr,omitempty"`
+}
+
+// newTimeRange returns the time-range element for [start, end), leaving out
+// the attribute of a zero bound: RFC 4791 section 9.9 reads a missing start
+// as -infinity and a missing end as +infinity.
+func newTimeRange(start, end time.Time) *timeRange {
+	var tr timeRange
+	if !start.IsZero() {
+		t := dateWithUTCTime(start)
+		tr.Start = &t
+	}
+	if !end.IsZero() {
+		t := dateWithUTCTime(end)
+		tr.End = &t
+	}
+	return &tr
+}
+
+// bounds returns the start and end of the time range, zero when unbounded.
+func (tr *timeRange) bounds() (start, end time.Time) {
+	if tr.Start != nil {
+		start = time.Time(*tr.Start)
+	}
+	if tr.End != nil {
+		end = time.Time(*tr.End)
+	}
+	return start, end
 }
 
 const dateWithUTCTimeLayout = "20060102T150405Z"
