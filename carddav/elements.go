@@ -33,6 +33,17 @@ func (a *addressbookHomeSet) GetXMLName() xml.Name {
 	return addressBookHomeSetName
 }
 
+var meCardName = xml.Name{Space: internal.CalendarServerNamespace, Local: "me-card"}
+
+// meCard is the CalendarServer me-card property of an address book home set,
+// an extension of Apple's address book clients: the href of the address
+// object of the user's own contact. See https://sabre.io/dav/carddav-me-card/
+// and MeCardBackend.
+type meCard struct {
+	XMLName xml.Name      `xml:"http://calendarserver.org/ns/ me-card"`
+	Href    internal.Href `xml:"DAV: href"`
+}
+
 type addressbookDescription struct {
 	XMLName     xml.Name `xml:"urn:ietf:params:xml:ns:carddav addressbook-description"`
 	Description string   `xml:",chardata"`
