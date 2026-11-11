@@ -1354,6 +1354,7 @@ const (
 	PreconditionMaxDateTime                  PreconditionType = "max-date-time"
 	PreconditionMaxInstances                 PreconditionType = "max-instances"
 	PreconditionMaxAttendeesPerInstance      PreconditionType = "max-attendees-per-instance"
+	PreconditionSupportedCollation           PreconditionType = "supported-collation"
 )
 
 func NewPreconditionError(err PreconditionType) error {

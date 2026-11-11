@@ -150,6 +150,7 @@ type PropFilter struct {
 
 type TextMatch struct {
 	Text            string
+	Collation       string // defaults to "i;ascii-casemap"
 	NegateCondition bool
 }
 

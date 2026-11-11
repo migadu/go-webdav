@@ -973,6 +973,7 @@ const (
 	PreconditionSupportedAddressData PreconditionType = "supported-address-data"
 	PreconditionValidAddressData     PreconditionType = "valid-address-data"
 	PreconditionMaxResourceSize      PreconditionType = "max-resource-size"
+	PreconditionSupportedCollation   PreconditionType = "supported-collation"
 )
 
 func NewPreconditionError(err PreconditionType) error {
