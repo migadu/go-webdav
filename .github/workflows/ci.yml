@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [master, sora]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: ["1.25", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - name: vet
+        # The codebase has many unkeyed xml.Name literals
+        run: go vet -composites=false ./...
+      - name: test
+        run: go test -race ./...
+
+  # WebDAV conformance with litmus, see contrib/litmus.sh
+  litmus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: litmus
+        run: contrib/litmus.sh
