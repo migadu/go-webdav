@@ -45,6 +45,10 @@ func TestDiscoverContextURL(t *testing.T) {
 		{"malformed answer", fakeResolver{srv: srv, err: malformed}, "", malformed},
 		{"default port", fakeResolver{srv: srv}, "https://dav.example.com/.well-known/caldav", nil},
 		{"port and path", fakeResolver{srv: []*net.SRV{{Target: "dav.example.com.", Port: 8443}}, txt: []string{"path=/dav/"}}, "https://dav.example.com:8443/dav/", nil},
+		{"TXT with txtvers and path", fakeResolver{srv: srv, txt: []string{"txtvers=1", "path=/caldav/"}}, "https://dav.example.com/caldav/", nil},
+		{"TXT with case-insensitive PATH key", fakeResolver{srv: srv, txt: []string{"txtvers=1", "PATH=/caldav/"}}, "https://dav.example.com/caldav/", nil},
+		{"TXT with relative path", fakeResolver{srv: srv, txt: []string{"path=caldav/"}}, "https://dav.example.com/caldav/", nil},
+		{"TXT without path key falls back to well-known", fakeResolver{srv: srv, txt: []string{"txtvers=1"}}, "https://dav.example.com/.well-known/caldav", nil},
 		{"no TXT record", fakeResolver{srv: srv, txtErr: notFound}, "https://dav.example.com/.well-known/caldav", nil},
 		{"TXT refused", fakeResolver{srv: srv, txtErr: refused}, "", refused},
 		{"TXT temporary failure", fakeResolver{srv: srv, txtErr: temporary}, "", temporary},
@@ -62,6 +66,27 @@ func TestDiscoverContextURL(t *testing.T) {
 			}
 			if err != nil || got != tc.want {
 				t.Fatalf("DiscoverContextURL() = %q, %v, want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestDiscoverContextURLInvalidTXT(t *testing.T) {
+	srv := []*net.SRV{{Target: "dav.example.com.", Port: 443}}
+	for _, tc := range []struct {
+		name string
+		txt  []string
+	}{
+		{"empty path", []string{"path="}},
+		{"empty path with txtvers", []string{"txtvers=1", "path="}},
+		{"multiple path entries", []string{"path=/a/", "path=/b/"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func(r dnsResolver) { resolver = r }(resolver)
+			resolver = &fakeResolver{srv: srv, txt: tc.txt}
+
+			if got, err := DiscoverContextURL(context.Background(), "caldav", "example.com"); err == nil {
+				t.Fatalf("DiscoverContextURL() = %q, nil, want error", got)
 			}
 		})
 	}

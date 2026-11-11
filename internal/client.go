@@ -70,27 +70,32 @@ func DiscoverContextURL(ctx context.Context, service, domain string) (string, er
 		return "", err
 	}
 
-	var path string
-	switch len(txtRecords) {
-	case 0:
-		path = "/.well-known/" + service
-	case 1:
-		record := txtRecords[0]
-		if !strings.HasPrefix(record, "path=") {
-			return "", fmt.Errorf("webdav: TXT record for %s does not contain the path key", txtName)
+	var urlPath string
+	var foundPath bool
+	for _, record := range txtRecords {
+		k, v, ok := strings.Cut(record, "=")
+		if !ok || !strings.EqualFold(k, "path") {
+			continue
 		}
-
-		path = strings.TrimPrefix(record, "path=")
-		if path == "" {
+		if foundPath {
+			return "", fmt.Errorf("webdav: multiple path entries found on %s discovery TXT record", txtName)
+		}
+		if v == "" {
 			return "", fmt.Errorf("webdav: empty path for %s TXT record", txtName)
 		}
-	default: // more than 1
-		return "", fmt.Errorf("webdav: more than one entry found on %s discovery TXT record", txtName)
+		if !strings.HasPrefix(v, "/") {
+			v = "/" + v
+		}
+		urlPath = v
+		foundPath = true
+	}
+	if !foundPath {
+		urlPath = "/.well-known/" + service
 	}
 
 	u := url.URL{
 		Scheme: "https",
-		Path:   path,
+		Path:   urlPath,
 	}
 	if addr.Port == 443 {
 		u.Host = target
