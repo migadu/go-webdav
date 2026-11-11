@@ -25,8 +25,11 @@ func ServeError(w http.ResponseWriter, err error) {
 
 	var errElt *Error
 	if errors.As(err, &errElt) {
+		// The header fields must be set before the status is written
+		w.Header().Set("Content-Type", xmlContentType)
 		w.WriteHeader(code)
-		ServeXML(w).Encode(errElt)
+		w.Write([]byte(xml.Header))
+		xml.NewEncoder(w).Encode(errElt)
 		return
 	}
 
@@ -261,8 +264,11 @@ func (b *decodedBody) Close() error {
 	return b.src.Close()
 }
 
+// xmlContentType is the media type of XML responses.
+const xmlContentType = "application/xml; charset=\"utf-8\""
+
 func ServeXML(w http.ResponseWriter) *xml.Encoder {
-	w.Header().Add("Content-Type", "application/xml; charset=\"utf-8\"")
+	w.Header().Add("Content-Type", xmlContentType)
 	w.Write([]byte(xml.Header))
 	return xml.NewEncoder(w)
 }

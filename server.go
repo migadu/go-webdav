@@ -99,6 +99,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b := &backend{FileSystem: h.FileSystem, locks: h.LockSystem}
 	var ib internal.Backend = b
 	if b.locks != nil {
+		// Decode the body first, to tell lock refreshes apart
+		var err error
+		r, err = internal.DecodeRequestBody(w, r)
+		if err == nil {
+			err = b.evaluateIf(r)
+		}
+		if err != nil {
+			internal.ServeError(w, err)
+			return
+		}
 		ib = lockingBackend{b}
 	}
 	hh := internal.Handler{Backend: ib}
@@ -143,6 +153,9 @@ func NewHrefError(path string, err error) error {
 type backend struct {
 	FileSystem FileSystem
 	locks      LockSystem // nil if locking is disabled
+
+	// submitted holds the lock tokens submitted by the request
+	submitted map[string]bool
 }
 
 func (b *backend) Options(r *http.Request) (caps []string, allow []string, err error) {
@@ -355,6 +368,12 @@ func needsDeadProps(propfind *internal.PropFind, props map[xml.Name]internal.Pro
 }
 
 func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*internal.Response, error) {
+	if b.locks != nil {
+		if err := b.checkLocks(r, resourceTarget(r.URL.Path)); err != nil {
+			return nil, err
+		}
+	}
+
 	fi, err := b.FileSystem.Stat(r.Context(), r.URL.Path)
 	if err != nil {
 		return nil, err
@@ -396,7 +415,7 @@ func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*
 
 func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 	if b.locks != nil {
-		if err := b.checkLock(r, r.URL.Path); err != nil {
+		if err := b.checkWriteLocks(r, r.URL.Path); err != nil {
 			return err
 		}
 	}
@@ -434,7 +453,7 @@ func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 
 func (b *backend) Delete(r *http.Request) error {
 	if b.locks != nil {
-		if err := b.checkLock(r, r.URL.Path); err != nil {
+		if err := b.checkLocks(r, treeTarget(r.URL.Path), parentTarget(r.URL.Path)); err != nil {
 			return err
 		}
 	}
@@ -447,17 +466,20 @@ func (b *backend) Delete(r *http.Request) error {
 		IfMatch:     ifMatch,
 	}
 	err := b.FileSystem.RemoveAll(r.Context(), r.URL.Path, &opts)
-	if err == nil && b.locks != nil {
-		// URL became unmapped so delete lock if exists
-		err = b.removeLocks(r, r.URL.Path)
+	if b.locks != nil {
+		err = b.removeLocks(r, r.URL.Path, err)
 	}
-
 	return err
 }
 
 func (b *backend) Mkcol(r *http.Request) error {
 	if r.Header.Get("Content-Type") != "" {
 		return internal.HTTPErrorf(http.StatusUnsupportedMediaType, "webdav: request body not supported in MKCOL request")
+	}
+	if b.locks != nil {
+		if err := b.checkLocks(r, resourceTarget(r.URL.Path), parentTarget(r.URL.Path)); err != nil {
+			return err
+		}
 	}
 	err := b.FileSystem.Mkdir(r.Context(), r.URL.Path)
 	if internal.IsNotFound(err) {
@@ -468,7 +490,9 @@ func (b *backend) Mkcol(r *http.Request) error {
 
 func (b *backend) Copy(r *http.Request, dest *internal.Href, recursive, overwrite bool) (created bool, err error) {
 	if b.locks != nil {
-		if err := b.checkLock(r, dest.Path); err != nil {
+		// The destination is overwritten as if deleted first (RFC 4918
+		// section 9.8.4)
+		if err := b.checkLocks(r, treeTarget(dest.Path), parentTarget(dest.Path)); err != nil {
 			return false, err
 		}
 	}
@@ -481,13 +505,22 @@ func (b *backend) Copy(r *http.Request, dest *internal.Href, recursive, overwrit
 	if os.IsExist(err) {
 		return false, &internal.HTTPError{http.StatusPreconditionFailed, err}
 	}
+	if b.locks != nil {
+		// Locks aren't copied, and those of an overwritten destination are
+		// gone with it
+		err = b.removeLocks(r, dest.Path, err)
+	}
 	return created, err
 }
 
 func (b *backend) Move(r *http.Request, dest *internal.Href, overwrite bool) (created bool, err error) {
-	// Check source and destination locks
 	if b.locks != nil {
-		if err := b.checkMoveLocks(r, dest); err != nil {
+		// The source is removed from its collection, and the destination is
+		// overwritten as if deleted first (RFC 4918 section 9.9.3)
+		err := b.checkLocks(r,
+			treeTarget(r.URL.Path), parentTarget(r.URL.Path),
+			treeTarget(dest.Path), parentTarget(dest.Path))
+		if err != nil {
 			return false, err
 		}
 	}
@@ -499,9 +532,11 @@ func (b *backend) Move(r *http.Request, dest *internal.Href, overwrite bool) (cr
 	if os.IsExist(err) {
 		return false, &internal.HTTPError{http.StatusPreconditionFailed, err}
 	}
-	if err == nil && b.locks != nil {
-		// URL became unmapped so delete lock if exists
-		err = b.removeLocks(r, r.URL.Path)
+	if b.locks != nil {
+		// Locks aren't moved with the resources (RFC 4918 section 9.9.4),
+		// and those of an overwritten destination are gone with it
+		err = b.removeLocks(r, r.URL.Path, err)
+		err = b.removeLocks(r, dest.Path, err)
 	}
 	return created, err
 }
