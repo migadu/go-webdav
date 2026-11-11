@@ -445,9 +445,18 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 	for _, resp := range ms.Responses {
 		p, err := resp.Path()
 		if err != nil {
-			if err, ok := err.(*internal.HTTPError); ok && err.Code == http.StatusNotFound {
+			// The status error is wrapped in an internal.HrefError.
+			var httpErr *internal.HTTPError
+			switch {
+			case !errors.As(err, &httpErr):
+				errs = append(errs, err)
+			case httpErr.Code == http.StatusNotFound:
 				ret.Deleted = append(ret.Deleted, p)
-			} else {
+			case httpErr.Code == http.StatusInsufficientStorage:
+				// The server reports a truncated result on the request-URI
+				// (RFC 6578 section 3.6).
+				ret.Truncated = true
+			default:
 				errs = append(errs, err)
 			}
 			continue
