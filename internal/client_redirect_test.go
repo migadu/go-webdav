@@ -2,12 +2,14 @@ package internal
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -92,17 +94,24 @@ func (s *redirectServer) reset() {
 }
 
 // newRedirectServer starts s, and returns an HTTP client reaching it by any
-// host name.
+// host name: with https on port 443, and with plain HTTP on any other port.
 func newRedirectServer(t *testing.T, s *redirectServer) *http.Client {
 	s.t = t
 	ts := httptest.NewServer(s)
 	t.Cleanup(ts.Close)
+	tlsServer := httptest.NewTLSServer(s)
+	t.Cleanup(tlsServer.Close)
 
 	var dialer net.Dialer
 	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			return dialer.DialContext(ctx, network, ts.Listener.Addr().String())
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			target := ts.Listener.Addr().String()
+			if _, port, _ := net.SplitHostPort(addr); port == "443" {
+				target = tlsServer.Listener.Addr().String()
+			}
+			return dialer.DialContext(ctx, network, target)
 		},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
 	t.Cleanup(transport.CloseIdleConnections)
 	return &http.Client{Transport: transport}
@@ -502,6 +511,145 @@ func TestClientRedirectCredentials(t *testing.T) {
 			} else if auth != want307 {
 				t.Errorf("%v: Authorization at the target = %q, want %q as with a 307 redirect", name, auth, want307)
 			}
+		}
+	}
+}
+
+// basicAuthClient adds basic authentication to every request it's given, as
+// the HTTP client returned by webdav.HTTPClientWithBasicAuth does.
+type basicAuthClient struct {
+	c HTTPClient
+}
+
+func (c basicAuthClient) Do(req *http.Request) (*http.Response, error) {
+	req.SetBasicAuth("user", "secret")
+	return c.c.Do(req)
+}
+
+// TestClientRedirectDowngrade checks that a request for an https URL isn't
+// sent again to an http URL to follow a 301 or 302 redirect, as a reverse
+// proxy unaware of TLS may answer: the body, and the credentials of an HTTP
+// client adding them to every request, would go in cleartext. Do returns an
+// HTTPError with the redirect status instead. Redirects which keep or upgrade
+// the scheme are still followed.
+func TestClientRedirectDowngrade(t *testing.T) {
+	s := &redirectServer{routes: map[string]http.HandlerFunc{
+		"/new": davResource,
+	}}
+	hc := basicAuthClient{newRedirectServer(t, s)}
+
+	for _, tc := range []struct {
+		name, endpoint, location string
+		wantResent               bool
+	}{
+		{"https to http", "https://dav.test/", "http://dav.test/new", false},
+		{"https to http, other port", "https://dav.test/", "http://dav.test:8080/new", false},
+		{"https to http, subdomain", "https://dav.test/", "http://files.dav.test/new", false},
+		{"https to https", "https://dav.test/", "/new", true},
+		{"http to https", "http://dav.test/", "https://dav.test/new", true},
+	} {
+		c, err := NewClient(hc, tc.endpoint)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, code := range []int{http.StatusMovedPermanently, http.StatusFound} {
+			name := fmt.Sprintf("%v, %v", tc.name, code)
+			s.reset()
+			s.route("/old", redirectTo(code, tc.location))
+
+			req, err := c.NewRequest("PROPFIND", "/old", strings.NewReader("body"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Cookie", "session=secret")
+			resp, err := c.Do(req)
+			resent := slices.Contains(s.requests(), "PROPFIND /new")
+
+			if tc.wantResent {
+				if err != nil {
+					t.Errorf("%v: Do() = %v", name, err)
+					continue
+				}
+				resp.Body.Close()
+				if !resent {
+					t.Errorf("%v: requests = %q, want PROPFIND /new", name, s.requests())
+				}
+				continue
+			}
+
+			if err == nil {
+				resp.Body.Close()
+				got := s.last()
+				t.Errorf("%v: Do() = %v %v, want an HTTP error %v (sent %v %v over plain HTTP with Authorization %q and Cookie %q)", name, resp.Request.Method, resp.Status, code, got.method, got.uri, got.header.Get("Authorization"), got.header.Get("Cookie"))
+				continue
+			}
+			var httpErr *HTTPError
+			if !errors.As(err, &httpErr) || httpErr.Code != code {
+				t.Errorf("%v: Do() = %v, want an HTTP error %v", name, err, code)
+			}
+			if resent {
+				t.Errorf("%v: requests = %q, want no PROPFIND at /new", name, s.requests())
+			}
+		}
+	}
+}
+
+// TestClientRedirectCount checks that the redirects the HTTP client follows
+// itself for a request Do sent again, such as 307 ones, count towards the 10
+// redirects a request follows at most, with those before.
+func TestClientRedirectCount(t *testing.T) {
+	repeat := func(code, n int) []int {
+		return slices.Repeat([]int{code}, n)
+	}
+	for _, tc := range []struct {
+		name    string
+		before  int   // 307 redirects before the 302 one
+		after   []int // redirects of the request sent again
+		wantErr bool
+	}{
+		{"10 redirects", 4, repeat(http.StatusTemporaryRedirect, 5), false},
+		{"11 redirects", 4, repeat(http.StatusTemporaryRedirect, 6), true},
+		{"13 redirects", 6, repeat(http.StatusTemporaryRedirect, 6), true},
+		{"11 redirects, 308", 1, repeat(http.StatusPermanentRedirect, 9), true},
+		{"10 redirects, then 303", 4, append(repeat(http.StatusTemporaryRedirect, 4), http.StatusSeeOther), false},
+		{"11 redirects, then 303", 4, append(repeat(http.StatusTemporaryRedirect, 5), http.StatusSeeOther), true},
+	} {
+		s := &redirectServer{routes: map[string]http.HandlerFunc{}}
+		for i := range tc.before {
+			s.route(fmt.Sprintf("PROPFIND /a%v", i), redirectTo(http.StatusTemporaryRedirect, fmt.Sprintf("/a%v", i+1)))
+		}
+		s.route(fmt.Sprintf("PROPFIND /a%v", tc.before), redirectTo(http.StatusFound, "/b0"))
+		s.route("GET /b0", htmlPage)
+		for i, code := range tc.after {
+			s.route(fmt.Sprintf("PROPFIND /b%v", i), redirectTo(code, fmt.Sprintf("/b%v", i+1)))
+		}
+		s.route(fmt.Sprintf("/b%v", len(tc.after)), davResource)
+
+		c, err := NewClient(newRedirectServer(t, s), "http://dav.test/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, err := c.NewRequest("PROPFIND", "/a0", strings.NewReader("body"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := c.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		if !tc.wantErr {
+			if err != nil {
+				t.Errorf("%v: Do() = %v", tc.name, err)
+			}
+			continue
+		}
+		// Not the error of the HTTP client, which stops after 10 requests
+		const want = "webdav: PROPFIND http://dav.test/a0: stopped after 10 redirects"
+		if err == nil {
+			t.Errorf("%v: Do() = %v %v %v, want an error (requests: %q)", tc.name, resp.Request.Method, resp.Request.URL.Path, resp.Status, s.requests())
+		} else if err.Error() != want {
+			t.Errorf("%v: Do() = %v, want %v", tc.name, err, want)
 		}
 	}
 }
