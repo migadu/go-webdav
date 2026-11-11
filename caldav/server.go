@@ -64,6 +64,49 @@ type CalendarUpdater interface {
 	UpdateCalendar(ctx context.Context, path string, update *CalendarUpdate) error
 }
 
+// CopyCalendarObjectOptions holds the options of a COPY request for a
+// calendar object.
+type CopyCalendarObjectOptions struct {
+	// NoOverwrite indicates that the client doesn't want a calendar object
+	// already at the destination to be replaced ("Overwrite: F"): the copy
+	// must then fail with 412 Precondition Failed.
+	NoOverwrite bool
+}
+
+// MoveCalendarObjectOptions holds the options of a MOVE request for a
+// calendar object.
+type MoveCalendarObjectOptions struct {
+	// NoOverwrite indicates that the client doesn't want a calendar object
+	// already at the destination to be replaced ("Overwrite: F"): the move
+	// must then fail with 412 Precondition Failed.
+	NoOverwrite bool
+}
+
+// CalendarObjectCopyMover is an optional interface a Backend can implement to
+// let clients copy and move calendar objects with COPY and MOVE, for instance
+// to move an event from a calendar to another. Calendars cannot be copied or
+// moved.
+//
+// The Handler calls these methods only for src and dst paths of calendar
+// objects, that is, of resources in a calendar, and dst is never src.
+// created is true if there was no calendar object at dst, false if one was
+// replaced. If there is no calendar object at src, they fail with 404 Not
+// Found, and if there is no calendar to hold dst, with 409 Conflict (RFC 4918
+// sections 9.8.5 and 9.9.4).
+//
+// The preconditions of RFC 4791 section 5.3.2.1 apply to the destination, and
+// can be reported with NewPreconditionError: for instance no-uid-conflict, if
+// the calendar of dst already holds another calendar object with the same
+// UID, or if dst is a calendar object with another UID, and
+// supported-calendar-component, if the calendar of dst doesn't support the
+// component of the calendar object.
+type CalendarObjectCopyMover interface {
+	// CopyCalendarObject copies the calendar object at src to dst.
+	CopyCalendarObject(ctx context.Context, src, dst string, opts *CopyCalendarObjectOptions) (created bool, err error)
+	// MoveCalendarObject moves the calendar object at src to dst.
+	MoveCalendarObject(ctx context.Context, src, dst string, opts *MoveCalendarObjectOptions) (created bool, err error)
+}
+
 // Handler handles CalDAV HTTP requests. It can be used to create a CalDAV
 // server.
 type Handler struct {
@@ -451,14 +494,18 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 		return nil, nil, err
 	}
 
-	return caps, []string{
+	allow = []string{
 		http.MethodOptions,
 		http.MethodHead,
 		http.MethodGet,
 		http.MethodPut,
 		http.MethodDelete,
 		"PROPFIND",
-	}, nil
+	}
+	if _, ok := b.Backend.(CalendarObjectCopyMover); ok {
+		allow = append(allow, "COPY", "MOVE")
+	}
+	return caps, allow, nil
 }
 
 func (b *backend) HeadGet(w http.ResponseWriter, r *http.Request) error {
@@ -984,12 +1031,55 @@ func decodeCalendarTimezone(s string) (*ical.Calendar, error) {
 	return cal, nil
 }
 
+// inPrefix reports whether p is under the prefix of the Handler.
+func (b *backend) inPrefix(p string) bool {
+	p = path.Clean(p)
+	return b.Prefix == "" || p == b.Prefix || strings.HasPrefix(p, b.Prefix+"/")
+}
+
+// checkCopyMove checks that a COPY or MOVE request is for a calendar object,
+// to be copied or moved into a calendar.
+func (b *backend) checkCopyMove(src, dst string) error {
+	if b.resourceTypeAtPath(src) != resourceTypeCalendarObject {
+		return internal.HTTPErrorf(http.StatusForbidden, "caldav: only calendar objects can be copied or moved")
+	}
+	if !b.inPrefix(dst) {
+		// RFC 4918 sections 9.8.5 and 9.9.4
+		return internal.HTTPErrorf(http.StatusBadGateway, "caldav: destination is outside of the CalDAV namespace")
+	}
+	if b.resourceTypeAtPath(dst) != resourceTypeCalendarObject {
+		// Calendar objects are stored in calendars (RFC 4791 section 4.2).
+		// Like MKCALENDAR, report a wrong location with
+		// calendar-collection-location-ok, the precondition RFC 4791
+		// section 5.3.2.1 defines for COPY and MOVE of calendars.
+		return newPreconditionError(http.StatusForbidden, PreconditionCalendarCollectionLocationOk)
+	}
+	return nil
+}
+
 func (b *backend) Copy(r *http.Request, dest *internal.Href, recursive, overwrite bool) (created bool, err error) {
-	return false, internal.HTTPErrorf(http.StatusNotImplemented, "caldav: Copy not implemented")
+	cm, ok := b.Backend.(CalendarObjectCopyMover)
+	if !ok {
+		return false, internal.HTTPErrorf(http.StatusNotImplemented, "caldav: Copy not implemented")
+	}
+	if err := b.checkCopyMove(r.URL.Path, dest.Path); err != nil {
+		return false, err
+	}
+	// recursive doesn't matter: calendar objects have no members
+	opts := CopyCalendarObjectOptions{NoOverwrite: !overwrite}
+	return cm.CopyCalendarObject(r.Context(), r.URL.Path, dest.Path, &opts)
 }
 
 func (b *backend) Move(r *http.Request, dest *internal.Href, overwrite bool) (created bool, err error) {
-	return false, internal.HTTPErrorf(http.StatusNotImplemented, "caldav: Move not implemented")
+	cm, ok := b.Backend.(CalendarObjectCopyMover)
+	if !ok {
+		return false, internal.HTTPErrorf(http.StatusNotImplemented, "caldav: Move not implemented")
+	}
+	if err := b.checkCopyMove(r.URL.Path, dest.Path); err != nil {
+		return false, err
+	}
+	opts := MoveCalendarObjectOptions{NoOverwrite: !overwrite}
+	return cm.MoveCalendarObject(r.Context(), r.URL.Path, dest.Path, &opts)
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4791#section-5.3.2.1
