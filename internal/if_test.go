@@ -58,6 +58,16 @@ func TestParseConditions_entityTags(t *testing.T) {
 	}
 }
 
+// RFC 2616 section 2.1: literals are case-insensitive.
+func TestParseConditions_notCase(t *testing.T) {
+	for _, s := range []string{`(not <urn:t1>)`, `(NOT <urn:t1>)`, `(nOt<urn:t1>)`} {
+		got, err := ParseConditions(s)
+		if want := [][]Condition{{{Not: true, Token: "urn:t1"}}}; err != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("ParseConditions(%q) = %+v, %v, want %+v", s, got, err, want)
+		}
+	}
+}
+
 func TestParseConditions_invalid(t *testing.T) {
 	for _, s := range []string{
 		``,
@@ -96,7 +106,8 @@ func TestParseTimeout(t *testing.T) {
 		{"Second-4100000000, Infinite", 4100000000 * time.Second},
 		{"Second-99999999999999999999", (1<<32 - 1) * time.Second},
 		{"Extend-60, Second-60", time.Minute},
-		{"Second-0, Second-60", time.Minute},
+		// The shortest timeout, not an infinite one
+		{"Second-0, Second-60", time.Second},
 	} {
 		got, err := ParseTimeout(tc.s)
 		if err != nil {

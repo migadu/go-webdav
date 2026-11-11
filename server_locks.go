@@ -54,11 +54,12 @@ func collectionHref(p string) string {
 // 10.4), and records the lock tokens it submits: all those appearing in it
 // (section 10.4.1).
 func (b *backend) evaluateIf(r *http.Request) error {
-	values := r.Header.Values("If")
-	if len(values) == 0 {
+	// An empty If header field has no lists
+	hif := strings.TrimSpace(strings.Join(r.Header.Values("If"), " "))
+	if hif == "" {
 		return nil
 	}
-	lists, err := internal.ParseConditions(strings.Join(values, " "))
+	lists, err := internal.ParseConditions(hif)
 	if err != nil {
 		return &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
 	}
@@ -509,9 +510,12 @@ func (b lockingBackend) Lock(r *http.Request, req *internal.LockRequest) (string
 		return lock.Token, discovery, false, err
 	}
 
-	// Locking an unmapped URL creates a resource in the parent collection
-	// (RFC 4918 section 7.3)
+	// Locking an unmapped URL creates a non-collection resource in the
+	// parent collection (RFC 4918 section 7.3)
 	if fi == nil {
+		if strings.HasSuffix(r.URL.Path, "/") {
+			return "", nil, false, internal.HTTPErrorf(http.StatusConflict, "webdav: locking an unmapped URL creates a non-collection resource, which can't end with a slash")
+		}
 		if err := b.checkLocks(r, parentTarget(p)); err != nil {
 			return "", nil, false, err
 		}

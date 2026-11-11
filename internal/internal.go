@@ -88,8 +88,9 @@ const maxTimeoutSeconds = 1<<32 - 1
 
 // ParseTimeout parses a Timeout header field: a list of timeout values, in
 // order of preference. It returns the first valid one, skipping the values
-// it doesn't understand. Values are case-insensitive, and "Second-" values
-// larger than 2^32-1 are capped.
+// it doesn't understand. Values are case-insensitive, "Second-" values
+// larger than 2^32-1 are capped, and "Second-0" is the shortest timeout, one
+// second.
 func ParseTimeout(s string) (Timeout, error) {
 	for _, v := range strings.Split(s, ",") {
 		v = strings.TrimSpace(v)
@@ -109,7 +110,8 @@ func ParseTimeout(s string) (Timeout, error) {
 			n = maxTimeoutSeconds
 		}
 		if n == 0 {
-			continue
+			// Zero would mean infinite
+			n = 1
 		}
 		return Timeout{Duration: time.Duration(n) * time.Second}, nil
 	}
@@ -250,9 +252,10 @@ func (p *conditionParser) entityTag() (string, error) {
 }
 
 func (p *conditionParser) condition() (*Condition, error) {
-	not := strings.HasPrefix(p.s, "Not")
+	// Literals are case-insensitive (RFC 2616 section 2.1)
+	not := len(p.s) >= 3 && strings.EqualFold(p.s[:3], "Not")
 	if not {
-		p.s = strings.TrimPrefix(p.s, "Not")
+		p.s = p.s[3:]
 		p.lws()
 	}
 
