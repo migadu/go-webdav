@@ -737,12 +737,12 @@ func (b *backend) Mkcol(r *http.Request) error {
 	if !internal.IsRequestBodyEmpty(r) {
 		var m mkcolReq
 		if err := internal.DecodeXMLRequest(r, &m); err != nil {
-			return internal.HTTPErrorf(http.StatusBadRequest, "carddav: error parsing mkcol request: %s", err.Error())
+			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: error parsing mkcol request: %s", err.Error())
 		}
 
 		prop := m.Set.Prop
 		if !prop.ResourceType.Is(internal.CollectionName) || !prop.ResourceType.Is(calendarName) {
-			return internal.HTTPErrorf(http.StatusBadRequest, "carddav: unexpected resource type")
+			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: unexpected resource type")
 		}
 		cal.Name = prop.DisplayName
 		cal.Description = prop.CalendarDescription
@@ -756,9 +756,10 @@ func (b *backend) Mkcol(r *http.Request) error {
 			cal.Timezone = tz
 		}
 
-		cal.SupportedComponentSet = make([]string, len(prop.SupportedCalendarComponentSet.Comp))
-		for i, v := range prop.SupportedCalendarComponentSet.Comp {
-			cal.SupportedComponentSet[i] = v.Name
+		// Leave the set nil when the request doesn't set it, so the default
+		// applies
+		for _, v := range prop.SupportedCalendarComponentSet.Comp {
+			cal.SupportedComponentSet = append(cal.SupportedComponentSet, v.Name)
 		}
 	}
 
