@@ -42,6 +42,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	hh.ServeHTTP(w, r)
 }
 
+// HTTPError is an error associated with an HTTP status code. NewHTTPError
+// returns one, and a Client returns one for a request the server answered
+// with a status outside 2xx, so a caller can read that status with errors.As.
+type HTTPError = internal.HTTPError
+
 // NewHTTPError creates a new error that is associated with an HTTP status code
 // and optionally an error that lead to it. Backends can use this functions to
 // return errors that convey some semantics (e.g. 404 not found, 403 access
