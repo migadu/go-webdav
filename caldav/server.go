@@ -559,6 +559,13 @@ func (b *backend) resourceTypeAtPath(ctx context.Context, reqPath string) resour
 	return resourceType(len(strings.Split(p, "/")) - 1)
 }
 
+// inScheduleInbox reports whether p is the path of a scheduling message, a
+// member of the scheduling Inbox.
+func (b *backend) inScheduleInbox(ctx context.Context, p string) bool {
+	inbox, err := b.scheduleInbox(ctx)
+	return err == nil && inbox != nil && path.Dir(path.Clean(p)) == path.Clean(inbox.Path)
+}
+
 // scheduleInbox returns the scheduling Inbox of the current user, or nil if
 // the backend doesn't implement InboxBackend or the user has no Inbox. It
 // calls GetInbox once at most: the result is kept for the rest of the request.
@@ -1245,16 +1252,18 @@ func (b *backend) inPrefix(p string) bool {
 }
 
 // checkCopyMove checks that a COPY or MOVE request is for a calendar object,
-// to be copied or moved into a calendar.
+// to be copied or moved into a calendar. The scheduling messages of the Inbox
+// aren't: the server delivers them, and they are iTIP messages, which
+// calendars can't hold (RFC 4791 section 4.1).
 func (b *backend) checkCopyMove(ctx context.Context, src, dst string) error {
-	if b.resourceTypeAtPath(ctx, src) != resourceTypeCalendarObject {
+	if b.resourceTypeAtPath(ctx, src) != resourceTypeCalendarObject || b.inScheduleInbox(ctx, src) {
 		return internal.HTTPErrorf(http.StatusForbidden, "caldav: only calendar objects can be copied or moved")
 	}
 	if !b.inPrefix(dst) {
 		// RFC 4918 sections 9.8.5 and 9.9.4
 		return internal.HTTPErrorf(http.StatusBadGateway, "caldav: destination is outside of the CalDAV namespace")
 	}
-	if b.resourceTypeAtPath(ctx, dst) != resourceTypeCalendarObject {
+	if b.resourceTypeAtPath(ctx, dst) != resourceTypeCalendarObject || b.inScheduleInbox(ctx, dst) {
 		// Calendar objects are stored in calendars (RFC 4791 section 4.2).
 		// Like MKCALENDAR, report a wrong location with
 		// calendar-collection-location-ok, the precondition RFC 4791

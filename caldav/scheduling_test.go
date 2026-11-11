@@ -635,3 +635,42 @@ func TestInboxDelete(t *testing.T) {
 		t.Errorf("DELETE %v deleted %v", inboxMemberHref, b.deleted)
 	}
 }
+
+// inboxCopyMoveBackend is a copyMoveBackend with a scheduling Inbox.
+type inboxCopyMoveBackend struct {
+	*copyMoveBackend
+	inbox Inbox
+}
+
+func (b *inboxCopyMoveBackend) GetInbox(ctx context.Context) (*Inbox, error) {
+	return &b.inbox, nil
+}
+
+// CalendarObjectCopyMover only copies and moves the objects of calendars: the
+// scheduling messages of the Inbox are delivered by the server, and are iTIP
+// messages, which calendars can't hold (RFC 4791 section 4.1).
+func TestInboxCopyMove(t *testing.T) {
+	cm := newCopyMoveBackend()
+	cm.objects[inboxMemberHref] = true
+	h := &Handler{Backend: &inboxCopyMoveBackend{copyMoveBackend: cm, inbox: Inbox{Path: inboxMemberPath}}}
+
+	for _, method := range []string{"COPY", "MOVE"} {
+		for _, tc := range []struct{ src, dest string }{
+			{inboxMemberHref, "/user/calendars/work/invite1.ics"},
+			{copyMoveEvent, inboxMemberPath + "event.ics"},
+		} {
+			w := serveCopyMove(h, method, tc.src, tc.dest, "")
+			if w.Code != http.StatusForbidden {
+				t.Errorf("%v %v to %v: got status %v, want 403", method, tc.src, tc.dest, w.Code)
+			}
+		}
+	}
+	if len(cm.calls) > 0 {
+		t.Errorf("CalendarObjectCopyMover called with %+v", cm.calls)
+	}
+
+	w := serveCopyMove(h, "MOVE", copyMoveEvent, "/user/calendars/work/event.ics", "")
+	if w.Code != http.StatusCreated {
+		t.Errorf("MOVE between calendars: got status %v, want 201", w.Code)
+	}
+}
