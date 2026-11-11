@@ -605,11 +605,12 @@ func TestPushNotImplemented(t *testing.T) {
 		t.Errorf("POST: status = %v, want 405", w.Code)
 	}
 
+	// The path of a registration URL is no calendar or calendar object
 	w = serveCalDAV(b, http.MethodDelete, "/push/io6Efei4ooph", "", "")
-	if w.Code != http.StatusNoContent {
-		t.Errorf("DELETE: status = %v, want 204", w.Code)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("DELETE: status = %v, want 403", w.Code)
 	}
-	if want := []string{"/push/io6Efei4ooph"}; !reflect.DeepEqual(deleted, want) {
-		t.Errorf("deleted %v, want %v", deleted, want)
+	if len(deleted) != 0 {
+		t.Errorf("deleted %v, want none", deleted)
 	}
 }

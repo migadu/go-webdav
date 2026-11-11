@@ -519,7 +519,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 
 	switch resType {
 	case resourceTypeRoot:
-		resp, err := b.propFindRoot(ctx, propfind)
+		resp, err := b.propFindRoot(ctx, r.URL.Path, propfind)
 		if err != nil {
 			return err
 		}
@@ -529,8 +529,8 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		if err != nil {
 			return err
 		}
-		if r.URL.Path != principalPath {
-			return nil
+		if principalPath == "" || !internal.SamePath(r.URL.Path, principalPath) {
+			return internal.HTTPErrorf(http.StatusNotFound, "carddav: principal not found")
 		}
 		resp, err := b.propFindUserPrincipal(ctx, propfind)
 		if err != nil {
@@ -555,8 +555,8 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		if err != nil {
 			return err
 		}
-		if r.URL.Path != homeSetPath {
-			return nil
+		if homeSetPath == "" || !internal.SamePath(r.URL.Path, homeSetPath) {
+			return internal.HTTPErrorf(http.StatusNotFound, "carddav: address book home set not found")
 		}
 		resp, err := b.propFindHomeSet(ctx, propfind)
 		if err != nil {
@@ -591,10 +591,10 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		}
 		return mw.WriteResponse(resp)
 	}
-	return nil
+	return internal.HTTPErrorf(http.StatusNotFound, "carddav: resource not found")
 }
 
-func (b *backend) propFindRoot(ctx context.Context, propfind *internal.PropFind) (*internal.Response, error) {
+func (b *backend) propFindRoot(ctx context.Context, rootPath string, propfind *internal.PropFind) (*internal.Response, error) {
 	principalPath, err := b.Backend.CurrentUserPrincipal(ctx)
 	if err != nil {
 		return nil, err
@@ -606,7 +606,7 @@ func (b *backend) propFindRoot(ctx context.Context, propfind *internal.PropFind)
 		}),
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName)),
 	}
-	return internal.NewPropFindResponse(principalPath, propfind, props)
+	return internal.NewPropFindResponse(rootPath, propfind, props)
 }
 
 func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.PropFind) (*internal.Response, error) {
