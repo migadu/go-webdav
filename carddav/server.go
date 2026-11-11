@@ -41,17 +41,6 @@ type Backend interface {
 	webdav.UserPrincipalBackend
 }
 
-// AddressObjectsBackend is an optional interface a Backend can implement to
-// fetch the address objects of a addressbook-multiget REPORT in a single call,
-// rather than calling GetAddressObject for each of them.
-type AddressObjectsBackend interface {
-	// GetAddressObjects returns the address objects found at paths, in any order.
-	// The Path of each must be the path it was requested by: paths without
-	// an object are reported as 404 Not Found. An error fails the whole
-	// request.
-	GetAddressObjects(ctx context.Context, paths []string, req *AddressDataRequest) ([]AddressObject, error)
-}
-
 // Handler handles CardDAV HTTP requests. It can be used to create a CardDAV
 // server.
 type Handler struct {
@@ -217,6 +206,17 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *add
 
 	ms := internal.NewMultiStatus(resps...)
 	return internal.ServeMultiStatus(w, ms)
+}
+
+// AddressObjectsBackend is an optional interface a Backend can implement to
+// fetch the address objects of a addressbook-multiget REPORT in a single call,
+// rather than calling GetAddressObject for each of them.
+type AddressObjectsBackend interface {
+	// GetAddressObjects returns the address objects found at paths, in any order.
+	// The Path of each must be the path it was requested by: paths without
+	// an object are reported as 404 Not Found. An error fails the whole
+	// request.
+	GetAddressObjects(ctx context.Context, paths []string, req *AddressDataRequest) ([]AddressObject, error)
 }
 
 func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, multiget *addressbookMultiget) error {

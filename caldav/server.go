@@ -44,17 +44,6 @@ type Backend interface {
 	webdav.UserPrincipalBackend
 }
 
-// CalendarObjectsBackend is an optional interface a Backend can implement to
-// fetch the calendar objects of a calendar-multiget REPORT in a single call,
-// rather than calling GetCalendarObject for each of them.
-type CalendarObjectsBackend interface {
-	// GetCalendarObjects returns the calendar objects found at paths, in any order.
-	// The Path of each must be the path it was requested by: paths without
-	// an object are reported as 404 Not Found. An error fails the whole
-	// request.
-	GetCalendarObjects(ctx context.Context, paths []string, req *CalendarCompRequest) ([]CalendarObject, error)
-}
-
 // Handler handles CalDAV HTTP requests. It can be used to create a CalDAV
 // server.
 type Handler struct {
@@ -253,6 +242,17 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *cal
 	ms := internal.NewMultiStatus(resps...)
 
 	return internal.ServeMultiStatus(w, ms)
+}
+
+// CalendarObjectsBackend is an optional interface a Backend can implement to
+// fetch the calendar objects of a calendar-multiget REPORT in a single call,
+// rather than calling GetCalendarObject for each of them.
+type CalendarObjectsBackend interface {
+	// GetCalendarObjects returns the calendar objects found at paths, in any order.
+	// The Path of each must be the path it was requested by: paths without
+	// an object are reported as 404 Not Found. An error fails the whole
+	// request.
+	GetCalendarObjects(ctx context.Context, paths []string, req *CalendarCompRequest) ([]CalendarObject, error)
 }
 
 func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, multiget *calendarMultiget) error {
