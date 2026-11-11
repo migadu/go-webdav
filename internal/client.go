@@ -126,7 +126,36 @@ func NewClient(c HTTPClient, endpoint string) (*Client, error) {
 	return &Client{http: c, endpoint: u}, nil
 }
 
-func (c *Client) ResolveHref(p string) *url.URL {
+// isHTTPURL reports whether s is an absolute http or https URL, rather than a
+// path.
+func isHTTPURL(s string) bool {
+	scheme, _, ok := strings.Cut(s, "://")
+	return ok && (strings.EqualFold(scheme, "http") || strings.EqualFold(scheme, "https"))
+}
+
+// ResolveHref returns the URL of the resource at p.
+//
+// p is usually a path: an absolute one is on the endpoint's host, a relative
+// one is relative to the endpoint's path.
+//
+// p can also be an absolute http or https URL, which clients return for the
+// resources on another host than the endpoint's (see HrefPath). It's used
+// as is: requests for it are sent to its host. The credentials of the endpoint
+// URL are only added to a URL with the same scheme and host; an HTTPClient
+// adding credentials to its requests, such as the one returned by
+// webdav.HTTPClientWithBasicAuth, adds them for any host.
+func (c *Client) ResolveHref(p string) (*url.URL, error) {
+	if isHTTPURL(p) {
+		u, err := url.Parse(p)
+		if err != nil {
+			return nil, err
+		}
+		if u.User == nil && u.Scheme == c.endpoint.Scheme && strings.EqualFold(u.Host, c.endpoint.Host) {
+			u.User = c.endpoint.User
+		}
+		return u, nil
+	}
+
 	hasTrailingSlash := strings.HasSuffix(p, "/") || (p == "" && strings.HasSuffix(c.endpoint.Path, "/"))
 
 	if !strings.HasPrefix(p, "/") {
@@ -142,11 +171,111 @@ func (c *Client) ResolveHref(p string) *url.URL {
 		User:   c.endpoint.User,
 		Host:   c.endpoint.Host,
 		Path:   p,
+	}, nil
+}
+
+// onEndpointHost reports whether u is on the endpoint's host. Only the host
+// names are compared: servers behind a reverse proxy often report URLs with
+// the scheme or port of their own side of the proxy, and following them would
+// e.g. downgrade requests to plain HTTP.
+func (c *Client) onEndpointHost(u *url.URL) bool {
+	return strings.EqualFold(u.Hostname(), c.endpoint.Hostname())
+}
+
+func defaultPort(scheme string) string {
+	switch scheme {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
 	}
+	return ""
+}
+
+// normalizeHref returns href, a reference received in a response to a request
+// for base (the endpoint if nil), in the form returned by clients.
+//
+// A resource on the endpoint's host is referred to by its path, or kept as is
+// if href is relative to a URL on the endpoint's host. A resource on another
+// host is referred to by its absolute URL, resolved against base if href is
+// relative. So is a resource whose href has a query, which a path can't carry.
+func (c *Client) normalizeHref(base *url.URL, href Href) Href {
+	if base == nil {
+		base = c.endpoint
+	}
+
+	u := url.URL(href)
+	if u.Scheme == "" && u.Host == "" {
+		if u.RawQuery == "" && c.onEndpointHost(base) {
+			return href
+		}
+		u = *base.ResolveReference(&u)
+	}
+
+	if u.Scheme != "http" && u.Scheme != "https" {
+		// Not a URL requests can be sent to
+		return Href{Path: u.Path, RawPath: u.RawPath}
+	}
+	if c.onEndpointHost(&u) {
+		if u.RawQuery == "" {
+			return Href{Path: u.Path, RawPath: u.RawPath}
+		}
+		u.Scheme, u.Host = c.endpoint.Scheme, c.endpoint.Host
+	} else if port := u.Port(); port == defaultPort(u.Scheme) {
+		u.Host = strings.TrimSuffix(u.Host, ":"+port)
+	}
+	u.User = nil
+	u.Fragment, u.RawFragment = "", ""
+	return Href(u)
+}
+
+// HrefPath returns the path of the resource at href, a reference received in a
+// response to a request for base (the endpoint if nil), such as a Location
+// header, in the form returned by clients: the path of a resource on the
+// endpoint's host, but the absolute URL of one on another host or whose href
+// has a query (see normalizeHref).
+func (c *Client) HrefPath(base, href *url.URL) string {
+	h := c.normalizeHref(base, Href(*href))
+	return h.pathOrURL()
+}
+
+// RequestHrefs returns hrefs to the resources at paths, which are as accepted
+// by ResolveHref, for the body of a request for target. A path is used as is,
+// a URL on the host of target is reduced to its path, and any other URL is
+// kept whole.
+func (c *Client) RequestHrefs(target string, paths []string) ([]Href, error) {
+	targetURL, err := c.ResolveHref(target)
+	if err != nil {
+		return nil, err
+	}
+
+	hrefs := make([]Href, len(paths))
+	for i, p := range paths {
+		if !isHTTPURL(p) {
+			hrefs[i] = Href{Path: p}
+			continue
+		}
+		u, err := url.Parse(p)
+		if err != nil {
+			return nil, err
+		}
+		if u.Scheme == targetURL.Scheme && strings.EqualFold(u.Host, targetURL.Host) {
+			// More servers understand a path than a URL
+			hrefs[i] = Href{Path: u.Path, RawPath: u.RawPath, RawQuery: u.RawQuery}
+		} else {
+			u.User = nil
+			hrefs[i] = Href(*u)
+		}
+	}
+	return hrefs, nil
 }
 
 func (c *Client) NewRequest(method string, path string, body io.Reader) (*http.Request, error) {
-	return http.NewRequest(method, c.ResolveHref(path).String(), body)
+	u, err := c.ResolveHref(path)
+	if err != nil {
+		return nil, err
+	}
+	return http.NewRequest(method, u.String(), body)
 }
 
 func (c *Client) NewXMLRequest(method string, path string, v interface{}) (*http.Request, error) {
@@ -222,7 +351,26 @@ func (c *Client) DoMultiStatus(req *http.Request) (*MultiStatus, error) {
 		return nil, err
 	}
 
+	c.normalizeMultiStatus(&ms, req, resp)
 	return &ms, nil
+}
+
+// normalizeMultiStatus normalizes the hrefs of ms, received in resp to req,
+// with normalizeHref, and records how to normalize those in its properties.
+func (c *Client) normalizeMultiStatus(ms *MultiStatus, req *http.Request, resp *http.Response) {
+	// Relative hrefs are relative to the URL of the request, after redirects
+	base := req.URL
+	if resp.Request != nil && resp.Request.URL != nil {
+		base = resp.Request.URL
+	}
+
+	for i := range ms.Responses {
+		r := &ms.Responses[i]
+		for j, href := range r.Hrefs {
+			r.Hrefs[j] = c.normalizeHref(base, href)
+		}
+		r.client, r.base = c, base
+	}
 }
 
 // DoAndCheckMultiStatus performs a request which acts on a resource and, if
@@ -247,6 +395,7 @@ func (c *Client) DoAndCheckMultiStatus(req *http.Request) error {
 	if err := xml.NewDecoder(resp.Body).Decode(&ms); err != nil {
 		return err
 	}
+	c.normalizeMultiStatus(&ms, req, resp)
 
 	var errs []error
 	for i := range ms.Responses {

@@ -46,6 +46,17 @@ type Client struct {
 // If the HTTPClient is nil, http.DefaultClient is used.
 //
 // To use HTTP basic authentication, HTTPClientWithBasicAuth can be used.
+//
+// The paths the client returns, such as FileInfo.Path, are paths on the
+// endpoint's host, except for the resources a server lists on another host:
+// these are returned as absolute URLs, e.g.
+// "https://p37-contacts.icloud.com/1234567/carddavhome/". So are the resources
+// whose href has a query, which a path can't carry. The methods taking a path
+// also take such a URL, and send the requests for it to its host: join it with
+// url.JoinPath rather than path.Join, which would mangle its "//". Credentials
+// in the endpoint URL are only sent to the endpoint's scheme and host, but an
+// HTTPClient adding credentials to its requests, such as the one returned by
+// HTTPClientWithBasicAuth, adds them for any host.
 func NewClient(c HTTPClient, endpoint string) (*Client, error) {
 	ic, err := internal.NewClient(c, endpoint)
 	if err != nil {
@@ -73,7 +84,7 @@ func (c *Client) FindCurrentUserPrincipal(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("webdav: unauthenticated")
 	}
 
-	return prop.Href.Path, nil
+	return resp.HrefPath(&prop.Href), nil
 }
 
 var fileInfoPropFind = internal.NewPropNamePropFind(
@@ -302,7 +313,12 @@ func (c *Client) Copy(ctx context.Context, name, dest string, options *CopyOptio
 		depth = internal.DepthZero
 	}
 
-	req.Header.Set("Destination", c.ic.ResolveHref(dest).String())
+	destURL, err := c.ic.ResolveHref(dest)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Destination", destURL.String())
 	req.Header.Set("Overwrite", internal.FormatOverwrite(!options.NoOverwrite))
 	req.Header.Set("Depth", depth.String())
 
@@ -323,7 +339,12 @@ func (c *Client) Move(ctx context.Context, name, dest string, options *MoveOptio
 		return err
 	}
 
-	req.Header.Set("Destination", c.ic.ResolveHref(dest).String())
+	destURL, err := c.ic.ResolveHref(dest)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Destination", destURL.String())
 	req.Header.Set("Overwrite", internal.FormatOverwrite(!options.NoOverwrite))
 
 	return c.ic.DoAndCheckMultiStatus(req.WithContext(ctx))

@@ -45,6 +45,12 @@ type Client struct {
 	ic *internal.Client
 }
 
+// NewClient creates a new CalDAV client.
+//
+// The paths the client returns and takes are as described for
+// webdav.NewClient: a calendar home set, calendar or calendar object on
+// another host than the endpoint's, as with iCloud, is returned as an absolute
+// URL.
 func NewClient(c webdav.HTTPClient, endpoint string) (*Client, error) {
 	wc, err := webdav.NewClient(c, endpoint)
 	if err != nil {
@@ -85,7 +91,7 @@ func (c *Client) FindCalendarHomeSet(ctx context.Context, principal string) (str
 		return "", err
 	}
 
-	return prop.Href.Path, nil
+	return resp.HrefPath(&prop.Href), nil
 }
 
 func (c *Client) FindCalendars(ctx context.Context, calendarHomeSet string) ([]Calendar, error) {
@@ -368,17 +374,16 @@ func (c *Client) MultiGetCalendar(ctx context.Context, path string, multiGet *Ca
 		return nil, err
 	}
 
-	calendarMultiget := calendarMultiget{Prop: propReq}
-
-	if len(multiGet.Paths) == 0 {
-		href := internal.Href{Path: path}
-		calendarMultiget.Hrefs = []internal.Href{href}
-	} else {
-		calendarMultiget.Hrefs = make([]internal.Href, len(multiGet.Paths))
-		for i, p := range multiGet.Paths {
-			calendarMultiget.Hrefs[i] = internal.Href{Path: p}
-		}
+	paths := multiGet.Paths
+	if len(paths) == 0 {
+		paths = []string{path}
 	}
+	hrefs, err := c.ic.RequestHrefs(path, paths)
+	if err != nil {
+		return nil, err
+	}
+
+	calendarMultiget := calendarMultiget{Prop: propReq, Hrefs: hrefs}
 
 	req, err := c.ic.NewXMLRequest("REPORT", path, &calendarMultiget)
 	if err != nil {
@@ -394,13 +399,18 @@ func (c *Client) MultiGetCalendar(ctx context.Context, path string, multiGet *Ca
 	return decodeCalendarObjectList(ms)
 }
 
-func populateCalendarObject(co *CalendarObject, h http.Header) error {
+func (c *Client) populateCalendarObject(co *CalendarObject, resp *http.Response) error {
+	h := resp.Header
 	if loc := h.Get("Location"); loc != "" {
 		u, err := url.Parse(loc)
 		if err != nil {
 			return err
 		}
-		co.Path = u.Path
+		var base *url.URL
+		if resp.Request != nil {
+			base = resp.Request.URL
+		}
+		co.Path = c.ic.HrefPath(base, u)
 	}
 	if s := h.Get("ETag"); s != "" {
 		var etag internal.ETag
@@ -475,10 +485,10 @@ func (c *Client) GetCalendarObject(ctx context.Context, path string) (*CalendarO
 	}
 
 	co := &CalendarObject{
-		Path: resp.Request.URL.Path,
+		Path: c.ic.HrefPath(nil, resp.Request.URL),
 		Data: cal,
 	}
-	if err := populateCalendarObject(co, resp.Header); err != nil {
+	if err := c.populateCalendarObject(co, resp); err != nil {
 		return nil, err
 	}
 	return co, nil
@@ -525,7 +535,7 @@ func (c *Client) PutCalendarObject(ctx context.Context, path string, cal *ical.C
 	resp.Body.Close()
 
 	co := &CalendarObject{Path: path}
-	if err := populateCalendarObject(co, resp.Header); err != nil {
+	if err := c.populateCalendarObject(co, resp); err != nil {
 		return nil, err
 	}
 	return co, nil
