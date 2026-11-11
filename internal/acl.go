@@ -121,3 +121,32 @@ func NewPrincipalCollectionSet(principalPath string) *PrincipalCollectionSet {
 	}
 	return &PrincipalCollectionSet{Hrefs: []Href{{Path: p[:i+1]}}}
 }
+
+// AddACLProps adds to props the access control properties of RFC 3744
+// section 5 which the servers report for a resource of the current user,
+// whose principal path principalPath returns: DAV:owner, the current user,
+// DAV:principal-collection-set and DAV:supported-privilege-set, with the
+// privileges of NewSupportedPrivilegeSet and others. principalPath is only
+// called to return a property which depends on it.
+//
+// DAV:acl isn't reported: the servers only know the privileges of the
+// current user, not the access other principals may have.
+func AddACLProps(props map[xml.Name]PropFindFunc, principalPath func() (string, error), others ...SupportedPrivilege) {
+	props[OwnerName] = func(*RawXMLValue) (interface{}, error) {
+		p, err := principalPath()
+		if err != nil {
+			return nil, err
+		}
+		return &Owner{Href: Href{Path: p}}, nil
+	}
+	props[PrincipalCollectionSetName] = func(*RawXMLValue) (interface{}, error) {
+		p, err := principalPath()
+		if err != nil {
+			return nil, err
+		}
+		return NewPrincipalCollectionSet(p), nil
+	}
+	props[SupportedPrivilegeSetName] = func(*RawXMLValue) (interface{}, error) {
+		return NewSupportedPrivilegeSet(others...), nil
+	}
+}

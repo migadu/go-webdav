@@ -113,6 +113,14 @@ type AddressObjectCopyMover interface {
 
 // Handler handles CardDAV HTTP requests. It can be used to create a CardDAV
 // server.
+//
+// The principal, the address book home set, the address books and the
+// address objects report the access control properties of RFC 3744 section 5
+// clients ask for: the current user principal is their DAV:owner, the
+// collection holding it their DAV:principal-collection-set, and
+// DAV:supported-privilege-set describes the privileges reported in
+// DAV:current-user-privilege-set, which the ReadOnly fields control. DAV:acl
+// isn't reported, and can't be modified with the ACL method.
 type Handler struct {
 	Backend Backend
 	Prefix  string
@@ -604,8 +612,18 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, internal.PrincipalName)),
 	}
 	internal.AddPrincipalProps(props, principalPath, "")
+	// The principal owns itself
+	internal.AddACLProps(props, func() (string, error) { return principalPath, nil })
 	b.addPushProps(ctx, propfind, principalPath, props)
 	return internal.NewPropFindResponse(principalPath, propfind, props)
+}
+
+// addACLProps adds to props the access control properties of a resource of
+// the current user, see internal.AddACLProps.
+func (b *backend) addACLProps(ctx context.Context, props map[xml.Name]internal.PropFindFunc) {
+	internal.AddACLProps(props, func() (string, error) {
+		return b.Backend.CurrentUserPrincipal(ctx)
+	})
 }
 
 func (b *backend) propFindHomeSet(ctx context.Context, propfind *internal.PropFind) (*internal.Response, error) {
@@ -625,6 +643,7 @@ func (b *backend) propFindHomeSet(ctx context.Context, propfind *internal.PropFi
 		},
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName)),
 	}
+	b.addACLProps(ctx, props)
 	b.addPushProps(ctx, propfind, homeSetPath, props)
 	return internal.NewPropFindResponse(homeSetPath, propfind, props)
 }
@@ -673,6 +692,7 @@ func (b *backend) propFindAddressBook(ctx context.Context, propfind *internal.Pr
 		props[internal.GetCTagName] = internal.PropFindValue(&internal.GetCTag{CTag: ab.CTag})
 	}
 
+	b.addACLProps(ctx, props)
 	b.addPushProps(ctx, propfind, ab.Path, props)
 	return internal.NewPropFindResponse(ab.Path, propfind, props)
 }
@@ -755,6 +775,7 @@ func (b *backend) propFindAddressObject(ctx context.Context, propfind *internal.
 		})
 	}
 
+	b.addACLProps(ctx, props)
 	return internal.NewPropFindResponse(ao.Path, propfind, props)
 }
 
