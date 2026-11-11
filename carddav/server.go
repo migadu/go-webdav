@@ -605,43 +605,21 @@ func (b *backend) propFindAllAddressObjects(ctx context.Context, propfind *inter
 }
 
 func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*internal.Response, error) {
-	homeSetPath, err := b.Backend.AddressBookHomeSetPath(r.Context())
-	if err != nil {
-		return nil, err
-	}
-
-	resp := internal.NewOKResponse(r.URL.Path)
-
-	if r.URL.Path == homeSetPath {
-		// TODO: support PROPPATCH for address books
-		for _, prop := range update.Remove {
-			emptyVal := internal.NewRawXMLElement(prop.Prop.XMLName, nil, nil)
-			if err := resp.EncodeProp(http.StatusNotImplemented, emptyVal); err != nil {
-				return nil, err
-			}
+	// Make sure the resource exists before reporting on its properties
+	switch b.resourceTypeAtPath(r.URL.Path) {
+	case resourceTypeAddressBook:
+		if _, err := b.Backend.GetAddressBook(r.Context(), r.URL.Path); err != nil {
+			return nil, err
 		}
-		for _, prop := range update.Set {
-			emptyVal := internal.NewRawXMLElement(prop.Prop.XMLName, nil, nil)
-			if err := resp.EncodeProp(http.StatusNotImplemented, emptyVal); err != nil {
-				return nil, err
-			}
-		}
-	} else {
-		for _, prop := range update.Remove {
-			emptyVal := internal.NewRawXMLElement(prop.Prop.XMLName, nil, nil)
-			if err := resp.EncodeProp(http.StatusMethodNotAllowed, emptyVal); err != nil {
-				return nil, err
-			}
-		}
-		for _, prop := range update.Set {
-			emptyVal := internal.NewRawXMLElement(prop.Prop.XMLName, nil, nil)
-			if err := resp.EncodeProp(http.StatusMethodNotAllowed, emptyVal); err != nil {
-				return nil, err
-			}
+	case resourceTypeAddressObject:
+		var dataReq AddressDataRequest
+		if _, err := b.Backend.GetAddressObject(r.Context(), r.URL.Path, &dataReq); err != nil {
+			return nil, err
 		}
 	}
 
-	return resp, nil
+	// TODO: support PROPPATCH for address books
+	return internal.NewPropPatchResponse(r.URL.Path, update, http.StatusForbidden)
 }
 
 func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {

@@ -656,7 +656,24 @@ func (b *backend) propFindAllCalendarObjects(ctx context.Context, propfind *inte
 }
 
 func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*internal.Response, error) {
-	return nil, internal.HTTPErrorf(http.StatusNotImplemented, "caldav: PropPatch not implemented")
+	// Make sure the resource exists before reporting on its properties
+	switch b.resourceTypeAtPath(r.URL.Path) {
+	case resourceTypeCalendar:
+		if _, err := b.Backend.GetCalendar(r.Context(), r.URL.Path); err != nil {
+			return nil, err
+		}
+	case resourceTypeCalendarObject:
+		var dataReq CalendarCompRequest
+		if _, err := b.Backend.GetCalendarObject(r.Context(), r.URL.Path, &dataReq); err != nil {
+			return nil, err
+		}
+	}
+
+	// Properties cannot be written yet. Refusing them one by one in a
+	// multistatus, rather than failing the whole request, keeps clients which
+	// PROPPATCH display metadata while adopting a calendar (macOS Calendar
+	// sets displayname, calendar-color and calendar-order) from dropping it.
+	return internal.NewPropPatchResponse(r.URL.Path, update, http.StatusForbidden)
 }
 
 func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
