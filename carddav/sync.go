@@ -64,21 +64,11 @@ func (h *Handler) handleSyncCollection(r *http.Request, w http.ResponseWriter, s
 	if sc.Limit != nil {
 		query.Limit = int(sc.Limit.NResults)
 	}
-	var addressData addressDataReq
-	if err := sc.Prop.Decode(&addressData); err == nil {
-		dataReq, err := decodeAddressDataReq(&addressData)
-		if err != nil {
-			return err
-		}
-		// RFC 6352 section 10.4: without prop elements, address object
-		// resources are returned in their entirety.
-		if len(dataReq.Props) == 0 {
-			dataReq.AllProp = true
-		}
-		query.DataRequest = *dataReq
-	} else if !internal.IsNotFound(err) {
-		return &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
+	dataReq, err := decodeAddressDataProp(sc.Prop)
+	if err != nil {
+		return err
 	}
+	query.DataRequest = *dataReq
 
 	res, err := syncBackend.SyncCollection(r.Context(), r.URL.Path, &query)
 	if err != nil {

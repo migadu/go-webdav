@@ -78,11 +78,11 @@ func HTTPErrorFromError(err error) *HTTPError {
 	if err == nil {
 		return nil
 	}
-	if httpErr, ok := err.(*HTTPError); ok {
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
 		return httpErr
-	} else {
-		return &HTTPError{http.StatusInternalServerError, err}
 	}
+	return &HTTPError{http.StatusInternalServerError, err}
 }
 
 func IsNotFound(err error) bool {

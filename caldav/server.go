@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"mime"
 	"net/http"
@@ -388,7 +389,7 @@ func decodeCalendarDataProp(prop *internal.Prop) (*CalendarCompRequest, error) {
 	if err := prop.Decode(&calendarData); internal.IsNotFound(err) {
 		return &CalendarCompRequest{}, nil
 	} else if err != nil {
-		return nil, err
+		return nil, &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
 	}
 	return decodeCalendarDataReq(&calendarData)
 }
@@ -404,7 +405,11 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *cal
 	}
 	cf, err := decodeCompFilter(&query.Filter.CompFilter)
 	if err != nil {
-		return err
+		var httpErr *internal.HTTPError
+		if errors.As(err, &httpErr) {
+			return err
+		}
+		return &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
 	}
 	q.CompFilter = *cf
 

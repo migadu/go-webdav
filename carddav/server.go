@@ -215,21 +215,31 @@ func decodeAddressDataReq(addressData *addressDataReq) (*AddressDataRequest, err
 		return nil, internal.HTTPErrorf(http.StatusBadRequest, "carddav: only one of allprop or prop can be specified in address-data")
 	}
 
-	req := &AddressDataRequest{AllProp: addressData.Allprop != nil}
+	// RFC 6352 section 10.4: without prop elements, address object resources
+	// are returned in their entirety.
+	req := &AddressDataRequest{AllProp: addressData.Allprop != nil || len(addressData.Props) == 0}
 	for _, p := range addressData.Props {
 		req.Props = append(req.Props, p.Name)
 	}
 	return req, nil
 }
 
+// decodeAddressDataProp decodes the CARDDAV:address-data element of the
+// DAV:prop element of a REPORT request.
+func decodeAddressDataProp(prop *internal.Prop) (*AddressDataRequest, error) {
+	var addressData addressDataReq
+	if err := prop.Decode(&addressData); internal.IsNotFound(err) {
+		return &AddressDataRequest{}, nil
+	} else if err != nil {
+		return nil, &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
+	}
+	return decodeAddressDataReq(&addressData)
+}
+
 func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *addressbookQuery) error {
 	var q AddressBookQuery
 	if query.Prop != nil {
-		var addressData addressDataReq
-		if err := query.Prop.Decode(&addressData); err != nil && !internal.IsNotFound(err) {
-			return err
-		}
-		req, err := decodeAddressDataReq(&addressData)
+		req, err := decodeAddressDataProp(query.Prop)
 		if err != nil {
 			return err
 		}
@@ -293,11 +303,7 @@ type AddressObjectsBackend interface {
 func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, multiget *addressbookMultiget) error {
 	var dataReq AddressDataRequest
 	if multiget.Prop != nil {
-		var addressData addressDataReq
-		if err := multiget.Prop.Decode(&addressData); err != nil && !internal.IsNotFound(err) {
-			return err
-		}
-		decoded, err := decodeAddressDataReq(&addressData)
+		decoded, err := decodeAddressDataProp(multiget.Prop)
 		if err != nil {
 			return err
 		}
