@@ -230,7 +230,7 @@ func (t *dateWithUTCTime) UnmarshalText(b []byte) error {
 }
 
 func (t *dateWithUTCTime) MarshalText() ([]byte, error) {
-	s := time.Time(*t).Format(dateWithUTCTimeLayout)
+	s := time.Time(*t).UTC().Format(dateWithUTCTimeLayout)
 	return []byte(s), nil
 }
 
