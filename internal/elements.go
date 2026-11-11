@@ -382,14 +382,25 @@ type GetETag struct {
 	ETag    ETag     `xml:",chardata"`
 }
 
-// ETag is an entity-tag's opaque-tag, without the surrounding double quotes.
+// ETag is an entity-tag (RFC 7232 section 2.3).
+//
+// A strong entity-tag is held as its opaque-tag without the surrounding double
+// quotes. A weak one is held whole, as W/ followed by the quoted opaque-tag:
+// an opaque-tag cannot contain a double quote, so the two forms never collide.
 //
 // An opaque-tag is a quoted string without escapes: a backslash is an ordinary
-// character in it (RFC 7232 section 2.3).
+// character in it.
 type ETag string
 
 func (etag *ETag) UnmarshalText(b []byte) error {
 	s := strings.TrimSpace(string(b))
+	if opaque, ok := strings.CutPrefix(s, "W/"); ok && strings.HasPrefix(opaque, `"`) {
+		if len(opaque) < 2 || !strings.HasSuffix(opaque, `"`) || strings.Contains(opaque[1:len(opaque)-1], `"`) {
+			return fmt.Errorf("webdav: malformed ETag %q", b)
+		}
+		*etag = ETag(s)
+		return nil
+	}
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
 		s = s[1 : len(s)-1]
 	}
@@ -402,11 +413,19 @@ func (etag *ETag) UnmarshalText(b []byte) error {
 	return nil
 }
 
+// IsWeak reports whether the entity-tag is weak.
+func (etag ETag) IsWeak() bool {
+	return strings.HasPrefix(string(etag), `W/"`)
+}
+
 func (etag ETag) MarshalText() ([]byte, error) {
 	return []byte(etag.String()), nil
 }
 
 func (etag ETag) String() string {
+	if etag.IsWeak() {
+		return string(etag)
+	}
 	return `"` + string(etag) + `"`
 }
 
