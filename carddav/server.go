@@ -18,10 +18,10 @@ import (
 
 type PutAddressObjectOptions struct {
 	// IfNoneMatch indicates that the client does not want to overwrite
-	// an existing resource.
+	// an existing resource. Check it with MatchETagWeak.
 	IfNoneMatch webdav.ConditionalMatch
 	// IfMatch provides the ETag of the resource that the client intends
-	// to overwrite, can be ""
+	// to overwrite, can be "". Check it with MatchETag.
 	IfMatch webdav.ConditionalMatch
 }
 
