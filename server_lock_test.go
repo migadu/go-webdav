@@ -22,7 +22,7 @@ func TestLock(t *testing.T) {
 	req := httptest.NewRequest("LOCK", "/res", strings.NewReader(lock))
 	req.Header.Set("Content-Type", "application/xml")
 	w := httptest.NewRecorder()
-	handler := &Handler{FileSystem: testFileSystem{}}
+	handler := &Handler{FileSystem: testFileSystem{}, LockSystem: &MemLockSystem{}}
 	handler.ServeHTTP(w, req)
 
 	res := w.Result()
@@ -50,7 +50,7 @@ func TestLock(t *testing.T) {
 }
 
 func TestLockConflict(t *testing.T) {
-	handler := &Handler{FileSystem: testFileSystem{}}
+	handler := &Handler{FileSystem: testFileSystem{}, LockSystem: &MemLockSystem{}}
 
 	req := httptest.NewRequest("LOCK", "/res", strings.NewReader(lock))
 	req.Header.Set("Content-Type", "application/xml")
@@ -73,7 +73,7 @@ func TestLockRefreshBadToken(t *testing.T) {
 	req := httptest.NewRequest("LOCK", "/res", strings.NewReader(""))
 	req.Header.Set("If", "(<opaquelocktoken:anytoken>)")
 	w := httptest.NewRecorder()
-	handler := &Handler{FileSystem: testFileSystem{}}
+	handler := &Handler{FileSystem: testFileSystem{}, LockSystem: &MemLockSystem{}}
 	handler.ServeHTTP(w, req)
 
 	res := w.Result()

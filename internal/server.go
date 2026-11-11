@@ -383,6 +383,13 @@ type Backend interface {
 	Mkcol(r *http.Request) error
 	Copy(r *http.Request, dest *Href, recursive, overwrite bool) (created bool, err error)
 	Move(r *http.Request, dest *Href, overwrite bool) (created bool, err error)
+}
+
+// LockBackend is a Backend supporting locks (RFC 4918 compliance class 2).
+// Handler replies to LOCK and UNLOCK requests with 405 Method Not Allowed if
+// its Backend isn't a LockBackend.
+type LockBackend interface {
+	Backend
 	Lock(r *http.Request, depth Depth, timeout time.Duration, refreshToken string) (lock *Lock, created bool, err error)
 	Unlock(r *http.Request, tokenHref string) error
 }
@@ -432,10 +439,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		case "COPY", "MOVE":
 			err = h.handleCopyMove(w, r)
-		case "LOCK":
-			err = h.handleLock(w, r)
-		case "UNLOCK":
-			err = h.handleUnlock(w, r)
+		case "LOCK", "UNLOCK":
+			lb, ok := h.Backend.(LockBackend)
+			if !ok {
+				err = HTTPErrorf(http.StatusMethodNotAllowed, "webdav: unsupported method")
+			} else if r.Method == "LOCK" {
+				err = h.handleLock(w, r, lb)
+			} else {
+				err = h.handleUnlock(w, r, lb)
+			}
 		default:
 			err = HTTPErrorf(http.StatusMethodNotAllowed, "webdav: unsupported method")
 		}
@@ -814,7 +826,7 @@ func (h *Handler) handleCopyMove(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (h *Handler) handleLock(w http.ResponseWriter, r *http.Request) error {
+func (h *Handler) handleLock(w http.ResponseWriter, r *http.Request, b LockBackend) error {
 	var (
 		lockInfo     LockInfo
 		refreshToken string
@@ -862,7 +874,7 @@ func (h *Handler) handleLock(w http.ResponseWriter, r *http.Request) error {
 		timeout = t.Duration
 	}
 
-	lock, created, err := h.Backend.Lock(r, depth, timeout, refreshToken)
+	lock, created, err := b.Lock(r, depth, timeout, refreshToken)
 	if err != nil {
 		return err
 	}
@@ -904,13 +916,13 @@ func (h *Handler) handleLock(w http.ResponseWriter, r *http.Request) error {
 	return ServeXML(w).Encode(prop)
 }
 
-func (h *Handler) handleUnlock(w http.ResponseWriter, r *http.Request) error {
+func (h *Handler) handleUnlock(w http.ResponseWriter, r *http.Request, b LockBackend) error {
 	tokenHref, err := ParseLockToken(r.Header.Get("Lock-Token"))
 	if err != nil {
 		return &HTTPError{http.StatusBadRequest, err}
 	}
 
-	if err := h.Backend.Unlock(r, tokenHref); err != nil {
+	if err := b.Unlock(r, tokenHref); err != nil {
 		return err
 	}
 

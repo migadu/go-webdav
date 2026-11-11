@@ -2,7 +2,6 @@ package webdav
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -11,8 +10,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/emersion/go-webdav/internal"
 )
@@ -85,9 +82,11 @@ type DeadPropertyFileSystem interface {
 // server.
 type Handler struct {
 	FileSystem FileSystem
-
-	locks   map[string]*internal.Lock
-	locksMu sync.Mutex
+	// LockSystem, if set, enables locking (RFC 4918 compliance class 2): the
+	// Handler then advertises DAV class 2, supports LOCK and UNLOCK requests,
+	// and enforces locks. Otherwise, LOCK and UNLOCK requests are refused
+	// with 405 Method Not Allowed.
+	LockSystem LockSystem
 }
 
 // ServeHTTP implements http.Handler.
@@ -97,14 +96,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.locksMu.Lock()
-	if h.locks == nil {
-		h.locks = make(map[string]*internal.Lock)
+	b := &backend{FileSystem: h.FileSystem, locks: h.LockSystem}
+	var ib internal.Backend = b
+	if b.locks != nil {
+		ib = lockingBackend{b}
 	}
-	h.locksMu.Unlock()
-
-	b := backend{FileSystem: h.FileSystem, locks: h.locks, locksMu: &h.locksMu}
-	hh := internal.Handler{Backend: &b}
+	hh := internal.Handler{Backend: ib}
 	hh.ServeHTTP(w, r)
 }
 
@@ -145,17 +142,18 @@ func NewHrefError(path string, err error) error {
 
 type backend struct {
 	FileSystem FileSystem
-
-	locks   map[string]*internal.Lock
-	locksMu *sync.Mutex
+	locks      LockSystem // nil if locking is disabled
 }
 
 func (b *backend) Options(r *http.Request) (caps []string, allow []string, err error) {
-	caps = []string{"2"}
+	if b.locks != nil {
+		caps = []string{"2"}
+	}
 
 	fi, err := b.FileSystem.Stat(r.Context(), r.URL.Path)
 	if internal.IsNotFound(err) {
-		return caps, []string{http.MethodOptions, http.MethodPut, "MKCOL"}, nil
+		allow = []string{http.MethodOptions, http.MethodPut, "MKCOL"}
+		return caps, allow, nil
 	} else if err != nil {
 		return nil, nil, err
 	}
@@ -174,6 +172,10 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 
 	if !fi.IsDir {
 		allow = append(allow, http.MethodHead, http.MethodGet, http.MethodPut)
+	}
+
+	if b.locks != nil {
+		allow = append(allow, "LOCK", "UNLOCK")
 	}
 
 	return caps, allow, nil
@@ -262,12 +264,14 @@ func (b *backend) propFindFile(ctx context.Context, propfind *internal.PropFind,
 		return internal.NewResourceType(types...), nil
 	}
 
-	props[internal.SupportedLockName] = internal.PropFindValue(&internal.SupportedLock{
-		LockEntries: []internal.LockEntry{{
-			LockScope: internal.LockScope{Exclusive: &struct{}{}},
-			LockType:  internal.LockType{Write: &struct{}{}},
-		}},
-	})
+	if b.locks != nil {
+		props[internal.SupportedLockName] = internal.PropFindValue(&internal.SupportedLock{
+			LockEntries: []internal.LockEntry{{
+				LockScope: internal.LockScope{Exclusive: &struct{}{}},
+				LockType:  internal.LockType{Write: &struct{}{}},
+			}},
+		})
+	}
 
 	if !fi.IsDir {
 		props[internal.GetContentLengthName] = internal.PropFindValue(&internal.GetContentLength{
@@ -391,13 +395,9 @@ func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*
 }
 
 func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
-	if lock := b.resourceLock(r.URL.Path); lock != nil {
-		token, err := internal.ParseSubmittedToken(r.Header)
-		if err != nil {
+	if b.locks != nil {
+		if err := b.checkLock(r, r.URL.Path); err != nil {
 			return err
-		}
-		if token != lock.Href {
-			return &internal.HTTPError{Code: http.StatusLocked}
 		}
 	}
 
@@ -433,13 +433,9 @@ func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (b *backend) Delete(r *http.Request) error {
-	if lock := b.resourceLock(r.URL.Path); lock != nil {
-		token, err := internal.ParseSubmittedToken(r.Header)
-		if err != nil {
+	if b.locks != nil {
+		if err := b.checkLock(r, r.URL.Path); err != nil {
 			return err
-		}
-		if token != lock.Href {
-			return &internal.HTTPError{Code: http.StatusLocked}
 		}
 	}
 
@@ -451,11 +447,9 @@ func (b *backend) Delete(r *http.Request) error {
 		IfMatch:     ifMatch,
 	}
 	err := b.FileSystem.RemoveAll(r.Context(), r.URL.Path, &opts)
-	if err == nil {
+	if err == nil && b.locks != nil {
 		// URL became unmapped so delete lock if exists
-		b.locksMu.Lock()
-		defer b.locksMu.Unlock()
-		delete(b.locks, r.URL.Path)
+		err = b.removeLocks(r, r.URL.Path)
 	}
 
 	return err
@@ -473,13 +467,9 @@ func (b *backend) Mkcol(r *http.Request) error {
 }
 
 func (b *backend) Copy(r *http.Request, dest *internal.Href, recursive, overwrite bool) (created bool, err error) {
-	if lock := b.resourceLock(dest.Path); lock != nil {
-		token, err := internal.ParseSubmittedToken(r.Header)
-		if err != nil {
+	if b.locks != nil {
+		if err := b.checkLock(r, dest.Path); err != nil {
 			return false, err
-		}
-		if token != lock.Href {
-			return false, &internal.HTTPError{Code: http.StatusLocked}
 		}
 	}
 
@@ -496,34 +486,10 @@ func (b *backend) Copy(r *http.Request, dest *internal.Href, recursive, overwrit
 
 func (b *backend) Move(r *http.Request, dest *internal.Href, overwrite bool) (created bool, err error) {
 	// Check source and destination locks
-	var conditions [][]internal.Condition
-	hif := r.Header.Get("If")
-	if hif == "" {
-		conditions = nil
-	} else {
-		var err error
-		conditions, err = internal.ParseConditions(hif)
-		if err != nil {
-			return false, &internal.HTTPError{http.StatusBadRequest, err}
+	if b.locks != nil {
+		if err := b.checkMoveLocks(r, dest); err != nil {
+			return false, err
 		}
-	}
-	srcLock := b.resourceLock(r.URL.Path)
-	destLock := b.resourceLock(dest.Path)
-	for _, conds := range conditions {
-		if len(conds) == 0 {
-			continue
-		}
-		if len(conds) > 1 {
-			return false, internal.HTTPErrorf(http.StatusBadRequest, "webdav: multiple conditions are not supported in the If header field")
-		}
-		if (conds[0].Resource == "" || conds[0].Resource == r.URL.Path) && srcLock != nil && conds[0].Token == srcLock.Href {
-			srcLock = nil
-		} else if (conds[0].Resource == dest.Path) && destLock != nil && conds[0].Token == destLock.Href {
-			destLock = nil
-		}
-	}
-	if srcLock != nil || destLock != nil {
-		return false, &internal.HTTPError{Code: http.StatusLocked}
 	}
 
 	options := MoveOptions{
@@ -533,82 +499,11 @@ func (b *backend) Move(r *http.Request, dest *internal.Href, overwrite bool) (cr
 	if os.IsExist(err) {
 		return false, &internal.HTTPError{http.StatusPreconditionFailed, err}
 	}
-	if err == nil {
+	if err == nil && b.locks != nil {
 		// URL became unmapped so delete lock if exists
-		b.locksMu.Lock()
-		defer b.locksMu.Unlock()
-		delete(b.locks, r.URL.Path)
+		err = b.removeLocks(r, r.URL.Path)
 	}
 	return created, err
-}
-
-func (b *backend) Lock(r *http.Request, depth internal.Depth, timeout time.Duration, refreshToken string) (lock *internal.Lock, created bool, err error) {
-	// TODO: locking unmapped URLs
-	fi, err := b.FileSystem.Stat(r.Context(), r.URL.Path)
-	if err != nil {
-		return nil, false, err
-	}
-	if fi.IsDir {
-		return nil, false, internal.HTTPErrorf(http.StatusBadRequest, "webdav: locking collections is not supported")
-	}
-
-	if refreshToken != "" {
-		if lock := b.resourceLock(r.URL.Path); lock == nil || lock.Href != refreshToken {
-			return nil, false, &internal.HTTPError{Code: http.StatusPreconditionFailed}
-		} else {
-			// Lock timeout is not supported so refresh is a no-op
-			return lock, false, nil
-		}
-	}
-
-	token := newLockToken()
-	lock = &internal.Lock{Href: token, Root: fi.Path, Timeout: 0 /* infinity */}
-
-	b.locksMu.Lock()
-	defer b.locksMu.Unlock()
-	if _, prs := b.locks[r.URL.Path]; prs {
-		return nil, false, internal.HTTPErrorf(http.StatusLocked, "webdav: there is already a lock on this resource")
-	}
-	b.locks[lock.Root] = lock
-
-	return lock, false, nil
-}
-
-func (b *backend) Unlock(r *http.Request, tokenHref string) error {
-	if lock := b.resourceLock(r.URL.Path); lock == nil {
-		return internal.HTTPErrorf(http.StatusConflict, "webdav: resource is not locked")
-	} else if lock.Href != tokenHref {
-		return internal.HTTPErrorf(http.StatusForbidden, "webdav: incorrect token")
-	}
-
-	b.locksMu.Lock()
-	defer b.locksMu.Unlock()
-	delete(b.locks, r.URL.Path)
-
-	return nil
-}
-
-// newLockToken generates a lock token: an opaquelocktoken URI (RFC 4918
-// appendix C) made of a random (version 4) UUID (RFC 9562 section 5.4).
-func newLockToken() string {
-	var b [16]byte
-	// Since Go 1.24, crypto/rand.Read never returns an error
-	rand.Read(b[:])
-	b[6] = b[6]&0x0f | 0x40 // version 4
-	b[8] = b[8]&0x3f | 0x80 // RFC 9562 variant
-	return fmt.Sprintf("opaquelocktoken:%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
-}
-
-func (b *backend) resourceLock(path string) *internal.Lock {
-	b.locksMu.Lock()
-	defer b.locksMu.Unlock()
-
-	lock, prs := b.locks[path]
-	if !prs {
-		return nil
-	}
-
-	return lock
 }
 
 // BackendSuppliedHomeSet represents either a CalDAV calendar-home-set or a
