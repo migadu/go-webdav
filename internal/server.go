@@ -241,29 +241,73 @@ func NewPropFindResponse(path string, propfind *PropFind, props map[xml.Name]Pro
 // gets a multistatus naming each property, as RFC 4918 section 9.2 requires,
 // rather than failing as a whole.
 func NewPropPatchResponse(path string, update *PropertyUpdate, code int) (*Response, error) {
-	var props []Prop
-	for _, set := range update.Set {
-		props = append(props, set.Prop)
+	refuse := func(*RawXMLValue, bool) error {
+		return &HTTPError{Code: code}
 	}
-	for _, remove := range update.Remove {
-		props = append(props, remove.Prop)
-	}
+	return PatchProps(path, update, refuse, nil)
+}
 
-	resp := &Response{Hrefs: []Href{{Path: path}}}
-	for _, prop := range props {
-		for _, raw := range prop.Raw {
-			name, ok := raw.XMLName()
-			if !ok {
-				continue
-			}
-			if err := resp.EncodeProp(code, NewRawXMLElement(name, nil, nil)); err != nil {
-				return nil, err
+// PropPatchFunc processes a property of a PROPPATCH request: raw is the
+// property element, to set or, if remove is true, to remove.
+type PropPatchFunc func(raw *RawXMLValue, remove bool) error
+
+// PatchProps returns the response to a PROPPATCH request for path, which is
+// executed in full or not at all (RFC 4918 section 9.2).
+//
+// It calls f for each property of update, the removed ones first. If f fails
+// for any of them, the response reports the status of each error, and 424
+// Failed Dependency for the other properties. Otherwise it calls commit to
+// apply the changes and the response reports 200 OK for every property; an
+// error returned by commit fails the whole request.
+func PatchProps(path string, update *PropertyUpdate, f PropPatchFunc, commit func() error) (*Response, error) {
+	type instruction struct {
+		name   xml.Name
+		raw    *RawXMLValue
+		remove bool
+	}
+	var instructions []instruction
+	add := func(prop *Prop, remove bool) {
+		for i := range prop.Raw {
+			if name, ok := prop.Raw[i].XMLName(); ok {
+				instructions = append(instructions, instruction{name, &prop.Raw[i], remove})
 			}
 		}
 	}
-
-	if len(resp.PropStats) == 0 {
+	for i := range update.Remove {
+		add(&update.Remove[i].Prop, true)
+	}
+	for i := range update.Set {
+		add(&update.Set[i].Prop, false)
+	}
+	if len(instructions) == 0 {
 		return nil, HTTPErrorf(http.StatusBadRequest, "webdav: request missing properties to update")
+	}
+
+	codes := make([]int, len(instructions))
+	failed := false
+	for i, ins := range instructions {
+		codes[i] = http.StatusOK
+		if err := f(ins.raw, ins.remove); err != nil {
+			codes[i] = HTTPErrorFromError(err).Code
+			failed = true
+		}
+	}
+
+	if failed {
+		for i := range codes {
+			if codes[i] == http.StatusOK {
+				codes[i] = http.StatusFailedDependency
+			}
+		}
+	} else if err := commit(); err != nil {
+		return nil, err
+	}
+
+	resp := &Response{Hrefs: []Href{{Path: path}}}
+	for i, ins := range instructions {
+		if err := resp.EncodeProp(codes[i], NewRawXMLElement(ins.name, nil, nil)); err != nil {
+			return nil, err
+		}
 	}
 	return resp, nil
 }

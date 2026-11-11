@@ -33,6 +33,14 @@ type AddressBook struct {
 	ReadOnly bool
 }
 
+// AddressBookUpdate holds the changes a PROPPATCH request makes to an
+// address book. A nil field is left as is; removing a property sets it to the
+// empty string.
+type AddressBookUpdate struct {
+	Name        *string
+	Description *string
+}
+
 func (ab *AddressBook) SupportsAddressData(contentType, version string) bool {
 	if len(ab.SupportedAddressData) == 0 {
 		return contentType == "text/vcard" && version == "3.0"
