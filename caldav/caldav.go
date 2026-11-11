@@ -38,20 +38,28 @@ func ValidateCalendarObject(cal *ical.Calendar) (eventType string, uid string, e
 	}
 
 	for _, comp := range cal.Children {
+		if comp.Name == ical.CompTimezone {
+			continue
+		}
+
 		// Calendar object resources contained in calendar collections
 		// MUST NOT contain more than one type of calendar component
 		// (e.g., VEVENT, VTODO, VJOURNAL, VFREEBUSY, etc.) with the
 		// exception of VTIMEZONE components, which MUST be specified
 		// for each unique TZID parameter value specified in the
 		// iCalendar object.
-		if comp.Name != ical.CompTimezone {
-			if eventType == "" {
-				eventType = comp.Name
-			}
-			if eventType != comp.Name {
-				return "", "", fmt.Errorf("conflicting event types in calendar: %s, %s", eventType, comp.Name)
-			}
-			// TODO check VTIMEZONE for each TZID?
+		if eventType == "" {
+			eventType = comp.Name
+		}
+		if eventType != comp.Name {
+			return "", "", fmt.Errorf("conflicting event types in calendar: %s, %s", eventType, comp.Name)
+		}
+		// TODO check VTIMEZONE for each TZID?
+
+		// RFC 5545 section 3.6.1 requires DTSTART on VEVENT when METHOD is
+		// absent (and RFC 4791 section 4.1 forbids METHOD above).
+		if comp.Name == ical.CompEvent && comp.Props.Get(ical.PropDateTimeStart) == nil {
+			return "", "", fmt.Errorf("VEVENT component must specify %s property", ical.PropDateTimeStart)
 		}
 
 		// Calendar components in a calendar collection that have
@@ -61,12 +69,18 @@ func ValidateCalendarObject(cal *ical.Calendar) (eventType string, uid string, e
 		if err != nil {
 			return "", "", fmt.Errorf("error checking component UID: %v", err)
 		}
+		if compUID == "" {
+			return "", "", fmt.Errorf("calendar component %s must specify a non-empty %s property", comp.Name, ical.PropUID)
+		}
 		if uid == "" {
 			uid = compUID
 		}
-		if compUID != "" && uid != compUID {
+		if uid != compUID {
 			return "", "", fmt.Errorf("conflicting UID values in calendar: %s, %s", uid, compUID)
 		}
+	}
+	if eventType == "" {
+		return "", "", fmt.Errorf("calendar resource must contain at least one calendar component")
 	}
 	return eventType, uid, nil
 }
