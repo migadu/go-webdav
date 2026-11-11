@@ -41,6 +41,14 @@ type Backend interface {
 	webdav.UserPrincipalBackend
 }
 
+// AddressBookUpdater is an optional interface a Backend can implement to let
+// clients modify the properties of address books with PROPPATCH.
+type AddressBookUpdater interface {
+	// UpdateAddressBook applies all of update to the address book at path,
+	// or none of it.
+	UpdateAddressBook(ctx context.Context, path string, update *AddressBookUpdate) error
+}
+
 // Handler handles CardDAV HTTP requests. It can be used to create a CardDAV
 // server.
 type Handler struct {
@@ -284,7 +292,11 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeAddressObject {
 		// Note: some clients assume the address book is read-only when
 		// DELETE/MKCOL are missing
-		return caps, []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "MKCOL"}, nil
+		allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "MKCOL"}
+		if _, ok := b.Backend.(AddressBookUpdater); ok {
+			allow = append(allow, "PROPPATCH")
+		}
+		return caps, allow, nil
 	}
 
 	var dataReq AddressDataRequest
@@ -611,6 +623,9 @@ func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*
 		if _, err := b.Backend.GetAddressBook(r.Context(), r.URL.Path); err != nil {
 			return nil, err
 		}
+		if updater, ok := b.Backend.(AddressBookUpdater); ok {
+			return b.propPatchAddressBook(r, updater, update)
+		}
 	case resourceTypeAddressObject:
 		var dataReq AddressDataRequest
 		if _, err := b.Backend.GetAddressObject(r.Context(), r.URL.Path, &dataReq); err != nil {
@@ -618,8 +633,39 @@ func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*
 		}
 	}
 
-	// TODO: support PROPPATCH for address books
 	return internal.NewPropPatchResponse(r.URL.Path, update, http.StatusForbidden)
+}
+
+func (b *backend) propPatchAddressBook(r *http.Request, updater AddressBookUpdater, update *internal.PropertyUpdate) (*internal.Response, error) {
+	var abUpdate AddressBookUpdate
+	patch := func(raw *internal.RawXMLValue, remove bool) error {
+		name, _ := raw.XMLName()
+		switch name {
+		case internal.DisplayNameName:
+			var v internal.DisplayName
+			if !remove {
+				if err := raw.Decode(&v); err != nil {
+					return &internal.HTTPError{Code: http.StatusConflict, Err: err}
+				}
+			}
+			abUpdate.Name = &v.Name
+		case addressBookDescriptionName:
+			var v addressbookDescription
+			if !remove {
+				if err := raw.Decode(&v); err != nil {
+					return &internal.HTTPError{Code: http.StatusConflict, Err: err}
+				}
+			}
+			abUpdate.Description = &v.Description
+		default:
+			return internal.HTTPErrorf(http.StatusForbidden, "carddav: property cannot be modified")
+		}
+		return nil
+	}
+	commit := func() error {
+		return updater.UpdateAddressBook(r.Context(), r.URL.Path, &abUpdate)
+	}
+	return internal.PatchProps(r.URL.Path, update, patch, commit)
 }
 
 func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
