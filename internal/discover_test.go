@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"slices"
 	"testing"
 )
 
@@ -49,6 +50,17 @@ func TestDiscoverContextURL(t *testing.T) {
 		{"TXT with case-insensitive PATH key", fakeResolver{srv: srv, txt: []string{"txtvers=1", "PATH=/caldav/"}}, "https://dav.example.com/caldav/", nil},
 		{"TXT with relative path", fakeResolver{srv: srv, txt: []string{"path=caldav/"}}, "https://dav.example.com/caldav/", nil},
 		{"TXT without path key falls back to well-known", fakeResolver{srv: srv, txt: []string{"txtvers=1"}}, "https://dav.example.com/.well-known/caldav", nil},
+		// A record with several strings, which LookupTXT joins without a
+		// separator: TXT "txtvers=1" "path=/caldav/" (RFC 6763 section 6.1)
+		{"TXT strings joined, txtvers first", fakeResolver{srv: srv, txt: []string{"txtvers=1path=/caldav/"}}, "https://dav.example.com/caldav/", nil},
+		{"TXT strings joined, path first", fakeResolver{srv: srv, txt: []string{"path=/caldav/txtvers=1"}}, "https://dav.example.com/caldav/", nil},
+		{"TXT strings joined, upper case keys", fakeResolver{srv: srv, txt: []string{"TXTVERS=1PATH=/caldav/"}}, "https://dav.example.com/caldav/", nil},
+		{"TXT strings joined, with another key", fakeResolver{srv: srv, txt: []string{"txtvers=1foo=barpath=/caldav/"}}, "https://dav.example.com/caldav/", nil},
+		{"TXT strings joined, empty txtvers", fakeResolver{srv: srv, txt: []string{"txtvers=path=/caldav/"}}, "https://dav.example.com/caldav/", nil},
+		{"TXT strings joined, and another record", fakeResolver{srv: srv, txt: []string{"foo=bar", "txtvers=1path=/caldav/"}}, "https://dav.example.com/caldav/", nil},
+		// Keys can't hold "=", so this is the key "xpath", not "x" and "path"
+		{"TXT key ending in path", fakeResolver{srv: srv, txt: []string{"xpath=/other/"}}, "https://dav.example.com/.well-known/caldav", nil},
+		{"TXT path with an equals sign", fakeResolver{srv: srv, txt: []string{"path=/dav/a=b/"}}, "https://dav.example.com/dav/a=b/", nil},
 		{"no TXT record", fakeResolver{srv: srv, txtErr: notFound}, "https://dav.example.com/.well-known/caldav", nil},
 		{"TXT refused", fakeResolver{srv: srv, txtErr: refused}, "", refused},
 		{"TXT temporary failure", fakeResolver{srv: srv, txtErr: temporary}, "", temporary},
@@ -80,6 +92,8 @@ func TestDiscoverContextURLInvalidTXT(t *testing.T) {
 		{"empty path", []string{"path="}},
 		{"empty path with txtvers", []string{"txtvers=1", "path="}},
 		{"multiple path entries", []string{"path=/a/", "path=/b/"}},
+		{"empty path, strings joined", []string{"txtvers=1path="}},
+		{"multiple path entries, strings joined", []string{"path=/a/path=/b/"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			defer func(r dnsResolver) { resolver = r }(resolver)
@@ -89,5 +103,31 @@ func TestDiscoverContextURLInvalidTXT(t *testing.T) {
 				t.Fatalf("DiscoverContextURL() = %q, nil, want error", got)
 			}
 		})
+	}
+}
+
+// TestSplitTXT checks how the strings of a TXT record joined by LookupTXT are
+// split, including the cases it can't tell apart.
+func TestSplitTXT(t *testing.T) {
+	for _, tc := range []struct {
+		record string
+		want   []string
+	}{
+		{"", []string{""}},
+		{"path=/dav/", []string{"path=/dav/"}},
+		{"txtvers=1path=/dav/", []string{"txtvers=1", "path=/dav/"}},
+		{"path=/dav/txtvers=1", []string{"path=/dav/", "txtvers=1"}},
+		{"Path=/a/TxtVers=1", []string{"Path=/a/", "TxtVers=1"}},
+		{"a=bpath=/dav/", []string{"a=b", "path=/dav/"}},
+		{"xpath=/a/", []string{"xpath=/a/"}},
+		// Can't be told apart from "path=/dav/" "c=d"
+		{"a=bpath=/dav/c=d", []string{"a=b", "path=/dav/c=d"}},
+		// Can't be told apart from "flag" "path=/a/"
+		{"flagpath=/a/", []string{"flagpath=/a/"}},
+		{"path=/a/path=/b/", []string{"path=/a/", "path=/b/"}},
+	} {
+		if got := splitTXT(tc.record); !slices.Equal(got, tc.want) {
+			t.Errorf("splitTXT(%q) = %q, want %q", tc.record, got, tc.want)
+		}
 	}
 }
