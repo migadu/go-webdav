@@ -631,13 +631,44 @@ type CurrentUserPrivilegeSet struct {
 }
 
 // https://tools.ietf.org/html/rfc3744#section-5.4
+//
+// A privilege is set if its field isn't nil. The privileges of RFC 3744 are
+// defined in section 3.
 type Privilege struct {
-	XMLName      xml.Name  `xml:"DAV: privilege"`
-	All          *struct{} `xml:"DAV: all,omitempty"`
-	Read         *struct{} `xml:"DAV: read,omitempty"`
-	Write        *struct{} `xml:"DAV: write,omitempty"`
+	XMLName xml.Name `xml:"DAV: privilege"`
+	// All aggregates all the privileges of the resource (section 3.11).
+	All *struct{} `xml:"DAV: all,omitempty"`
+	// Read controls the methods which return information about the state
+	// of the resource, such as GET and PROPFIND (section 3.1).
+	Read *struct{} `xml:"DAV: read,omitempty"`
+	// ReadACL controls reading the DAV:acl property (section 3.6).
+	ReadACL *struct{} `xml:"DAV: read-acl,omitempty"`
+	// ReadCurrentUserPrivilegeSet controls reading the
+	// DAV:current-user-privilege-set property (section 3.7).
+	ReadCurrentUserPrivilegeSet *struct{} `xml:"DAV: read-current-user-privilege-set,omitempty"`
+	// Write controls the methods which modify the content, the dead
+	// properties or the members of the resource, such as PUT and PROPPATCH
+	// (section 3.2). It aggregates WriteProperties, WriteContent, Bind and
+	// Unbind (section 3.12).
+	Write *struct{} `xml:"DAV: write,omitempty"`
+	// WriteACL controls modifying DAV:acl with the ACL method (section
+	// 3.8).
+	WriteACL *struct{} `xml:"DAV: write-acl,omitempty"`
+	// WriteProperties controls modifying the dead properties of the
+	// resource, with PROPPATCH (section 3.3).
+	WriteProperties *struct{} `xml:"DAV: write-properties,omitempty"`
+	// WriteContent controls modifying the content of an existing resource,
+	// with PUT (section 3.4).
 	WriteContent *struct{} `xml:"DAV: write-content,omitempty"`
-	Unbind       *struct{} `xml:"DAV: unbind,omitempty"`
+	// Bind controls adding members to a collection, for instance with PUT
+	// or MKCOL (section 3.9).
+	Bind *struct{} `xml:"DAV: bind,omitempty"`
+	// Unbind controls removing members from a collection, for instance with
+	// DELETE or MOVE (section 3.10).
+	Unbind *struct{} `xml:"DAV: unbind,omitempty"`
+	// Unlock controls removing the locks of another principal with UNLOCK
+	// (section 3.5).
+	Unlock *struct{} `xml:"DAV: unlock,omitempty"`
 
 	// The privileges of CalDAV scheduling Inbox collections, see RFC 6638
 	// section 6.1. ScheduleDeliver aggregates the three others.
