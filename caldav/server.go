@@ -107,6 +107,61 @@ type CalendarObjectCopyMover interface {
 	MoveCalendarObject(ctx context.Context, src, dst string, opts *MoveCalendarObjectOptions) (created bool, err error)
 }
 
+// InboxBackend is an optional interface a Backend can implement to support
+// scheduling (RFC 6638): delivering scheduling messages, such as invitations,
+// to the user's clients, and letting them reply.
+//
+// Implementing InboxBackend asserts that the backend performs implicit
+// scheduling. The server then advertises the "calendar-auto-schedule"
+// capability, which tells clients that the server sends and processes
+// scheduling messages as calendar objects are stored and removed (RFC 6638
+// section 3), so that they mustn't send them themselves, e.g. by email. The
+// server can't do that on its own: when PutCalendarObject and
+// DeleteCalendarObject store or remove a scheduling object resource, a
+// calendar object whose ORGANIZER, or one of whose ATTENDEEs, is one of the
+// user's Inbox.UserAddressSet (section 3.1), the backend must:
+//
+//   - for an event the user organizes, send a REQUEST to the attendees when
+//     it's created or modified, and a CANCEL to the attendees it's removed
+//     for, or to all of them when it's deleted (section 3.2.1);
+//   - for an event the user attends, send a REPLY to the organizer when the
+//     user's PARTSTAT changes, and a REPLY declining it when it's deleted
+//     (section 3.2.2);
+//
+// unless the SCHEDULE-AGENT parameter is CLIENT or NONE (section 7.1). The
+// messages can be sent to users of other servers as iMIP email (RFC 6047).
+// The backend must also process the scheduling messages the user receives
+// (section 4): add or update the invitations in the user's calendars, apply
+// the replies of attendees to the events the user organizes, and store a copy
+// of the messages in the Inbox, where clients find them.
+//
+// For users GetInbox returns an Inbox for, the server serves the
+// CALDAV:schedule-inbox-URL and CALDAV:calendar-user-address-set properties
+// of the principal, and the Inbox collection at Inbox.Path. The scheduling
+// messages in the Inbox are iTIP messages (RFC 5546), whose METHOD is set:
+// the server lists them with ListCalendarObjects, queries them with
+// QueryCalendarObjects (RFC 6638 section 2.3) and fetches them with
+// GetCalendarObject, or GetCalendarObjects for CalendarObjectsBackend. To
+// reply to a message, clients store the event with the user's PARTSTAT
+// changed with PutCalendarObject, and then remove the message from the Inbox
+// with DeleteCalendarObject.
+//
+// The rest of RFC 6638 isn't supported: there is no scheduling Outbox, so no
+// CALDAV:schedule-outbox-URL and no free-busy requests by POST (sections 2.1
+// and 5); no Schedule-Tag or If-Schedule-Tag-Match headers (sections 3.2.10,
+// 8.2 and 8.3); no CALDAV:schedule-default-calendar-URL or
+// CALDAV:schedule-calendar-transp properties (section 9); and the scheduling
+// preconditions of section 3.2.4 aren't checked. The Schedule-Reply request
+// header (section 8.1), with which clients ask not to send a REPLY when an
+// event is deleted, isn't passed to DeleteCalendarObject: backends can read
+// it in an HTTP middleware.
+type InboxBackend interface {
+	// GetInbox returns the scheduling Inbox of the current user. It returns
+	// nil if the user isn't enabled for scheduling: calendar-auto-schedule
+	// isn't advertised to such users.
+	GetInbox(ctx context.Context) (*Inbox, error)
+}
+
 // Handler handles CalDAV HTTP requests. It can be used to create a CalDAV
 // server.
 type Handler struct {
@@ -163,7 +218,7 @@ func (h *Handler) handleMkcalendar(w http.ResponseWriter, r *http.Request) error
 		Backend: h.Backend,
 		Prefix:  strings.TrimSuffix(h.Prefix, "/"),
 	}
-	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendar {
+	if b.resourceTypeAtPath(r.Context(), r.URL.Path) != resourceTypeCalendar {
 		return newPreconditionError(http.StatusForbidden, PreconditionCalendarCollectionLocationOk)
 	}
 
@@ -457,9 +512,15 @@ func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, mul
 	return internal.ServeMultiStatus(w, ms)
 }
 
+// backend serves a single request.
 type backend struct {
 	Backend Backend
 	Prefix  string
+
+	// The scheduling Inbox of the current user, see scheduleInbox
+	inbox       *Inbox
+	inboxErr    error
+	inboxLoaded bool
 }
 
 type resourceType int
@@ -472,22 +533,66 @@ const (
 	resourceTypeCalendarObject
 )
 
-func (b *backend) resourceTypeAtPath(reqPath string) resourceType {
-	p := path.Clean(reqPath)
-	p = strings.TrimPrefix(p, b.Prefix)
+// resourceTypeScheduleInbox is the type of the scheduling Inbox, which is
+// found by its path rather than by its depth.
+const resourceTypeScheduleInbox resourceType = -1
+
+func (b *backend) resourceTypeAtPath(ctx context.Context, reqPath string) resourceType {
+	reqPath = path.Clean(reqPath)
+	p := strings.TrimPrefix(reqPath, b.Prefix)
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
 	}
 	if p == "/" {
 		return resourceTypeRoot
 	}
+	// Like the other backend paths, the Inbox path includes the prefix. An
+	// error is reported by the requests for the Inbox properties.
+	if inbox, err := b.scheduleInbox(ctx); err == nil && inbox != nil {
+		switch inboxPath := path.Clean(inbox.Path); {
+		case reqPath == inboxPath:
+			return resourceTypeScheduleInbox
+		case path.Dir(reqPath) == inboxPath:
+			return resourceTypeCalendarObject
+		}
+	}
 	return resourceType(len(strings.Split(p, "/")) - 1)
+}
+
+// inScheduleInbox reports whether p is the path of a scheduling message, a
+// member of the scheduling Inbox.
+func (b *backend) inScheduleInbox(ctx context.Context, p string) bool {
+	inbox, err := b.scheduleInbox(ctx)
+	return err == nil && inbox != nil && path.Dir(path.Clean(p)) == path.Clean(inbox.Path)
+}
+
+// scheduleInbox returns the scheduling Inbox of the current user, or nil if
+// the backend doesn't implement InboxBackend or the user has no Inbox. It
+// calls GetInbox once at most: the result is kept for the rest of the request.
+func (b *backend) scheduleInbox(ctx context.Context) (*Inbox, error) {
+	inboxBackend, ok := b.Backend.(InboxBackend)
+	if !ok {
+		return nil, nil
+	}
+	if !b.inboxLoaded {
+		b.inbox, b.inboxErr = inboxBackend.GetInbox(ctx)
+		b.inboxLoaded = true
+	}
+	return b.inbox, b.inboxErr
 }
 
 func (b *backend) Options(r *http.Request) (caps []string, allow []string, err error) {
 	caps = []string{"calendar-access"}
 
-	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendarObject {
+	// The capability asserts that the backend performs implicit scheduling,
+	// see InboxBackend and RFC 6638 section 2
+	if inbox, err := b.scheduleInbox(r.Context()); err != nil {
+		return nil, nil, err
+	} else if inbox != nil {
+		caps = append(caps, "calendar-auto-schedule")
+	}
+
+	if b.resourceTypeAtPath(r.Context(), r.URL.Path) != resourceTypeCalendarObject {
 		return caps, []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "MKCOL", "MKCALENDAR"}, nil
 	}
 
@@ -541,7 +646,7 @@ func (b *backend) HeadGet(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth internal.Depth) (*internal.MultiStatus, error) {
-	resType := b.resourceTypeAtPath(r.URL.Path)
+	resType := b.resourceTypeAtPath(r.Context(), r.URL.Path)
 
 	var dataReq CalendarCompRequest
 	var resps []internal.Response
@@ -571,7 +676,11 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 				}
 				resps = append(resps, *resp)
 				if depth == internal.DepthInfinity {
-					resps_, err := b.propFindAllCalendars(r.Context(), propfind, true)
+					homeSetPath, err := b.Backend.CalendarHomeSetPath(r.Context())
+					if err != nil {
+						return nil, err
+					}
+					resps_, err := b.propFindAllCalendars(r.Context(), propfind, homeSetPath, true)
 					if err != nil {
 						return nil, err
 					}
@@ -592,7 +701,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 			resps = append(resps, *resp)
 			if depth != internal.DepthZero {
 				recurse := depth == internal.DepthInfinity
-				resps_, err := b.propFindAllCalendars(r.Context(), propfind, recurse)
+				resps_, err := b.propFindAllCalendars(r.Context(), propfind, homeSetPath, recurse)
 				if err != nil {
 					return nil, err
 				}
@@ -610,7 +719,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		}
 		resps = append(resps, *resp)
 		if depth != internal.DepthZero {
-			resps_, err := b.propFindAllCalendarObjects(r.Context(), propfind, ab)
+			resps_, err := b.propFindAllCalendarObjects(r.Context(), propfind, ab.Path)
 			if err != nil {
 				return nil, err
 			}
@@ -627,6 +736,25 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 			return nil, err
 		}
 		resps = append(resps, *resp)
+	case resourceTypeScheduleInbox:
+		inbox, err := b.scheduleInbox(r.Context())
+		if err != nil {
+			return nil, err
+		}
+		if inbox != nil {
+			resp, err := b.propFindInbox(propfind, inbox)
+			if err != nil {
+				return nil, err
+			}
+			resps = append(resps, *resp)
+			if depth != internal.DepthZero {
+				resps_, err := b.propFindAllCalendarObjects(r.Context(), propfind, inbox.Path)
+				if err != nil {
+					return nil, err
+				}
+				resps = append(resps, resps_...)
+			}
+		}
 	}
 
 	return internal.NewMultiStatus(resps...), nil
@@ -665,6 +793,18 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 			Href: internal.Href{Path: homeSetPath},
 		}),
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, internal.PrincipalName)),
+	}
+	inbox, err := b.scheduleInbox(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if inbox != nil {
+		props[scheduleInboxURLName] = internal.PropFindValue(&scheduleInboxURL{
+			Href: internal.Href{Path: inbox.Path},
+		})
+		props[calendarUserAddressSetName] = internal.PropFindValue(&calendarUserAddressSet{
+			Addresses: inbox.UserAddressSet,
+		})
 	}
 	return internal.NewPropFindResponse(principalPath, propfind, props)
 }
@@ -769,7 +909,49 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 	return internal.NewPropFindResponse(cal.Path, propfind, props)
 }
 
-func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.PropFind, recurse bool) ([]internal.Response, error) {
+func (b *backend) propFindInbox(propfind *internal.PropFind, inbox *Inbox) (*internal.Response, error) {
+	props := map[xml.Name]internal.PropFindFunc{
+		internal.ResourceTypeName:            internal.PropFindValue(internal.NewResourceType(internal.CollectionName, scheduleInboxName)),
+		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(newInboxPrivilegeSet(inbox.ReadOnly)),
+		// RFC 6638 section 2.3 extends these reports to the Inbox, while
+		// sync-collection REPORTs are only served for calendars
+		internal.SupportedReportSetName: internal.PropFindValue(internal.NewSupportedReportSet(calendarQueryName, calendarMultigetName)),
+	}
+	return internal.NewPropFindResponse(inbox.Path, propfind, props)
+}
+
+// newInboxPrivilegeSet returns the DAV:current-user-privilege-set of the
+// scheduling Inbox of the current user, who owns it: DAV:read, plus
+// DAV:write-content and DAV:unbind unless readOnly is set, so that the
+// scheduling messages can be updated and removed once handled. DAV:write
+// isn't granted: it aggregates DAV:write-properties and DAV:bind, but the
+// Inbox properties can't be modified and only the server delivers messages.
+//
+// CALDAV:schedule-deliver is an aggregate privilege (RFC 6638 section 6.3),
+// and RFC 3744 section 5.4 asks for the privileges an aggregate contains to
+// be listed along with it. Each DAV:privilege element holds a single
+// privilege.
+func newInboxPrivilegeSet(readOnly bool) *internal.CurrentUserPrivilegeSet {
+	granted := &struct{}{}
+	privs := []internal.Privilege{{Read: granted}}
+	if !readOnly {
+		privs = append(privs,
+			internal.Privilege{WriteContent: granted},
+			internal.Privilege{Unbind: granted},
+		)
+	}
+	privs = append(privs,
+		internal.Privilege{ScheduleDeliver: granted},
+		internal.Privilege{ScheduleDeliverInvite: granted},
+		internal.Privilege{ScheduleDeliverReply: granted},
+		internal.Privilege{ScheduleQueryFreeBusy: granted},
+	)
+	return &internal.CurrentUserPrivilegeSet{Privilege: privs}
+}
+
+// propFindAllCalendars returns the responses for the members of the calendar
+// home set: the calendars, and the scheduling Inbox if it's one of them.
+func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.PropFind, homeSetPath string, recurse bool) ([]internal.Response, error) {
 	abs, err := b.Backend.ListCalendars(ctx)
 	errResps, err := internal.HrefErrorResponses(err)
 	if err != nil {
@@ -784,7 +966,27 @@ func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.P
 		}
 		resps = append(resps, *resp)
 		if recurse {
-			resps_, err := b.propFindAllCalendarObjects(ctx, propfind, &ab)
+			resps_, err := b.propFindAllCalendarObjects(ctx, propfind, ab.Path)
+			if err != nil {
+				return nil, err
+			}
+			resps = append(resps, resps_...)
+		}
+	}
+	inbox, err := b.scheduleInbox(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// A Depth: 1 PROPFIND only returns the internal members of a collection
+	// (RFC 4918 section 9.1)
+	if inbox != nil && path.Dir(path.Clean(inbox.Path)) == path.Clean(homeSetPath) {
+		resp, err := b.propFindInbox(propfind, inbox)
+		if err != nil {
+			return nil, err
+		}
+		resps = append(resps, *resp)
+		if recurse {
+			resps_, err := b.propFindAllCalendarObjects(ctx, propfind, inbox.Path)
 			if err != nil {
 				return nil, err
 			}
@@ -842,9 +1044,9 @@ func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal
 	return internal.NewPropFindResponse(co.Path, propfind, props)
 }
 
-func (b *backend) propFindAllCalendarObjects(ctx context.Context, propfind *internal.PropFind, cal *Calendar) ([]internal.Response, error) {
+func (b *backend) propFindAllCalendarObjects(ctx context.Context, propfind *internal.PropFind, path string) ([]internal.Response, error) {
 	var dataReq CalendarCompRequest
-	aos, err := b.Backend.ListCalendarObjects(ctx, cal.Path, &dataReq)
+	aos, err := b.Backend.ListCalendarObjects(ctx, path, &dataReq)
 	errResps, err := internal.HrefErrorResponses(err)
 	if err != nil {
 		return nil, err
@@ -863,7 +1065,7 @@ func (b *backend) propFindAllCalendarObjects(ctx context.Context, propfind *inte
 
 func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*internal.Response, error) {
 	// Make sure the resource exists before reporting on its properties
-	switch b.resourceTypeAtPath(r.URL.Path) {
+	switch b.resourceTypeAtPath(r.Context(), r.URL.Path) {
 	case resourceTypeCalendar:
 		if _, err := b.Backend.GetCalendar(r.Context(), r.URL.Path); err != nil {
 			return nil, err
@@ -878,10 +1080,11 @@ func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*
 		}
 	}
 
-	// Properties cannot be written yet. Refusing them one by one in a
-	// multistatus, rather than failing the whole request, keeps clients which
-	// PROPPATCH display metadata while adopting a calendar (macOS Calendar
-	// sets displayname, calendar-color and calendar-order) from dropping it.
+	// Properties cannot be written yet, and those of the scheduling Inbox
+	// won't be. Refusing them one by one in a multistatus, rather than
+	// failing the whole request, keeps clients which PROPPATCH display
+	// metadata while adopting a calendar (macOS Calendar sets displayname,
+	// calendar-color and calendar-order) from dropping it.
 	return internal.NewPropPatchResponse(r.URL.Path, update, http.StatusForbidden)
 }
 
@@ -965,11 +1168,16 @@ func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (b *backend) Delete(r *http.Request) error {
+	// Clients can't delete the Inbox, only the scheduling messages in it (RFC
+	// 6638 section 2)
+	if b.resourceTypeAtPath(r.Context(), r.URL.Path) == resourceTypeScheduleInbox {
+		return internal.HTTPErrorf(http.StatusForbidden, "caldav: the scheduling Inbox can't be deleted")
+	}
 	return b.Backend.DeleteCalendarObject(r.Context(), r.URL.Path)
 }
 
 func (b *backend) Mkcol(r *http.Request) error {
-	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendar {
+	if b.resourceTypeAtPath(r.Context(), r.URL.Path) != resourceTypeCalendar {
 		return internal.HTTPErrorf(http.StatusForbidden, "caldav: calendar creation not allowed at given location")
 	}
 
@@ -1044,16 +1252,18 @@ func (b *backend) inPrefix(p string) bool {
 }
 
 // checkCopyMove checks that a COPY or MOVE request is for a calendar object,
-// to be copied or moved into a calendar.
-func (b *backend) checkCopyMove(src, dst string) error {
-	if b.resourceTypeAtPath(src) != resourceTypeCalendarObject {
+// to be copied or moved into a calendar. The scheduling messages of the Inbox
+// aren't: the server delivers them, and they are iTIP messages, which
+// calendars can't hold (RFC 4791 section 4.1).
+func (b *backend) checkCopyMove(ctx context.Context, src, dst string) error {
+	if b.resourceTypeAtPath(ctx, src) != resourceTypeCalendarObject || b.inScheduleInbox(ctx, src) {
 		return internal.HTTPErrorf(http.StatusForbidden, "caldav: only calendar objects can be copied or moved")
 	}
 	if !b.inPrefix(dst) {
 		// RFC 4918 sections 9.8.5 and 9.9.4
 		return internal.HTTPErrorf(http.StatusBadGateway, "caldav: destination is outside of the CalDAV namespace")
 	}
-	if b.resourceTypeAtPath(dst) != resourceTypeCalendarObject {
+	if b.resourceTypeAtPath(ctx, dst) != resourceTypeCalendarObject || b.inScheduleInbox(ctx, dst) {
 		// Calendar objects are stored in calendars (RFC 4791 section 4.2).
 		// Like MKCALENDAR, report a wrong location with
 		// calendar-collection-location-ok, the precondition RFC 4791
@@ -1068,7 +1278,7 @@ func (b *backend) Copy(r *http.Request, dest *internal.Href, recursive, overwrit
 	if !ok {
 		return false, internal.HTTPErrorf(http.StatusNotImplemented, "caldav: Copy not implemented")
 	}
-	if err := b.checkCopyMove(r.URL.Path, dest.Path); err != nil {
+	if err := b.checkCopyMove(r.Context(), r.URL.Path, dest.Path); err != nil {
 		return false, err
 	}
 	// recursive doesn't matter: calendar objects have no members
@@ -1081,7 +1291,7 @@ func (b *backend) Move(r *http.Request, dest *internal.Href, overwrite bool) (cr
 	if !ok {
 		return false, internal.HTTPErrorf(http.StatusNotImplemented, "caldav: Move not implemented")
 	}
-	if err := b.checkCopyMove(r.URL.Path, dest.Path); err != nil {
+	if err := b.checkCopyMove(r.Context(), r.URL.Path, dest.Path); err != nil {
 		return false, err
 	}
 	opts := MoveCalendarObjectOptions{NoOverwrite: !overwrite}
