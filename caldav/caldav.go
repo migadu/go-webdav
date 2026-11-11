@@ -76,6 +76,7 @@ type Calendar struct {
 	Name                  string
 	Description           string
 	MaxResourceSize       int64
+	SyncToken             string // the current DAV:sync-token, see SyncBackend
 	SupportedComponentSet []string
 	// ReadOnly reports that the current user may only read this calendar. It
 	// controls the DAV:current-user-privilege-set reported by the server.
@@ -166,4 +167,10 @@ type SyncResponse struct {
 	SyncToken string
 	Updated   []CalendarObject
 	Deleted   []string
+	// Truncated reports that the response only holds part of the changes,
+	// for instance because of SyncQuery.Limit (RFC 6578 section 3.6).
+	// SyncToken then identifies the partial state: a new request with it
+	// returns the remaining changes. Server backends set it when they stop
+	// early; the client sets it when the server reports a truncated result.
+	Truncated bool
 }

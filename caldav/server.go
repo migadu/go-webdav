@@ -104,8 +104,10 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
 		return h.handleQuery(r, w, report.Query)
 	} else if report.Multiget != nil {
 		return h.handleMultiget(r.Context(), w, report.Multiget)
+	} else if report.SyncCollection != nil {
+		return h.handleSyncCollection(r, w, report.SyncCollection)
 	}
-	return internal.HTTPErrorf(http.StatusBadRequest, "caldav: expected calendar-query or calendar-multiget element in REPORT request")
+	return internal.HTTPErrorf(http.StatusBadRequest, "caldav: expected calendar-query, calendar-multiget or sync-collection element in REPORT request")
 }
 
 func decodeTextMatch(el *textMatch) *TextMatch {
@@ -595,8 +597,14 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 			}, nil
 		},
 		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(internal.NewCurrentUserPrivilegeSet(cal.ReadOnly)),
+		internal.SupportedReportSetName:      internal.PropFindValue(b.supportedReportSet()),
 	}
 
+	if cal.SyncToken != "" {
+		props[internal.SyncTokenName] = internal.PropFindValue(&internal.SyncToken{
+			Token: cal.SyncToken,
+		})
+	}
 	if cal.Name != "" {
 		props[internal.DisplayNameName] = internal.PropFindValue(&internal.DisplayName{
 			Name: cal.Name,

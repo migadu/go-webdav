@@ -242,8 +242,9 @@ type calendarDataResp struct {
 }
 
 type reportReq struct {
-	Query    *calendarQuery
-	Multiget *calendarMultiget
+	Query          *calendarQuery
+	Multiget       *calendarMultiget
+	SyncCollection *internal.SyncCollectionQuery
 	// TODO: CALDAV:free-busy-query
 }
 
@@ -256,6 +257,9 @@ func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	case calendarMultigetName:
 		r.Multiget = &calendarMultiget{}
 		v = r.Multiget
+	case internal.SyncCollectionName:
+		r.SyncCollection = &internal.SyncCollectionQuery{}
+		v = r.SyncCollection
 	default:
 		return fmt.Errorf("caldav: unsupported REPORT root %q %q", start.Name.Space, start.Name.Local)
 	}

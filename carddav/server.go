@@ -102,8 +102,10 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
 		return h.handleQuery(r, w, report.Query)
 	} else if report.Multiget != nil {
 		return h.handleMultiget(r.Context(), w, report.Multiget)
+	} else if report.SyncCollection != nil {
+		return h.handleSyncCollection(r, w, report.SyncCollection)
 	}
-	return internal.HTTPErrorf(http.StatusBadRequest, "carddav: expected addressbook-query or addressbook-multiget element in REPORT request")
+	return internal.HTTPErrorf(http.StatusBadRequest, "carddav: expected addressbook-query, addressbook-multiget or sync-collection element in REPORT request")
 }
 
 func decodePropFilter(el *propFilter) (*PropFilter, error) {
@@ -545,8 +547,14 @@ func (b *backend) propFindAddressBook(ctx context.Context, propfind *internal.Pr
 			},
 		}),
 		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(internal.NewCurrentUserPrivilegeSet(ab.ReadOnly)),
+		internal.SupportedReportSetName:      internal.PropFindValue(b.supportedReportSet()),
 	}
 
+	if ab.SyncToken != "" {
+		props[internal.SyncTokenName] = internal.PropFindValue(&internal.SyncToken{
+			Token: ab.SyncToken,
+		})
+	}
 	if ab.Name != "" {
 		props[internal.DisplayNameName] = internal.PropFindValue(&internal.DisplayName{
 			Name: ab.Name,

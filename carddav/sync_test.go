@@ -1,0 +1,617 @@
+package carddav
+
+import (
+	"bytes"
+	"context"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"sort"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/emersion/go-vcard"
+	"github.com/emersion/go-webdav/internal"
+)
+
+const (
+	syncAddressBookPath = "/user/contacts/sync"
+
+	syncToken1       = "http://example.com/ns/sync/1"
+	syncToken2       = "http://example.com/ns/sync/2"
+	syncTokenPartial = "http://example.com/ns/sync/partial"
+)
+
+func newSyncTestObject(name, fn, etag string) AddressObject {
+	card := make(vcard.Card)
+	card.SetValue(vcard.FieldVersion, "4.0")
+	card.SetValue(vcard.FieldUID, name)
+	card.SetValue(vcard.FieldFormattedName, fn)
+	return AddressObject{
+		Path: syncAddressBookPath + "/" + name + ".vcf",
+		ETag: etag,
+		Card: card,
+	}
+}
+
+// syncTestBackend is an in-memory, read-only Backend with a single address
+// book that supports sync-collection. It serves a fixed change log:
+//
+//   - "" (initial sync): every object, new token syncToken2
+//   - syncToken1: "two" was updated, "gone" was deleted, new token syncToken2
+//   - syncToken2: no changes
+//   - anything else: invalid token
+//
+// An initial sync with a Limit returns that many objects, flagged as
+// truncated.
+type syncTestBackend struct {
+	addressBook AddressBook
+	objects     []AddressObject
+
+	mu      sync.Mutex
+	queries []SyncQuery
+}
+
+func newSyncTestBackend() *syncTestBackend {
+	return &syncTestBackend{
+		addressBook: AddressBook{Path: syncAddressBookPath, Name: "Sync", SyncToken: syncToken2},
+		objects: []AddressObject{
+			newSyncTestObject("one", "Contact One", "etag-one"),
+			newSyncTestObject("two", "Contact Two", "etag-two"),
+		},
+	}
+}
+
+var errSyncTestReadOnly = internal.HTTPErrorf(http.StatusForbidden, "read-only test backend")
+
+func (*syncTestBackend) CurrentUserPrincipal(ctx context.Context) (string, error) {
+	return "/user/", nil
+}
+
+func (*syncTestBackend) AddressBookHomeSetPath(ctx context.Context) (string, error) {
+	return "/user/contacts/", nil
+}
+
+func (b *syncTestBackend) ListAddressBooks(ctx context.Context) ([]AddressBook, error) {
+	return []AddressBook{b.addressBook}, nil
+}
+
+func (b *syncTestBackend) GetAddressBook(ctx context.Context, path string) (*AddressBook, error) {
+	if path != b.addressBook.Path {
+		return nil, internal.HTTPErrorf(http.StatusNotFound, "no address book at %q", path)
+	}
+	ab := b.addressBook
+	return &ab, nil
+}
+
+func (*syncTestBackend) CreateAddressBook(ctx context.Context, ab *AddressBook) error {
+	return errSyncTestReadOnly
+}
+
+func (*syncTestBackend) DeleteAddressBook(ctx context.Context, path string) error {
+	return errSyncTestReadOnly
+}
+
+func (b *syncTestBackend) GetAddressObject(ctx context.Context, path string, req *AddressDataRequest) (*AddressObject, error) {
+	for _, ao := range b.objects {
+		if ao.Path == path {
+			return &ao, nil
+		}
+	}
+	return nil, internal.HTTPErrorf(http.StatusNotFound, "no address object at %q", path)
+}
+
+func (b *syncTestBackend) ListAddressObjects(ctx context.Context, path string, req *AddressDataRequest) ([]AddressObject, error) {
+	return b.objects, nil
+}
+
+func (b *syncTestBackend) QueryAddressObjects(ctx context.Context, path string, query *AddressBookQuery) ([]AddressObject, error) {
+	return b.objects, nil
+}
+
+func (*syncTestBackend) PutAddressObject(ctx context.Context, path string, card vcard.Card, opts *PutAddressObjectOptions) (*AddressObject, error) {
+	return nil, errSyncTestReadOnly
+}
+
+func (*syncTestBackend) DeleteAddressObject(ctx context.Context, path string) error {
+	return errSyncTestReadOnly
+}
+
+func (b *syncTestBackend) SyncCollection(ctx context.Context, path string, query *SyncQuery) (*SyncResponse, error) {
+	b.mu.Lock()
+	b.queries = append(b.queries, *query)
+	b.mu.Unlock()
+
+	if path != b.addressBook.Path {
+		return nil, internal.HTTPErrorf(http.StatusNotFound, "no address book at %q", path)
+	}
+
+	switch query.SyncToken {
+	case "":
+		if query.Limit > 0 && query.Limit < len(b.objects) {
+			return &SyncResponse{
+				SyncToken: syncTokenPartial,
+				Updated:   b.objects[:query.Limit],
+				Truncated: true,
+			}, nil
+		}
+		return &SyncResponse{SyncToken: syncToken2, Updated: b.objects}, nil
+	case syncToken1:
+		return &SyncResponse{
+			SyncToken: syncToken2,
+			Updated:   b.objects[1:],
+			Deleted:   []string{syncAddressBookPath + "/gone.vcf"},
+		}, nil
+	case syncToken2:
+		return &SyncResponse{SyncToken: syncToken2}, nil
+	default:
+		return nil, NewInvalidSyncTokenError()
+	}
+}
+
+func (b *syncTestBackend) lastQuery(t *testing.T) SyncQuery {
+	t.Helper()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.queries) == 0 {
+		t.Fatalf("backend SyncCollection was not called")
+	}
+	return b.queries[len(b.queries)-1]
+}
+
+// noSyncBackend hides the SyncCollection method of the wrapped backend.
+type noSyncBackend struct {
+	Backend
+}
+
+const syncCollectionRequest = `<?xml version="1.0" encoding="utf-8" ?>
+<D:sync-collection xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:sync-token>%s</D:sync-token>
+  <D:sync-level>%s</D:sync-level>%s
+  <D:prop>
+    <D:getetag/>
+    <C:address-data/>
+  </D:prop>
+</D:sync-collection>`
+
+func syncCollectionBody(token, level string, limit int) string {
+	var limitEl string
+	if limit > 0 {
+		limitEl = fmt.Sprintf("\n  <D:limit><D:nresults>%d</D:nresults></D:limit>", limit)
+	}
+	return fmt.Sprintf(syncCollectionRequest, token, level, limitEl)
+}
+
+func serveTestRequest(t *testing.T, h http.Handler, method, path, body string) *http.Response {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/xml")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w.Result()
+}
+
+func decodeTestMultiStatus(t *testing.T, res *http.Response) *internal.MultiStatus {
+	t.Helper()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusMultiStatus {
+		t.Fatalf("got HTTP status %v, want %v", res.Status, http.StatusMultiStatus)
+	}
+	var ms internal.MultiStatus
+	if err := xml.NewDecoder(res.Body).Decode(&ms); err != nil {
+		t.Fatalf("failed to decode multistatus: %v", err)
+	}
+	return &ms
+}
+
+// decodeTestError checks that res is an error response with the given status
+// carrying a DAV:error with the given DAV: precondition element.
+func decodeTestError(t *testing.T, res *http.Response, code int, precondition string) {
+	t.Helper()
+	defer res.Body.Close()
+	if res.StatusCode != code {
+		t.Fatalf("got HTTP status %v, want %v", res.Status, code)
+	}
+	var davErr internal.Error
+	if err := xml.NewDecoder(res.Body).Decode(&davErr); err != nil {
+		t.Fatalf("failed to decode DAV:error body: %v", err)
+	}
+	want := xml.Name{Space: "DAV:", Local: precondition}
+	for _, raw := range davErr.Raw {
+		if name, ok := raw.XMLName(); ok && name == want {
+			return
+		}
+	}
+	t.Fatalf("DAV:error does not contain %v: %v", want, davErr.Error())
+}
+
+func responsesByPath(t *testing.T, ms *internal.MultiStatus) map[string]*internal.Response {
+	t.Helper()
+	m := make(map[string]*internal.Response)
+	for i := range ms.Responses {
+		resp := &ms.Responses[i]
+		if len(resp.Hrefs) != 1 {
+			t.Fatalf("response has %d hrefs, want 1", len(resp.Hrefs))
+		}
+		m[resp.Hrefs[0].Path] = resp
+	}
+	return m
+}
+
+func checkUpdatedResponse(t *testing.T, resp *internal.Response, obj AddressObject) {
+	t.Helper()
+	if resp == nil {
+		t.Fatalf("missing response for %v", obj.Path)
+	}
+	var getETag internal.GetETag
+	if err := resp.DecodeProp(&getETag); err != nil {
+		t.Fatalf("%v: getetag: %v", obj.Path, err)
+	}
+	if string(getETag.ETag) != obj.ETag {
+		t.Errorf("%v: got ETag %q, want %q", obj.Path, getETag.ETag, obj.ETag)
+	}
+	var addrData addressDataResp
+	if err := resp.DecodeProp(&addrData); err != nil {
+		t.Fatalf("%v: address-data: %v", obj.Path, err)
+	}
+	card, err := vcard.NewDecoder(bytes.NewReader(addrData.Data)).Decode()
+	if err != nil {
+		t.Fatalf("%v: failed to decode address-data: %v", obj.Path, err)
+	}
+	if got, want := card.PreferredValue(vcard.FieldFormattedName), obj.Card.PreferredValue(vcard.FieldFormattedName); got != want {
+		t.Errorf("%v: got FN %q, want %q", obj.Path, got, want)
+	}
+}
+
+func TestSyncCollectionInitial(t *testing.T) {
+	b := newSyncTestBackend()
+	h := &Handler{Backend: b}
+
+	res := serveTestRequest(t, h, "REPORT", syncAddressBookPath, syncCollectionBody("", "1", 0))
+	ms := decodeTestMultiStatus(t, res)
+
+	if ms.SyncToken != syncToken2 {
+		t.Errorf("got sync-token %q, want %q", ms.SyncToken, syncToken2)
+	}
+	resps := responsesByPath(t, ms)
+	if len(resps) != 2 {
+		t.Errorf("got %d responses, want 2", len(resps))
+	}
+	for _, obj := range b.objects {
+		checkUpdatedResponse(t, resps[obj.Path], obj)
+	}
+
+	q := b.lastQuery(t)
+	if q.SyncToken != "" || q.Limit != 0 {
+		t.Errorf("backend got SyncToken %q, Limit %d; want empty token and no limit", q.SyncToken, q.Limit)
+	}
+	// RFC 6352 section 10.4: address-data without prop elements asks for
+	// the whole vCard.
+	wantReq := AddressDataRequest{AllProp: true}
+	if !reflect.DeepEqual(q.DataRequest, wantReq) {
+		t.Errorf("backend got DataRequest %+v, want %+v", q.DataRequest, wantReq)
+	}
+}
+
+func TestSyncCollectionIncremental(t *testing.T) {
+	b := newSyncTestBackend()
+	h := &Handler{Backend: b}
+
+	// "infinite" is equivalent to "1": address books have no
+	// sub-collections.
+	for _, level := range []string{"1", "infinite"} {
+		t.Run(level, func(t *testing.T) {
+			res := serveTestRequest(t, h, "REPORT", syncAddressBookPath, syncCollectionBody(syncToken1, level, 0))
+			ms := decodeTestMultiStatus(t, res)
+
+			if ms.SyncToken != syncToken2 {
+				t.Errorf("got sync-token %q, want %q", ms.SyncToken, syncToken2)
+			}
+			resps := responsesByPath(t, ms)
+			if len(resps) != 2 {
+				t.Errorf("got %d responses, want 2", len(resps))
+			}
+			checkUpdatedResponse(t, resps[syncAddressBookPath+"/two.vcf"], b.objects[1])
+
+			gone := resps[syncAddressBookPath+"/gone.vcf"]
+			if gone == nil {
+				t.Fatalf("missing response for deleted member")
+			}
+			if gone.Status == nil || gone.Status.Code != http.StatusNotFound {
+				t.Errorf("deleted member: got status %+v, want 404", gone.Status)
+			}
+			if len(gone.PropStats) != 0 {
+				t.Errorf("deleted member: got %d propstats, want none", len(gone.PropStats))
+			}
+
+			if q := b.lastQuery(t); q.SyncToken != syncToken1 {
+				t.Errorf("backend got SyncToken %q, want %q", q.SyncToken, syncToken1)
+			}
+		})
+	}
+}
+
+func TestSyncCollectionNoChanges(t *testing.T) {
+	h := &Handler{Backend: newSyncTestBackend()}
+
+	res := serveTestRequest(t, h, "REPORT", syncAddressBookPath, syncCollectionBody(syncToken2, "1", 0))
+	ms := decodeTestMultiStatus(t, res)
+	if ms.SyncToken != syncToken2 {
+		t.Errorf("got sync-token %q, want %q", ms.SyncToken, syncToken2)
+	}
+	if len(ms.Responses) != 0 {
+		t.Errorf("got %d responses, want none", len(ms.Responses))
+	}
+}
+
+func TestSyncCollectionTruncated(t *testing.T) {
+	b := newSyncTestBackend()
+	h := &Handler{Backend: b}
+
+	res := serveTestRequest(t, h, "REPORT", syncAddressBookPath, syncCollectionBody("", "1", 1))
+	ms := decodeTestMultiStatus(t, res)
+
+	if q := b.lastQuery(t); q.Limit != 1 {
+		t.Errorf("backend got Limit %d, want 1", q.Limit)
+	}
+	if ms.SyncToken != syncTokenPartial {
+		t.Errorf("got sync-token %q, want %q", ms.SyncToken, syncTokenPartial)
+	}
+	resps := responsesByPath(t, ms)
+	if len(resps) != 2 {
+		t.Fatalf("got %d responses, want 2 (one member, one for the truncated collection)", len(resps))
+	}
+	checkUpdatedResponse(t, resps[b.objects[0].Path], b.objects[0])
+
+	// RFC 6578 section 3.6: the request-URI gets a 507 response.
+	coll := resps[syncAddressBookPath]
+	if coll == nil {
+		t.Fatalf("missing 507 response for the request-URI")
+	}
+	if coll.Status == nil || coll.Status.Code != http.StatusInsufficientStorage {
+		t.Errorf("request-URI: got status %+v, want 507", coll.Status)
+	}
+	want := xml.Name{Space: "DAV:", Local: "number-of-matches-within-limits"}
+	if coll.Error == nil || len(coll.Error.Raw) != 1 {
+		t.Fatalf("request-URI: got error %+v, want %v", coll.Error, want)
+	}
+	if name, _ := coll.Error.Raw[0].XMLName(); name != want {
+		t.Errorf("request-URI: got error %v, want %v", name, want)
+	}
+}
+
+func TestSyncCollectionInvalidToken(t *testing.T) {
+	h := &Handler{Backend: newSyncTestBackend()}
+
+	res := serveTestRequest(t, h, "REPORT", syncAddressBookPath, syncCollectionBody("http://example.com/ns/sync/bogus", "1", 0))
+	decodeTestError(t, res, http.StatusForbidden, "valid-sync-token")
+}
+
+func TestSyncCollectionUnsupported(t *testing.T) {
+	h := &Handler{Backend: noSyncBackend{newSyncTestBackend()}}
+
+	res := serveTestRequest(t, h, "REPORT", syncAddressBookPath, syncCollectionBody("", "1", 0))
+	decodeTestError(t, res, http.StatusForbidden, "supported-report")
+}
+
+func TestSyncCollectionNotAddressBook(t *testing.T) {
+	b := newSyncTestBackend()
+	h := &Handler{Backend: b}
+
+	for _, p := range []string{"/user/", "/user/contacts/", syncAddressBookPath + "/one.vcf"} {
+		t.Run(p, func(t *testing.T) {
+			res := serveTestRequest(t, h, "REPORT", p, syncCollectionBody("", "1", 0))
+			decodeTestError(t, res, http.StatusForbidden, "supported-report")
+		})
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.queries) != 0 {
+		t.Errorf("backend SyncCollection called %d times, want 0", len(b.queries))
+	}
+}
+
+func TestSyncCollectionBadSyncLevel(t *testing.T) {
+	h := &Handler{Backend: newSyncTestBackend()}
+
+	res := serveTestRequest(t, h, "REPORT", syncAddressBookPath, syncCollectionBody("", "2", 0))
+	res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Errorf("got HTTP status %v, want %v", res.Status, http.StatusBadRequest)
+	}
+}
+
+const propFindSyncProps = `<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:sync-token/>
+    <D:supported-report-set/>
+  </D:prop>
+</D:propfind>`
+
+// Test-local decoding of the RFC 6578 / RFC 3253 properties, independent of
+// the server's own types.
+type testSyncTokenProp struct {
+	XMLName xml.Name `xml:"DAV: sync-token"`
+	Token   string   `xml:",chardata"`
+}
+
+type testSupportedReportSet struct {
+	XMLName xml.Name `xml:"DAV: supported-report-set"`
+	Reports []struct {
+		Report struct {
+			Raw []internal.RawXMLValue `xml:",any"`
+		} `xml:"DAV: report"`
+	} `xml:"DAV: supported-report"`
+}
+
+func (s *testSupportedReportSet) names() []string {
+	var names []string
+	for _, r := range s.Reports {
+		for _, raw := range r.Report.Raw {
+			if name, ok := raw.XMLName(); ok {
+				names = append(names, name.Space+" "+name.Local)
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func TestPropFindAddressBookSyncProps(t *testing.T) {
+	// A backend without sync support, whose address book has no sync-token.
+	noSync := newSyncTestBackend()
+	noSync.addressBook.SyncToken = ""
+
+	for _, tc := range []struct {
+		name        string
+		backend     Backend
+		syncToken   string
+		wantReports []string
+	}{
+		{
+			name:      "sync",
+			backend:   newSyncTestBackend(),
+			syncToken: syncToken2,
+			wantReports: []string{
+				"DAV: sync-collection",
+				"urn:ietf:params:xml:ns:carddav addressbook-multiget",
+				"urn:ietf:params:xml:ns:carddav addressbook-query",
+			},
+		},
+		{
+			name:    "no-sync",
+			backend: noSyncBackend{noSync},
+			wantReports: []string{
+				"urn:ietf:params:xml:ns:carddav addressbook-multiget",
+				"urn:ietf:params:xml:ns:carddav addressbook-query",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Handler{Backend: tc.backend}
+
+			req := httptest.NewRequest("PROPFIND", syncAddressBookPath, strings.NewReader(propFindSyncProps))
+			req.Header.Set("Content-Type", "application/xml")
+			req.Header.Set("Depth", "0")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			ms := decodeTestMultiStatus(t, w.Result())
+
+			if len(ms.Responses) != 1 {
+				t.Fatalf("got %d responses, want 1", len(ms.Responses))
+			}
+			resp := &ms.Responses[0]
+
+			var tok testSyncTokenProp
+			err := resp.DecodeProp(&tok)
+			if tc.syncToken != "" {
+				if err != nil {
+					t.Errorf("sync-token: %v", err)
+				} else if tok.Token != tc.syncToken {
+					t.Errorf("got sync-token %q, want %q", tok.Token, tc.syncToken)
+				}
+			} else if !internal.IsNotFound(err) {
+				t.Errorf("sync-token: got %v, want 404", err)
+			}
+
+			var reports testSupportedReportSet
+			if err := resp.DecodeProp(&reports); err != nil {
+				t.Fatalf("supported-report-set: %v", err)
+			}
+			if got := reports.names(); !reflect.DeepEqual(got, tc.wantReports) {
+				t.Errorf("got supported reports %q, want %q", got, tc.wantReports)
+			}
+		})
+	}
+}
+
+func TestClientSyncCollectionRoundTrip(t *testing.T) {
+	b := newSyncTestBackend()
+	ts := httptest.NewServer(&Handler{Backend: b})
+	defer ts.Close()
+
+	ctx := context.Background()
+	c, err := NewClient(nil, ts.URL)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	checkObject := func(t *testing.T, got, want AddressObject) {
+		t.Helper()
+		if got.Path != want.Path || got.ETag != want.ETag {
+			t.Errorf("got object %q (ETag %q), want %q (ETag %q)", got.Path, got.ETag, want.Path, want.ETag)
+		}
+	}
+
+	t.Run("initial", func(t *testing.T) {
+		query := SyncQuery{DataRequest: AddressDataRequest{Props: []string{vcard.FieldFormattedName}}}
+		res, err := c.SyncCollection(ctx, syncAddressBookPath, &query)
+		if err != nil {
+			t.Fatalf("SyncCollection: %v", err)
+		}
+		if res.SyncToken != syncToken2 {
+			t.Errorf("got sync-token %q, want %q", res.SyncToken, syncToken2)
+		}
+		if len(res.Updated) != len(b.objects) || len(res.Deleted) != 0 || res.Truncated {
+			t.Fatalf("got %d updated, %d deleted, truncated=%v; want %d, 0, false", len(res.Updated), len(res.Deleted), res.Truncated, len(b.objects))
+		}
+		for i := range b.objects {
+			checkObject(t, res.Updated[i], b.objects[i])
+		}
+		if got := b.lastQuery(t).DataRequest; !reflect.DeepEqual(got, query.DataRequest) {
+			t.Errorf("backend got DataRequest %+v, want %+v", got, query.DataRequest)
+		}
+	})
+
+	t.Run("incremental", func(t *testing.T) {
+		res, err := c.SyncCollection(ctx, syncAddressBookPath, &SyncQuery{SyncToken: syncToken1})
+		if err != nil {
+			t.Fatalf("SyncCollection: %v", err)
+		}
+		if res.SyncToken != syncToken2 {
+			t.Errorf("got sync-token %q, want %q", res.SyncToken, syncToken2)
+		}
+		if len(res.Updated) != 1 {
+			t.Fatalf("got %d updated, want 1", len(res.Updated))
+		}
+		checkObject(t, res.Updated[0], b.objects[1])
+		if want := []string{syncAddressBookPath + "/gone.vcf"}; !reflect.DeepEqual(res.Deleted, want) {
+			t.Errorf("got deleted %q, want %q", res.Deleted, want)
+		}
+	})
+
+	t.Run("truncated", func(t *testing.T) {
+		res, err := c.SyncCollection(ctx, syncAddressBookPath, &SyncQuery{Limit: 1})
+		if err != nil {
+			t.Fatalf("SyncCollection: %v", err)
+		}
+		if !res.Truncated {
+			t.Errorf("Truncated not set")
+		}
+		if res.SyncToken != syncTokenPartial {
+			t.Errorf("got sync-token %q, want %q", res.SyncToken, syncTokenPartial)
+		}
+		if len(res.Updated) != 1 {
+			t.Fatalf("got %d updated, want 1", len(res.Updated))
+		}
+		checkObject(t, res.Updated[0], b.objects[0])
+	})
+
+	t.Run("invalid-token", func(t *testing.T) {
+		_, err := c.SyncCollection(ctx, syncAddressBookPath, &SyncQuery{SyncToken: "http://example.com/ns/sync/bogus"})
+		var httpErr *internal.HTTPError
+		if !errors.As(err, &httpErr) || httpErr.Code != http.StatusForbidden {
+			t.Fatalf("got error %v, want 403", err)
+		}
+		var davErr *internal.Error
+		if !errors.As(err, &davErr) || !strings.Contains(davErr.Error(), "valid-sync-token") {
+			t.Errorf("got error %v, want DAV:valid-sync-token", err)
+		}
+	})
+}
