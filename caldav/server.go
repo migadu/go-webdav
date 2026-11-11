@@ -44,6 +44,14 @@ type Backend interface {
 	webdav.UserPrincipalBackend
 }
 
+// CalendarUpdater is an optional interface a Backend can implement to let
+// clients modify the properties of calendars with PROPPATCH.
+type CalendarUpdater interface {
+	// UpdateCalendar applies all of update to the calendar at path, or none
+	// of it.
+	UpdateCalendar(ctx context.Context, path string, update *CalendarUpdate) error
+}
+
 // Handler handles CalDAV HTTP requests. It can be used to create a CalDAV
 // server.
 type Handler struct {
@@ -662,6 +670,9 @@ func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*
 		if _, err := b.Backend.GetCalendar(r.Context(), r.URL.Path); err != nil {
 			return nil, err
 		}
+		if updater, ok := b.Backend.(CalendarUpdater); ok {
+			return b.propPatchCalendar(r, updater, update)
+		}
 	case resourceTypeCalendarObject:
 		var dataReq CalendarCompRequest
 		if _, err := b.Backend.GetCalendarObject(r.Context(), r.URL.Path, &dataReq); err != nil {
@@ -674,6 +685,39 @@ func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*
 	// PROPPATCH display metadata while adopting a calendar (macOS Calendar
 	// sets displayname, calendar-color and calendar-order) from dropping it.
 	return internal.NewPropPatchResponse(r.URL.Path, update, http.StatusForbidden)
+}
+
+func (b *backend) propPatchCalendar(r *http.Request, updater CalendarUpdater, update *internal.PropertyUpdate) (*internal.Response, error) {
+	var calUpdate CalendarUpdate
+	patch := func(raw *internal.RawXMLValue, remove bool) error {
+		name, _ := raw.XMLName()
+		switch name {
+		case internal.DisplayNameName:
+			var v internal.DisplayName
+			if !remove {
+				if err := raw.Decode(&v); err != nil {
+					return &internal.HTTPError{Code: http.StatusConflict, Err: err}
+				}
+			}
+			calUpdate.Name = &v.Name
+		case calendarDescriptionName:
+			var v calendarDescription
+			if !remove {
+				if err := raw.Decode(&v); err != nil {
+					return &internal.HTTPError{Code: http.StatusConflict, Err: err}
+				}
+			}
+			calUpdate.Description = &v.Description
+		default:
+			// TODO: calendar-color and calendar-timezone
+			return internal.HTTPErrorf(http.StatusForbidden, "caldav: property cannot be modified")
+		}
+		return nil
+	}
+	commit := func() error {
+		return updater.UpdateCalendar(r.Context(), r.URL.Path, &calUpdate)
+	}
+	return internal.PatchProps(r.URL.Path, update, patch, commit)
 }
 
 func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
