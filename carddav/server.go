@@ -140,6 +140,21 @@ type Handler struct {
 	Prefix  string
 }
 
+func (h *Handler) newBackend() backend {
+	p := h.Prefix
+	if p != "" {
+		p = path.Clean(p)
+		if !strings.HasPrefix(p, "/") {
+			p = "/" + p
+		}
+		p = strings.TrimSuffix(p, "/")
+	}
+	return backend{
+		Backend: h.Backend,
+		Prefix:  p,
+	}
+}
+
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.Backend == nil {
@@ -158,6 +173,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	b := h.newBackend()
+	if !b.inPrefix(r.URL.Path) {
+		if r.Method == http.MethodDelete {
+			if pb, ok := h.Backend.(PushBackend); ok {
+				if handled, err := h.servePush(w, r, pb); handled {
+					if err != nil {
+						internal.ServeError(w, err)
+					}
+					return
+				}
+			}
+		}
+		internal.ServeError(w, internal.HTTPErrorf(http.StatusNotFound, "carddav: resource outside handler prefix"))
+		return
+	}
+
 	r, err := internal.DecodeRequestBody(w, r)
 	if err != nil {
 		internal.ServeError(w, err)
@@ -173,10 +204,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if handled, err = h.servePush(w, r, pb); handled {
 				break
 			}
-		}
-		b := backend{
-			Backend: h.Backend,
-			Prefix:  strings.TrimSuffix(h.Prefix, "/"),
 		}
 		hh := internal.Handler{Backend: &b}
 		hh.ServeHTTP(w, r)
@@ -329,10 +356,7 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *add
 		return err
 	}
 
-	b := backend{
-		Backend: h.Backend,
-		Prefix:  strings.TrimSuffix(h.Prefix, "/"),
-	}
+	b := h.newBackend()
 	return internal.StreamMultiStatus(w, r, func(mw *internal.MultiStatusWriter) error {
 		for i := range aos {
 			resp, err := b.propFindAddressObject(r.Context(), &propfind, true, &aos[i])
@@ -383,36 +407,46 @@ func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multige
 		dataReq = *decoded
 	}
 
+	b := h.newBackend()
+
 	var objects map[string]*AddressObject
 	var objErrResps map[string]internal.Response
 	if mb, ok := h.Backend.(AddressObjectsBackend); ok {
-		paths := make([]string, len(multiget.Hrefs))
-		for i, href := range multiget.Hrefs {
-			paths[i] = href.Path
+		paths := make([]string, 0, len(multiget.Hrefs))
+		for _, href := range multiget.Hrefs {
+			if b.inPrefix(href.Path) {
+				paths = append(paths, href.Path)
+			}
 		}
-		l, err := mb.GetAddressObjects(ctx, paths, &dataReq)
-		errResps, err := internal.HrefErrorResponses(err)
-		if err != nil {
-			return err
-		}
-		objects = make(map[string]*AddressObject, len(l))
-		for i := range l {
-			objects[l[i].Path] = &l[i]
-		}
-		objErrResps = make(map[string]internal.Response, len(errResps))
-		for _, resp := range errResps {
-			if len(resp.Hrefs) > 0 {
-				objErrResps[resp.Hrefs[0].Path] = resp
+		objects = make(map[string]*AddressObject, len(paths))
+		if len(paths) > 0 {
+			l, err := mb.GetAddressObjects(ctx, paths, &dataReq)
+			errResps, err := internal.HrefErrorResponses(err)
+			if err != nil {
+				return err
+			}
+			for i := range l {
+				objects[l[i].Path] = &l[i]
+			}
+			objErrResps = make(map[string]internal.Response, len(errResps))
+			for _, resp := range errResps {
+				if len(resp.Hrefs) > 0 {
+					objErrResps[resp.Hrefs[0].Path] = resp
+				}
 			}
 		}
 	}
 
-	b := backend{
-		Backend: h.Backend,
-		Prefix:  strings.TrimSuffix(h.Prefix, "/"),
-	}
 	return internal.StreamMultiStatus(w, r, func(mw *internal.MultiStatusWriter) error {
 		for _, href := range multiget.Hrefs {
+			if !b.inPrefix(href.Path) {
+				resp := internal.NewErrorResponse(href.Path, internal.HTTPErrorf(http.StatusNotFound, "carddav: address object not found"))
+				if err := mw.WriteResponse(resp); err != nil {
+					return err
+				}
+				continue
+			}
+
 			var ao *AddressObject
 			var err error
 			if objects != nil {
@@ -458,8 +492,13 @@ const (
 	resourceTypeAddressObject
 )
 
+const resourceTypeInvalid resourceType = -1
+
 func (b *backend) resourceTypeAtPath(reqPath string) resourceType {
 	p := path.Clean(reqPath)
+	if !b.inPrefix(p) {
+		return resourceTypeInvalid
+	}
 	p = strings.TrimPrefix(p, b.Prefix)
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
@@ -471,9 +510,14 @@ func (b *backend) resourceTypeAtPath(reqPath string) resourceType {
 }
 
 func (b *backend) Options(r *http.Request) (caps []string, allow []string, err error) {
+	resType := b.resourceTypeAtPath(r.URL.Path)
+	if resType == resourceTypeInvalid {
+		return nil, nil, internal.HTTPErrorf(http.StatusNotFound, "carddav: resource outside handler prefix")
+	}
+
 	caps = []string{"addressbook"}
 
-	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeAddressObject {
+	if resType != resourceTypeAddressObject {
 		// Note: some clients assume the address book is read-only when
 		// DELETE/MKCOL are missing
 		allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "MKCOL"}
@@ -551,6 +595,8 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 	var dataReq AddressDataRequest
 
 	switch resType {
+	case resourceTypeInvalid:
+		return internal.HTTPErrorf(http.StatusNotFound, "carddav: resource outside handler prefix")
 	case resourceTypeRoot:
 		resp, err := b.propFindRoot(ctx, r.URL.Path, propfind)
 		if err != nil {
