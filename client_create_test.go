@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/emersion/go-webdav"
 )
@@ -69,5 +71,64 @@ func TestClientCreateConditional(t *testing.T) {
 	}
 	if err := wc.Close(); !isPreconditionFailed(err) {
 		t.Errorf("Close of a refused large body = %v, want 412", err)
+	}
+}
+
+// httpClientFunc is a webdav.HTTPClient calling a function.
+type httpClientFunc func(req *http.Request) (*http.Response, error)
+
+func (f httpClientFunc) Do(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+// Close may be called while a Write is blocked, e.g. from another goroutine to
+// abort a Write to a server which doesn't read the body: both return the
+// request's error once it completes, rather than one of them hanging.
+func TestClientCreateConcurrentWriteClose(t *testing.T) {
+	release := make(chan struct{})
+	c, err := webdav.NewClient(httpClientFunc(func(req *http.Request) (*http.Response, error) {
+		// Don't read the body, so that Write blocks
+		<-release
+		req.Body.Close()
+		return &http.Response{
+			Status:     "412 Precondition Failed",
+			StatusCode: http.StatusPreconditionFailed,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("")),
+			Request:    req,
+		}, nil
+	}), "http://example.org")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wc, err := c.Create(context.Background(), "/file.txt", &webdav.CreateOptions{IfNoneMatch: "*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errs := make(chan error, 2)
+	go func() {
+		_, err := wc.Write([]byte("hello"))
+		errs <- err
+	}()
+	go func() {
+		errs <- wc.Close()
+	}()
+	// Let both wait for the request before it completes
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	timeout := time.After(5 * time.Second)
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-errs:
+			var httpErr *webdav.HTTPError
+			if !errors.As(err, &httpErr) || httpErr.Code != http.StatusPreconditionFailed {
+				t.Errorf("concurrent Write or Close = %v, want 412", err)
+			}
+		case <-timeout:
+			t.Fatal("concurrent Write and Close hung")
+		}
 	}
 }
