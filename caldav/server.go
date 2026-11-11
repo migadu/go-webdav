@@ -397,19 +397,28 @@ func decodeComp(comp *comp) (*CalendarCompRequest, error) {
 // element called name. RFC 4791 sections 9.6.5 to 9.6.7 require both, the end
 // after the start.
 func decodeRequiredTimeRange(name string, tr *requiredTimeRange) (start, end time.Time, err error) {
-	if tr.Start == nil || tr.End == nil {
-		return time.Time{}, time.Time{}, internal.HTTPErrorf(http.StatusBadRequest, "caldav: %s requires a start and an end attribute", name)
+	if err := tr.check(name); err != nil {
+		return time.Time{}, time.Time{}, &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
 	}
-	start, end = time.Time(*tr.Start), time.Time(*tr.End)
-	if !end.After(start) {
-		return time.Time{}, time.Time{}, internal.HTTPErrorf(http.StatusBadRequest, "caldav: the end of %s must be after its start", name)
-	}
-	return start, end, nil
+	return time.Time(*tr.Start), time.Time(*tr.End), nil
 }
 
 func decodeCalendarDataReq(calendarData *calendarDataReq) (*CalendarCompRequest, error) {
-	// RFC 4791 section 9.6
-	if calendarData.Expand != nil && calendarData.LimitRecurrenceSet != nil {
+	// RFC 4791 section 9.6: (comp?, (expand | limit-recurrence-set)?,
+	// limit-freebusy-set?)
+	for _, el := range []struct {
+		name string
+		n    int
+	}{
+		{"expand", len(calendarData.Expand)},
+		{"limit-recurrence-set", len(calendarData.LimitRecurrenceSet)},
+		{"limit-freebusy-set", len(calendarData.LimitFreeBusySet)},
+	} {
+		if el.n > 1 {
+			return nil, internal.HTTPErrorf(http.StatusBadRequest, "caldav: calendar-data can't hold more than one %s", el.name)
+		}
+	}
+	if len(calendarData.Expand) > 0 && len(calendarData.LimitRecurrenceSet) > 0 {
 		return nil, internal.HTTPErrorf(http.StatusBadRequest, "caldav: only one of expand or limit-recurrence-set can be specified in calendar-data")
 	}
 
@@ -426,22 +435,22 @@ func decodeCalendarDataReq(calendarData *calendarDataReq) (*CalendarCompRequest,
 		}
 	}
 
-	if calendarData.Expand != nil {
-		start, end, err := decodeRequiredTimeRange("expand", &calendarData.Expand.requiredTimeRange)
+	if len(calendarData.Expand) > 0 {
+		start, end, err := decodeRequiredTimeRange("expand", &calendarData.Expand[0].requiredTimeRange)
 		if err != nil {
 			return nil, err
 		}
 		req.Expand = &CalendarExpandRequest{Start: start, End: end}
 	}
-	if calendarData.LimitRecurrenceSet != nil {
-		start, end, err := decodeRequiredTimeRange("limit-recurrence-set", &calendarData.LimitRecurrenceSet.requiredTimeRange)
+	if len(calendarData.LimitRecurrenceSet) > 0 {
+		start, end, err := decodeRequiredTimeRange("limit-recurrence-set", &calendarData.LimitRecurrenceSet[0].requiredTimeRange)
 		if err != nil {
 			return nil, err
 		}
 		req.LimitRecurrenceSet = &CalendarLimitRequest{Start: start, End: end}
 	}
-	if calendarData.LimitFreeBusySet != nil {
-		start, end, err := decodeRequiredTimeRange("limit-freebusy-set", &calendarData.LimitFreeBusySet.requiredTimeRange)
+	if len(calendarData.LimitFreeBusySet) > 0 {
+		start, end, err := decodeRequiredTimeRange("limit-freebusy-set", &calendarData.LimitFreeBusySet[0].requiredTimeRange)
 		if err != nil {
 			return nil, err
 		}
