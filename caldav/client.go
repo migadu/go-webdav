@@ -155,9 +155,17 @@ func decodeCalendar(path string, resp *internal.Response) (*Calendar, error) {
 	}, nil
 }
 
+// isEmpty reports whether the request asks for nothing in particular.
+func (c *CalendarCompRequest) isEmpty() bool {
+	return c == nil || (c.Name == "" && !c.AllProps && !c.AllComps && len(c.Props) == 0 && len(c.Comps) == 0)
+}
+
 func encodeCalendarCompReq(c *CalendarCompRequest) (*comp, error) {
-	if c == nil || (c.Name == "" && !c.AllProps && !c.AllComps && len(c.Props) == 0 && len(c.Comps) == 0) {
+	if c.isEmpty() {
 		return nil, nil
+	}
+	if c.Name == "" {
+		return nil, fmt.Errorf("caldav: missing component name in calendar data request")
 	}
 
 	encoded := comp{Name: c.Name}
@@ -176,6 +184,9 @@ func encodeCalendarCompReq(c *CalendarCompRequest) (*comp, error) {
 		encodedChild, err := encodeCalendarCompReq(&child)
 		if err != nil {
 			return nil, err
+		} else if encodedChild == nil {
+			// An empty request has nothing to ask for
+			continue
 		}
 		encoded.Comp = append(encoded.Comp, *encodedChild)
 	}
@@ -184,6 +195,13 @@ func encodeCalendarCompReq(c *CalendarCompRequest) (*comp, error) {
 }
 
 func encodeCalendarReq(c *CalendarCompRequest) (*internal.Prop, error) {
+	if !c.isEmpty() && c.Name == "" {
+		// The outermost component is the calendar itself (RFC 4791 section
+		// 9.6.1), and the name attribute is required
+		withName := *c
+		withName.Name = ical.CompCalendar
+		c = &withName
+	}
 	compReq, err := encodeCalendarCompReq(c)
 	if err != nil {
 		return nil, err
