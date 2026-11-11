@@ -62,6 +62,47 @@ type AddressBookUpdater interface {
 	UpdateAddressBook(ctx context.Context, path string, update *AddressBookUpdate) error
 }
 
+// CopyAddressObjectOptions holds the options of a COPY request for an address
+// object.
+type CopyAddressObjectOptions struct {
+	// NoOverwrite indicates that the client doesn't want an address object
+	// already at the destination to be replaced ("Overwrite: F"): the copy
+	// must then fail with 412 Precondition Failed.
+	NoOverwrite bool
+}
+
+// MoveAddressObjectOptions holds the options of a MOVE request for an address
+// object.
+type MoveAddressObjectOptions struct {
+	// NoOverwrite indicates that the client doesn't want an address object
+	// already at the destination to be replaced ("Overwrite: F"): the move
+	// must then fail with 412 Precondition Failed.
+	NoOverwrite bool
+}
+
+// AddressObjectCopyMover is an optional interface a Backend can implement to
+// let clients copy and move address objects with COPY and MOVE, for instance
+// to move a contact from an address book to another. Address books cannot be
+// copied or moved.
+//
+// The Handler calls these methods only for src and dst paths of address
+// objects, that is, of resources in an address book, and dst is never src.
+// created is true if there was no address object at dst, false if one was
+// replaced. If there is no address object at src, they fail with 404 Not
+// Found, and if there is no address book to hold dst, with 409 Conflict (RFC
+// 4918 sections 9.8.5 and 9.9.4).
+//
+// The preconditions of RFC 6352 section 6.3.2.1 apply to the destination, and
+// can be reported with NewPreconditionError: for instance no-uid-conflict, if
+// the address book of dst already holds another address object with the same
+// UID, or if dst is an address object with another UID.
+type AddressObjectCopyMover interface {
+	// CopyAddressObject copies the address object at src to dst.
+	CopyAddressObject(ctx context.Context, src, dst string, opts *CopyAddressObjectOptions) (created bool, err error)
+	// MoveAddressObject moves the address object at src to dst.
+	MoveAddressObject(ctx context.Context, src, dst string, opts *MoveAddressObjectOptions) (created bool, err error)
+}
+
 // Handler handles CardDAV HTTP requests. It can be used to create a CardDAV
 // server.
 type Handler struct {
@@ -364,14 +405,18 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 		return nil, nil, err
 	}
 
-	return caps, []string{
+	allow = []string{
 		http.MethodOptions,
 		http.MethodHead,
 		http.MethodGet,
 		http.MethodPut,
 		http.MethodDelete,
 		"PROPFIND",
-	}, nil
+	}
+	if _, ok := b.Backend.(AddressObjectCopyMover); ok {
+		allow = append(allow, "COPY", "MOVE")
+	}
+	return caps, allow, nil
 }
 
 func (b *backend) HeadGet(w http.ResponseWriter, r *http.Request) error {
@@ -823,12 +868,51 @@ func (b *backend) Mkcol(r *http.Request) error {
 	return b.Backend.CreateAddressBook(r.Context(), &ab)
 }
 
+// inPrefix reports whether p is under the prefix of the Handler.
+func (b *backend) inPrefix(p string) bool {
+	p = path.Clean(p)
+	return b.Prefix == "" || p == b.Prefix || strings.HasPrefix(p, b.Prefix+"/")
+}
+
+// checkCopyMove checks that a COPY or MOVE request is for an address object,
+// to be copied or moved into an address book.
+func (b *backend) checkCopyMove(src, dst string) error {
+	if b.resourceTypeAtPath(src) != resourceTypeAddressObject {
+		return internal.HTTPErrorf(http.StatusForbidden, "carddav: only address objects can be copied or moved")
+	}
+	if !b.inPrefix(dst) {
+		// RFC 4918 sections 9.8.5 and 9.9.4
+		return internal.HTTPErrorf(http.StatusBadGateway, "carddav: destination is outside of the CardDAV namespace")
+	}
+	if b.resourceTypeAtPath(dst) != resourceTypeAddressObject {
+		return internal.HTTPErrorf(http.StatusForbidden, "carddav: destination must be an address object in an address book")
+	}
+	return nil
+}
+
 func (b *backend) Copy(r *http.Request, dest *internal.Href, recursive, overwrite bool) (created bool, err error) {
-	return false, internal.HTTPErrorf(http.StatusNotImplemented, "carddav: Copy not implemented")
+	cm, ok := b.Backend.(AddressObjectCopyMover)
+	if !ok {
+		return false, internal.HTTPErrorf(http.StatusNotImplemented, "carddav: Copy not implemented")
+	}
+	if err := b.checkCopyMove(r.URL.Path, dest.Path); err != nil {
+		return false, err
+	}
+	// recursive doesn't matter: address objects have no members
+	opts := CopyAddressObjectOptions{NoOverwrite: !overwrite}
+	return cm.CopyAddressObject(r.Context(), r.URL.Path, dest.Path, &opts)
 }
 
 func (b *backend) Move(r *http.Request, dest *internal.Href, overwrite bool) (created bool, err error) {
-	return false, internal.HTTPErrorf(http.StatusNotImplemented, "carddav: Move not implemented")
+	cm, ok := b.Backend.(AddressObjectCopyMover)
+	if !ok {
+		return false, internal.HTTPErrorf(http.StatusNotImplemented, "carddav: Move not implemented")
+	}
+	if err := b.checkCopyMove(r.URL.Path, dest.Path); err != nil {
+		return false, err
+	}
+	opts := MoveAddressObjectOptions{NoOverwrite: !overwrite}
+	return cm.MoveAddressObject(r.Context(), r.URL.Path, dest.Path, &opts)
 }
 
 // PreconditionType as defined in https://tools.ietf.org/rfcmarkup?doc=6352#section-6.3.2.1
