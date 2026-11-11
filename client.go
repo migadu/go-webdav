@@ -182,27 +182,62 @@ func (c *Client) ReadDir(ctx context.Context, name string, recursive bool) ([]Fi
 type fileWriter struct {
 	pw   *io.PipeWriter
 	done <-chan error
+
+	finished bool
+	err      error
 }
 
 func (fw *fileWriter) Write(b []byte) (int, error) {
-	return fw.pw.Write(b)
+	n, err := fw.pw.Write(b)
+	if err == io.ErrClosedPipe {
+		// The request ended before the whole body was sent, e.g. because the
+		// server refused it without reading it: report why
+		if reqErr := fw.wait(); reqErr != nil {
+			err = reqErr
+		}
+	}
+	return n, err
 }
 
 func (fw *fileWriter) Close() error {
 	if err := fw.pw.Close(); err != nil {
 		return err
 	}
-	return <-fw.done
+	return fw.wait()
+}
+
+// wait waits for the request to complete and returns its error.
+func (fw *fileWriter) wait() error {
+	if !fw.finished {
+		fw.err = <-fw.done
+		fw.finished = true
+	}
+	return fw.err
 }
 
 // Create writes a file's contents.
-func (c *Client) Create(ctx context.Context, name string) (io.WriteCloser, error) {
+//
+// A nil opts writes the file unconditionally. Otherwise, opts.IfMatch only
+// overwrites the file if its ETag still matches, and opts.IfNoneMatch "*" only
+// creates it if it doesn't exist yet. The values are sent as is, so they must
+// be quoted entity-tags as in the header fields, e.g. `"` + fi.ETag + `"`, or
+// "*". A failed precondition is returned by Close, as an *HTTPError with code
+// 412 Precondition Failed.
+func (c *Client) Create(ctx context.Context, name string, opts *CreateOptions) (io.WriteCloser, error) {
 	pr, pw := io.Pipe()
 
 	req, err := c.ic.NewRequest(http.MethodPut, name, pr)
 	if err != nil {
 		pw.Close()
 		return nil, err
+	}
+	if opts != nil {
+		if opts.IfMatch.IsSet() {
+			req.Header.Set("If-Match", string(opts.IfMatch))
+		}
+		if opts.IfNoneMatch.IsSet() {
+			req.Header.Set("If-None-Match", string(opts.IfNoneMatch))
+		}
 	}
 
 	done := make(chan error, 1)
@@ -216,7 +251,7 @@ func (c *Client) Create(ctx context.Context, name string) (io.WriteCloser, error
 		done <- nil
 	}()
 
-	return &fileWriter{pw, done}, nil
+	return &fileWriter{pw: pw, done: done}, nil
 }
 
 // RemoveAll deletes a file. If the file is a directory, all of its descendants
