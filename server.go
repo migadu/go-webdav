@@ -199,46 +199,7 @@ func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*
 		return nil, err
 	}
 
-	resp := &internal.Response{Hrefs: []internal.Href{internal.Href{Path: fi.Path}}}
-
-	for _, set := range update.Set {
-		for _, raw := range set.Prop.Raw {
-			xmlName, ok := raw.XMLName()
-			if !ok {
-				continue
-			}
-
-			emptyVal := internal.NewRawXMLElement(xmlName, nil, nil)
-
-			if err := resp.EncodeProp(http.StatusForbidden, emptyVal); err != nil {
-				return nil, err
-			}
-		}
-
-	}
-
-	for _, remove := range update.Remove {
-		for _, raw := range remove.Prop.Raw {
-			xmlName, ok := raw.XMLName()
-			if !ok {
-				continue
-			}
-
-			emptyVal := internal.NewRawXMLElement(xmlName, nil, nil)
-
-			if err := resp.EncodeProp(http.StatusForbidden, emptyVal); err != nil {
-				return nil, err
-			}
-		}
-
-	}
-
-	if len(resp.PropStats) == 0 {
-		return nil, internal.HTTPErrorf(http.StatusBadRequest,
-			"webdav: request missing properties to update")
-	}
-
-	return resp, nil
+	return internal.NewPropPatchResponse(fi.Path, update, http.StatusForbidden)
 }
 
 func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {

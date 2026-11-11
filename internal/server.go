@@ -235,6 +235,39 @@ func NewPropFindResponse(path string, propfind *PropFind, props map[xml.Name]Pro
 	return resp, nil
 }
 
+// NewPropPatchResponse returns a response to a PROPPATCH request for path
+// which reports every property named in update with the status code. It is
+// meant for resources whose properties cannot be modified: the request still
+// gets a multistatus naming each property, as RFC 4918 section 9.2 requires,
+// rather than failing as a whole.
+func NewPropPatchResponse(path string, update *PropertyUpdate, code int) (*Response, error) {
+	var props []Prop
+	for _, set := range update.Set {
+		props = append(props, set.Prop)
+	}
+	for _, remove := range update.Remove {
+		props = append(props, remove.Prop)
+	}
+
+	resp := &Response{Hrefs: []Href{{Path: path}}}
+	for _, prop := range props {
+		for _, raw := range prop.Raw {
+			name, ok := raw.XMLName()
+			if !ok {
+				continue
+			}
+			if err := resp.EncodeProp(code, NewRawXMLElement(name, nil, nil)); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	if len(resp.PropStats) == 0 {
+		return nil, HTTPErrorf(http.StatusBadRequest, "webdav: request missing properties to update")
+	}
+	return resp, nil
+}
+
 func (h *Handler) handleProppatch(w http.ResponseWriter, r *http.Request) error {
 	var update PropertyUpdate
 	if err := DecodeXMLRequest(r, &update); err != nil {

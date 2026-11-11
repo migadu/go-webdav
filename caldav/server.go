@@ -656,36 +656,24 @@ func (b *backend) propFindAllCalendarObjects(ctx context.Context, propfind *inte
 }
 
 func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*internal.Response, error) {
-	homeSetPath, err := b.Backend.CalendarHomeSetPath(r.Context())
-	if err != nil {
-		return nil, err
-	}
-
-	resp := internal.NewOKResponse(r.URL.Path)
-
-	// Properties cannot be written yet, but refusing per-property inside a 207
-	// rather than failing the request keeps clients that PROPPATCH display
-	// metadata while adopting a calendar (macOS Calendar) from dropping it.
-	status := http.StatusMethodNotAllowed
-	if r.URL.Path == homeSetPath {
-		// TODO: support PROPPATCH for calendars
-		status = http.StatusNotImplemented
-	}
-
-	for _, prop := range update.Remove {
-		emptyVal := internal.NewRawXMLElement(prop.Prop.XMLName, nil, nil)
-		if err := resp.EncodeProp(status, emptyVal); err != nil {
+	// Make sure the resource exists before reporting on its properties
+	switch b.resourceTypeAtPath(r.URL.Path) {
+	case resourceTypeCalendar:
+		if _, err := b.Backend.GetCalendar(r.Context(), r.URL.Path); err != nil {
 			return nil, err
 		}
-	}
-	for _, prop := range update.Set {
-		emptyVal := internal.NewRawXMLElement(prop.Prop.XMLName, nil, nil)
-		if err := resp.EncodeProp(status, emptyVal); err != nil {
+	case resourceTypeCalendarObject:
+		var dataReq CalendarCompRequest
+		if _, err := b.Backend.GetCalendarObject(r.Context(), r.URL.Path, &dataReq); err != nil {
 			return nil, err
 		}
 	}
 
-	return resp, nil
+	// Properties cannot be written yet. Refusing them one by one in a
+	// multistatus, rather than failing the whole request, keeps clients which
+	// PROPPATCH display metadata while adopting a calendar (macOS Calendar
+	// sets displayname, calendar-color and calendar-order) from dropping it.
+	return internal.NewPropPatchResponse(r.URL.Path, update, http.StatusForbidden)
 }
 
 func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
