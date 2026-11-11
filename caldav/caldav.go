@@ -72,6 +72,10 @@ type Calendar struct {
 	// ReadOnly reports that the current user may only read this calendar. It
 	// controls the DAV:current-user-privilege-set reported by the server.
 	ReadOnly bool
+
+	// CTag, when set, is reported as the CalendarServer getctag property: an
+	// opaque token that must change whenever the calendar's contents change.
+	CTag string
 }
 
 // CalendarUpdate holds the changes a PROPPATCH request makes to a calendar.
