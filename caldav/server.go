@@ -806,6 +806,7 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 			Addresses: inbox.UserAddressSet,
 		})
 	}
+	internal.AddPrincipalProps(props, principalPath, "")
 	return internal.NewPropFindResponse(principalPath, propfind, props)
 }
 

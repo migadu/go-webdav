@@ -572,6 +572,7 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 		},
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, internal.PrincipalName)),
 	}
+	internal.AddPrincipalProps(props, principalPath, "")
 	return internal.NewPropFindResponse(principalPath, propfind, props)
 }
 
