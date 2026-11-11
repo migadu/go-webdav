@@ -199,8 +199,11 @@ func TestParseConditions(t *testing.T) {
 					{Resource: "/resource1", Token: "urn:uuid:181d4fae-7d8c-11d0-a765-00a0c91e6bf2"},
 					{Resource: "/resource1", ETag: `W/"A weak ETag"`},
 				},
+				// Both lists apply to /resource1: "either it must be locked
+				// with a lock token of [...] or it must have a strongly
+				// matching ETag of "strong ETag""
 				{
-					{ETag: `"strong ETag"`},
+					{Resource: "/resource1", ETag: `"strong ETag"`},
 				},
 			},
 		},
