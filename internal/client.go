@@ -71,10 +71,15 @@ func DiscoverContextURL(ctx context.Context, service, domain string) (string, er
 		return "", err
 	}
 
+	var txtStrings []string
+	for _, record := range txtRecords {
+		txtStrings = append(txtStrings, splitTXT(record)...)
+	}
+
 	var urlPath string
 	var foundPath bool
-	for _, record := range txtRecords {
-		k, v, ok := strings.Cut(record, "=")
+	for _, s := range txtStrings {
+		k, v, ok := strings.Cut(s, "=")
 		if !ok || !strings.EqualFold(k, "path") {
 			continue
 		}
@@ -104,6 +109,39 @@ func DiscoverContextURL(ctx context.Context, service, domain string) (string, er
 		u.Host = fmt.Sprintf("%v:%v", target, addr.Port)
 	}
 	return u.String(), nil
+}
+
+// txtKeys are the keys, followed by "=", of the strings of the TXT record of
+// RFC 6764 section 4: path, and txtvers, which RFC 6763 section 6.7
+// recommends.
+var txtKeys = []string{"path=", "txtvers="}
+
+// splitTXT returns the strings of record, a DNS TXT record as returned by
+// net.Resolver.LookupTXT. A record can hold several strings (RFC 6763 section
+// 6.1), which LookupTXT joins without a separator: TXT "txtvers=1"
+// "path=/dav/" is returned as "txtvers=1path=/dav/". The strings are found by
+// their keys: a key of txtKeys, in any case, starts a new string once the
+// current one has reached its value. Since a key can't hold "=", "xpath=/a/"
+// is a single string with the key xpath. A string with another key can't be
+// told apart from the end of the previous value.
+func splitTXT(record string) []string {
+	var strs []string
+	start, inValue := 0, false
+	for i := 0; i < len(record); i++ {
+		if inValue {
+			for _, key := range txtKeys {
+				if len(record)-i >= len(key) && strings.EqualFold(record[i:i+len(key)], key) {
+					strs = append(strs, record[start:i])
+					start, inValue = i, false
+					break
+				}
+			}
+		}
+		if record[i] == '=' {
+			inValue = true
+		}
+	}
+	return append(strs, record[start:])
 }
 
 // HTTPClient performs HTTP requests. It's implemented by *http.Client.
