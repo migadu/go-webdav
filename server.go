@@ -610,11 +610,16 @@ type Capability string
 
 // ServePrincipalOptions holds options for ServePrincipal.
 type ServePrincipalOptions struct {
+	// CurrentUserPrincipalPath is the path of the principal of the current
+	// user, reported in DAV:current-user-principal. If empty, the user isn't
+	// authenticated: DAV:current-user-principal is then DAV:unauthenticated
+	// (RFC 5397 section 3), and the principal served is the one at the
+	// request URL.
 	CurrentUserPrincipalPath string
 	HomeSets                 []BackendSuppliedHomeSet
 	Capabilities             []Capability
 	// DisplayName is the DAV:displayname of the principal. If empty, the
-	// last segment of CurrentUserPrincipalPath is used: RFC 3744 section 4
+	// last segment of the principal's path is used: RFC 3744 section 4
 	// requires principals to have a non-empty display name.
 	DisplayName string
 }
@@ -625,22 +630,32 @@ type ServePrincipalOptions struct {
 // reports the access control properties DAV:owner, itself,
 // DAV:principal-collection-set, the collection holding it, and
 // DAV:supported-privilege-set (RFC 3744 section 5).
+//
+// The principal has no members and no content: it supports the OPTIONS and
+// PROPFIND methods only. A nil options is the same as empty options.
 func ServePrincipal(w http.ResponseWriter, r *http.Request, options *ServePrincipalOptions) {
+	if options == nil {
+		options = &ServePrincipalOptions{}
+	}
+	allow := strings.Join([]string{http.MethodOptions, "PROPFIND"}, ", ")
+
 	switch r.Method {
 	case http.MethodOptions:
 		caps := []string{"1", "3"}
 		for _, c := range options.Capabilities {
 			caps = append(caps, string(c))
 		}
-		allow := []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "MKCOL"}
 		w.Header().Add("DAV", strings.Join(caps, ", "))
-		w.Header().Add("Allow", strings.Join(allow, ", "))
+		w.Header().Add("Allow", allow)
 		w.WriteHeader(http.StatusNoContent)
 	case "PROPFIND":
 		if err := servePrincipalPropfind(w, r, options); err != nil {
 			internal.ServeError(w, err)
 		}
 	default:
+		// A 405 response lists the supported methods (RFC 9110 section
+		// 15.5.6)
+		w.Header().Set("Allow", allow)
 		http.Error(w, "unsupported method", http.StatusMethodNotAllowed)
 	}
 }
@@ -652,23 +667,42 @@ func servePrincipalPropfind(w http.ResponseWriter, r *http.Request, options *Ser
 	}
 
 	var propfind internal.PropFind
-	if err := internal.DecodeXMLRequest(r, &propfind); err != nil {
+	if internal.IsRequestBodyEmpty(r) {
+		// An empty body is an allprop request, whatever its Content-Type
+		// (RFC 4918 section 9.1)
+		propfind.AllProp = &struct{}{}
+	} else if err := internal.DecodeXMLRequest(r, &propfind); err != nil {
 		return err
 	}
-	props := map[xml.Name]internal.PropFindFunc{
-		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.PrincipalName)),
-		internal.CurrentUserPrincipalName: internal.PropFindValue(&internal.CurrentUserPrincipal{
-			Href: internal.Href{Path: options.CurrentUserPrincipalPath},
-		}),
+
+	// The principal has no members, so every depth returns the principal
+	// alone, but an invalid one is refused, as by Handler
+	if s := r.Header.Get("Depth"); s != "" {
+		if _, err := internal.ParseDepth(s); err != nil {
+			return &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
+		}
 	}
 
-	internal.AddPrincipalProps(props, options.CurrentUserPrincipalPath, options.DisplayName)
+	// Without a current user, the principal served is the one at the
+	// request URL, and DAV:current-user-principal says the user isn't
+	// authenticated (RFC 5397 section 3)
+	principalPath := options.CurrentUserPrincipalPath
+	currentUserPrincipal := &internal.CurrentUserPrincipal{Href: internal.Href{Path: principalPath}}
+	if principalPath == "" {
+		principalPath = r.URL.Path
+		currentUserPrincipal = &internal.CurrentUserPrincipal{Unauthenticated: &struct{}{}}
+	}
+
+	props := map[xml.Name]internal.PropFindFunc{
+		internal.ResourceTypeName:         internal.PropFindValue(internal.NewResourceType(internal.PrincipalName)),
+		internal.CurrentUserPrincipalName: internal.PropFindValue(currentUserPrincipal),
+	}
+
+	internal.AddPrincipalProps(props, principalPath, options.DisplayName)
 	// The principal owns itself
 	internal.AddACLProps(props, func() (string, error) {
-		return options.CurrentUserPrincipalPath, nil
+		return principalPath, nil
 	})
-
-	// TODO: handle Depth
 
 	for _, homeSet := range options.HomeSets {
 		props[homeSet.GetXMLName()] = internal.PropFindValue(homeSet)
