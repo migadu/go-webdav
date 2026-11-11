@@ -478,8 +478,13 @@ func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (b *backend) Delete(r *http.Request) error {
+	var locks []Lock
 	if b.locks != nil {
 		if err := b.checkLocks(r, treeTarget(r.URL.Path), parentTarget(r.URL.Path)); err != nil {
+			return err
+		}
+		var err error
+		if locks, err = b.treeLocks(r, r.URL.Path); err != nil {
 			return err
 		}
 	}
@@ -493,7 +498,7 @@ func (b *backend) Delete(r *http.Request) error {
 	}
 	err := b.FileSystem.RemoveAll(r.Context(), r.URL.Path, &opts)
 	if b.locks != nil {
-		err = b.removeLocks(r, r.URL.Path, err)
+		b.removeLocks(r, locks, "", err)
 	}
 	return err
 }
@@ -515,10 +520,14 @@ func (b *backend) Mkcol(r *http.Request) error {
 }
 
 func (b *backend) Copy(r *http.Request, dest *internal.Href, recursive, overwrite bool) (created bool, err error) {
+	var destLocks []Lock
 	if b.locks != nil {
 		// The destination is overwritten as if deleted first (RFC 4918
 		// section 9.8.4)
 		if err := b.checkLocks(r, treeTarget(dest.Path), parentTarget(dest.Path)); err != nil {
+			return false, err
+		}
+		if destLocks, err = b.treeLocks(r, dest.Path); err != nil {
 			return false, err
 		}
 	}
@@ -532,14 +541,15 @@ func (b *backend) Copy(r *http.Request, dest *internal.Href, recursive, overwrit
 		return false, &internal.HTTPError{http.StatusPreconditionFailed, err}
 	}
 	if b.locks != nil {
-		// Locks aren't copied, and those of an overwritten destination are
-		// gone with it
-		err = b.removeLocks(r, dest.Path, err)
+		// Locks aren't copied, and those of the members of an overwritten
+		// destination are gone with them
+		b.removeLocks(r, destLocks, path.Clean(dest.Path), err)
 	}
 	return created, err
 }
 
 func (b *backend) Move(r *http.Request, dest *internal.Href, overwrite bool) (created bool, err error) {
+	var srcLocks, destLocks []Lock
 	if b.locks != nil {
 		// The source is removed from its collection, and the destination is
 		// overwritten as if deleted first (RFC 4918 section 9.9.3)
@@ -547,6 +557,12 @@ func (b *backend) Move(r *http.Request, dest *internal.Href, overwrite bool) (cr
 			treeTarget(r.URL.Path), parentTarget(r.URL.Path),
 			treeTarget(dest.Path), parentTarget(dest.Path))
 		if err != nil {
+			return false, err
+		}
+		if srcLocks, err = b.treeLocks(r, r.URL.Path); err != nil {
+			return false, err
+		}
+		if destLocks, err = b.treeLocks(r, dest.Path); err != nil {
 			return false, err
 		}
 	}
@@ -559,10 +575,11 @@ func (b *backend) Move(r *http.Request, dest *internal.Href, overwrite bool) (cr
 		return false, &internal.HTTPError{http.StatusPreconditionFailed, err}
 	}
 	if b.locks != nil {
-		// Locks aren't moved with the resources (RFC 4918 section 9.9.4),
-		// and those of an overwritten destination are gone with it
-		err = b.removeLocks(r, r.URL.Path, err)
-		err = b.removeLocks(r, dest.Path, err)
+		// Locks aren't moved with the resources (RFC 4918 section 7.6), and
+		// those of the members of an overwritten destination are gone with
+		// them
+		b.removeLocks(r, srcLocks, "", err)
+		b.removeLocks(r, destLocks, path.Clean(dest.Path), err)
 	}
 	return created, err
 }

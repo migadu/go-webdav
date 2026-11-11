@@ -280,36 +280,51 @@ func (b *backend) checkWriteLocks(r *http.Request, p string) error {
 	return newPreconditionError(http.StatusLocked, "lock-token-submitted", missing...)
 }
 
-// removeLocks removes the locks rooted at p or below once a request has
-// deleted, moved away or overwritten the resources there (RFC 4918 sections
-// 9.6, 9.8.4 and 9.9.3), and returned opErr. If opErr reports a partial
-// failure (see internal.HrefErrorResponses), only the locks of the resources
-// which are gone are removed.
-func (b *backend) removeLocks(r *http.Request, p string, opErr error) error {
+// treeLocks returns the locks rooted at p or below, which a request deleting,
+// moving or overwriting the resources there removes.
+func (b *backend) treeLocks(r *http.Request, p string) ([]Lock, error) {
 	p = path.Clean(p)
-	if opErr == nil {
-		return b.locks.RemoveAll(r.Context(), p)
-	}
-	if _, err := internal.HrefErrorResponses(opErr); err != nil {
-		// The request failed as a whole
-		return opErr
-	}
-
-	// The request already failed partially, so its response is the list of
-	// failures: lock errors are ignored
 	locks, err := b.locks.Locks(r.Context(), p, true)
 	if err != nil {
-		return opErr
+		return nil, err
+	}
+	var l []Lock
+	for _, lock := range locks {
+		if lock.Root == p || isPathBelow(lock.Root, p) {
+			l = append(l, lock)
+		}
+	}
+	return l, nil
+}
+
+// removeLocks removes locks listed by treeLocks once a request has deleted,
+// moved away or overwritten their resources (RFC 4918 sections 9.6, 9.8.4
+// and 9.9.3), and returned opErr. Locks created meanwhile, once the resources
+// were gone, are kept. So are the locks rooted at keep, the destination of a
+// COPY or MOVE request: the new resource is added to them (section 7.6). If
+// opErr reports a partial failure (see internal.HrefErrorResponses), only the
+// locks of the resources which are gone are removed.
+//
+// The request has been carried out, so errors are ignored: a lock left
+// behind on an unmapped URL is dropped once it expires or is unlocked.
+func (b *backend) removeLocks(r *http.Request, locks []Lock, keep string, opErr error) {
+	if opErr != nil {
+		if _, err := internal.HrefErrorResponses(opErr); err != nil {
+			// The request failed as a whole
+			return
+		}
 	}
 	for _, lock := range locks {
-		if lock.Root != p && !isPathBelow(lock.Root, p) {
+		if lock.Root == keep {
 			continue
 		}
-		if _, err := b.FileSystem.Stat(r.Context(), lock.Root); internal.IsNotFound(err) {
-			b.locks.Unlock(r.Context(), lock.Token)
+		if opErr != nil {
+			if _, err := b.FileSystem.Stat(r.Context(), lock.Root); !internal.IsNotFound(err) {
+				continue
+			}
 		}
+		b.locks.Unlock(r.Context(), lock.Token)
 	}
-	return opErr
 }
 
 // findLock returns the lock with the given token whose scope includes the

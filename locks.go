@@ -102,10 +102,6 @@ type LockSystem interface {
 	// Locks returns the active locks whose scope includes the resource at
 	// path, and, if members is set, the active locks rooted below path.
 	Locks(ctx context.Context, path string, members bool) ([]Lock, error)
-	// RemoveAll removes the locks rooted at path or below it. The Handler
-	// calls it once the resources there have been deleted, moved away or
-	// overwritten.
-	RemoveAll(ctx context.Context, path string) error
 }
 
 // MemLockSystem is a LockSystem keeping locks in memory, for a server
@@ -233,18 +229,4 @@ func (ls *MemLockSystem) Locks(ctx context.Context, path string, members bool) (
 		return l[i].Token < l[j].Token
 	})
 	return l, nil
-}
-
-// RemoveAll implements LockSystem.
-func (ls *MemLockSystem) RemoveAll(ctx context.Context, path string) error {
-	ls.mu.Lock()
-	defer ls.mu.Unlock()
-
-	ls.expire()
-	for token, lock := range ls.locks {
-		if lock.Root == path || isPathBelow(lock.Root, path) {
-			delete(ls.locks, token)
-		}
-	}
-	return nil
 }

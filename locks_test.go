@@ -146,12 +146,15 @@ func TestMemLockSystemLocks(t *testing.T) {
 		}
 	}
 
-	if err := ls.RemoveAll(ctx, "/b"); err != nil {
-		t.Fatalf("RemoveAll() = %v", err)
+	locks, _ := ls.Locks(ctx, "/b", true)
+	for _, lock := range locks {
+		if err := ls.Unlock(ctx, lock.Token); err != nil {
+			t.Errorf("Unlock(%v) = %v", lock.Token, err)
+		}
 	}
-	locks, _ := ls.Locks(ctx, "/", true)
+	locks, _ = ls.Locks(ctx, "/", true)
 	if got, want := lockRoots(locks), "/a /bc /d/e/f /d/e/f"; got != want {
-		t.Errorf("after RemoveAll(/b): locks = [%v], want [%v]", got, want)
+		t.Errorf("after unlocking /b: locks = [%v], want [%v]", got, want)
 	}
 
 	for _, lock := range locks {
