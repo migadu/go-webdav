@@ -20,7 +20,8 @@ import (
 //
 // Accesses are confined to the directory with os.Root: symbolic links are
 // only followed if they are relative and resolve to a location inside the
-// directory.
+// directory. Copying a collection copies the symbolic links it contains as
+// links.
 type LocalFileSystem string
 
 var _ FileSystem = LocalFileSystem("")
@@ -322,6 +323,32 @@ func copyRegularFile(root *os.Root, src, dst string, perm os.FileMode) error {
 	return dstFile.Close()
 }
 
+// isLocalSymlink reports whether a symbolic link at p, a slash-separated path
+// relative to the root directory, pointing to target resolves to a location
+// inside the root.
+func isLocalSymlink(p, target string) bool {
+	// Reject absolute targets, and on Windows targets relative to a drive or
+	// to the root of the current drive
+	if filepath.IsAbs(target) || filepath.VolumeName(target) != "" || strings.HasPrefix(filepath.ToSlash(target), "/") {
+		return false
+	}
+	return filepath.IsLocal(filepath.Join(filepath.FromSlash(path.Dir(p)), target))
+}
+
+// copySymlink copies the symbolic link src to dst. root.Symlink doesn't check
+// the target of the link, so refuse links which would point outside of the
+// root once copied.
+func copySymlink(root *os.Root, src, dst string) error {
+	target, err := root.Readlink(src)
+	if err != nil {
+		return errFromOS(err)
+	}
+	if !isLocalSymlink(dst, target) {
+		return NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: cannot copy a symbolic link pointing outside of the root directory"))
+	}
+	return errFromOS(root.Symlink(target, dst))
+}
+
 // isSubPath reports whether p is located beneath dir. Both paths are cleaned
 // and relative to the root directory.
 func isSubPath(dir, p string) bool {
@@ -371,6 +398,15 @@ func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *Co
 		}
 	}
 
+	// Directories are created with full permissions for their owner, so that
+	// their members can be copied into them. Those whose source lacks some of
+	// these permissions get the source's once the walk is done.
+	type dirPerm struct {
+		path string
+		perm os.FileMode
+	}
+	var dirPerms []dirPerm
+
 	err = iofs.WalkDir(root.FS(), srcPath, func(p string, d iofs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -386,11 +422,19 @@ func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *Co
 		}
 		perm := fi.Mode() & os.ModePerm
 
-		if fi.IsDir() {
-			if err := root.Mkdir(target, perm); err != nil {
+		switch {
+		case fi.IsDir():
+			if err := root.Mkdir(target, perm|0700); err != nil {
 				return errFromOS(err)
 			}
-		} else {
+			if perm&0700 != 0700 {
+				dirPerms = append(dirPerms, dirPerm{target, perm})
+			}
+		case fi.Mode()&os.ModeSymlink != 0:
+			if err := copySymlink(root, p, target); err != nil {
+				return err
+			}
+		default:
 			if err := copyRegularFile(root, p, target, perm); err != nil {
 				return err
 			}
@@ -403,6 +447,14 @@ func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *Co
 	})
 	if err != nil {
 		return false, errFromOS(err)
+	}
+
+	// Deepest directories first, as a directory's members might not be
+	// accessible anymore once it has its permissions
+	for i := len(dirPerms) - 1; i >= 0; i-- {
+		if err := root.Chmod(dirPerms[i].path, dirPerms[i].perm); err != nil {
+			return false, errFromOS(err)
+		}
 	}
 
 	return created, nil

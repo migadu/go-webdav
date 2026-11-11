@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -92,6 +93,115 @@ func TestLocalFileSystemCopyCollection(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "src", "sub", "copy")); !os.IsNotExist(err) {
 		t.Errorf("copying a collection into itself created the destination (stat error: %v)", err)
 	}
+}
+
+func writeTestSymlink(t *testing.T, name, target string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(name), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, name); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLocalFileSystemCopySymlinks(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "file.txt"), "hello")
+	writeTestFile(t, filepath.Join(dir, "src", "a.txt"), "a")
+	if err := os.Chmod(filepath.Join(dir, "src", "a.txt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(dir, "src", "sub", "b.txt"), "b")
+	links := map[string]string{
+		"a-link.txt":      "a.txt",
+		"sub-link":        "sub",
+		"parent-link.txt": filepath.Join("..", "file.txt"),
+	}
+	for link, target := range links {
+		writeTestSymlink(t, filepath.Join(dir, "src", link), target)
+	}
+	fs := webdav.LocalFileSystem(dir)
+	ctx := context.Background()
+
+	// Symbolic links are copied as links, not as the files they point to
+	if _, err := fs.Copy(ctx, "/src", "/dst", &webdav.CopyOptions{}); err != nil {
+		t.Fatalf("Copy() = %v", err)
+	}
+	for link, want := range links {
+		name := filepath.Join(dir, "dst", link)
+		if target, err := os.Readlink(name); err != nil || target != want {
+			t.Errorf("Readlink(%v) = %q, %v, want %q", name, target, err, want)
+		}
+	}
+	checkTestFile(t, filepath.Join(dir, "dst", "a-link.txt"), "a")
+	if fi, err := os.Stat(filepath.Join(dir, "dst", "a-link.txt")); err != nil {
+		t.Error(err)
+	} else if runtime.GOOS != "windows" && fi.Mode().Perm() != 0600 {
+		t.Errorf("copied link points to a file with permissions %v, want %v", fi.Mode().Perm(), os.FileMode(0600))
+	}
+	checkTestFile(t, filepath.Join(dir, "dst", "sub-link", "b.txt"), "b")
+	checkTestFile(t, filepath.Join(dir, "dst", "parent-link.txt"), "hello")
+
+	// Links which wouldn't point inside the root once copied are refused
+	writeTestSymlink(t, filepath.Join(dir, "abs", "link.txt"), filepath.Join(dir, "file.txt"))
+	writeTestSymlink(t, filepath.Join(dir, "deep", "sub", "link.txt"), filepath.Join("..", "..", "file.txt"))
+	for _, tc := range []struct{ src, dst string }{
+		{"/abs", "/abs-copy"},
+		{"/deep/sub", "/shallow"},
+	} {
+		_, err := fs.Copy(ctx, tc.src, tc.dst, &webdav.CopyOptions{})
+		checkHTTPErrorCode(t, err, http.StatusForbidden)
+		checkNotExist(t, filepath.Join(dir, tc.dst, "link.txt"))
+	}
+}
+
+func TestLocalFileSystemCopyReadOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions aren't enforced on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions aren't enforced for root")
+	}
+	dir := t.TempDir()
+	t.Cleanup(func() {
+		// Let t.TempDir remove the directories
+		for _, name := range []string{"src", "src/sub", "dst", "dst/sub", "shallow"} {
+			os.Chmod(filepath.Join(dir, name), 0755)
+		}
+	})
+	writeTestFile(t, filepath.Join(dir, "src", "a.txt"), "a")
+	writeTestFile(t, filepath.Join(dir, "src", "sub", "b.txt"), "b")
+	if err := os.Chmod(filepath.Join(dir, "src", "sub"), 0500); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(dir, "src"), 0555); err != nil {
+		t.Fatal(err)
+	}
+	fs := webdav.LocalFileSystem(dir)
+	ctx := context.Background()
+
+	checkPerm := func(name string, want os.FileMode) {
+		t.Helper()
+		if fi, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Error(err)
+		} else if perm := fi.Mode().Perm(); perm != want {
+			t.Errorf("%v has permissions %v, want %v", name, perm, want)
+		}
+	}
+
+	if _, err := fs.Copy(ctx, "/src", "/dst", &webdav.CopyOptions{}); err != nil {
+		t.Fatalf("Copy() = %v", err)
+	}
+	checkTestFile(t, filepath.Join(dir, "dst", "a.txt"), "a")
+	checkTestFile(t, filepath.Join(dir, "dst", "sub", "b.txt"), "b")
+	checkPerm("dst", 0555)
+	checkPerm("dst/sub", 0500)
+
+	if _, err := fs.Copy(ctx, "/src", "/shallow", &webdav.CopyOptions{NoRecursive: true}); err != nil {
+		t.Fatalf("Copy() = %v", err)
+	}
+	checkPerm("shallow", 0555)
 }
 
 // newSymlinkTestDir creates a directory to be served by LocalFileSystem, and a
