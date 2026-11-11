@@ -8,9 +8,10 @@ import (
 )
 
 type fakeResolver struct {
-	srv []*net.SRV
-	err error
-	txt []string
+	srv    []*net.SRV
+	err    error
+	txt    []string
+	txtErr error
 }
 
 func (r *fakeResolver) LookupSRV(ctx context.Context, service, proto, name string) (string, []*net.SRV, error) {
@@ -18,11 +19,16 @@ func (r *fakeResolver) LookupSRV(ctx context.Context, service, proto, name strin
 }
 
 func (r *fakeResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
-	return r.txt, nil
+	return r.txt, r.txtErr
 }
 
 func TestDiscoverContextURL(t *testing.T) {
-	notFound := &net.DNSError{Err: "no such host", Name: "_caldavs._tcp.example.com", IsNotFound: true}
+	const name = "_caldavs._tcp.example.com"
+	srv := []*net.SRV{{Target: "dav.example.com.", Port: 443}}
+	notFound := &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
+	refused := &net.DNSError{Err: "server misbehaving", Name: name, Server: "192.0.2.1:53"}
+	temporary := &net.DNSError{Err: "server misbehaving", Name: name, Server: "192.0.2.1:53", IsTemporary: true}
+	malformed := &net.DNSError{Err: "DNS response contained records which contain invalid names", Name: name}
 	for _, tc := range []struct {
 		name    string
 		r       fakeResolver
@@ -33,8 +39,15 @@ func TestDiscoverContextURL(t *testing.T) {
 		{"empty answer", fakeResolver{}, "", ErrNoServiceRecord},
 		// RFC 2782: a target of "." means the service is not available
 		{"not available", fakeResolver{srv: []*net.SRV{{Target: ".", Port: 0}}}, "", ErrNoServiceRecord},
-		{"default port", fakeResolver{srv: []*net.SRV{{Target: "dav.example.com.", Port: 443}}}, "https://dav.example.com/.well-known/caldav", nil},
+		// Any other DNS failure doesn't say that there is no record
+		{"refused", fakeResolver{err: refused}, "", refused},
+		{"temporary failure", fakeResolver{err: temporary}, "", temporary},
+		{"malformed answer", fakeResolver{srv: srv, err: malformed}, "", malformed},
+		{"default port", fakeResolver{srv: srv}, "https://dav.example.com/.well-known/caldav", nil},
 		{"port and path", fakeResolver{srv: []*net.SRV{{Target: "dav.example.com.", Port: 8443}}, txt: []string{"path=/dav/"}}, "https://dav.example.com:8443/dav/", nil},
+		{"no TXT record", fakeResolver{srv: srv, txtErr: notFound}, "https://dav.example.com/.well-known/caldav", nil},
+		{"TXT refused", fakeResolver{srv: srv, txtErr: refused}, "", refused},
+		{"TXT temporary failure", fakeResolver{srv: srv, txtErr: temporary}, "", temporary},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			defer func(r dnsResolver) { resolver = r }(resolver)

@@ -29,6 +29,13 @@ type dnsResolver interface {
 
 var resolver dnsResolver = &net.Resolver{}
 
+// isDNSNotFound reports whether err is a DNS answer saying that the requested
+// record doesn't exist.
+func isDNSNotFound(err error) bool {
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && dnsErr.IsNotFound && !dnsErr.IsTemporary
+}
+
 // DiscoverContextURL performs a DNS-based CardDAV/CalDAV service discovery as
 // described in RFC 6764. It returns the URL to the CardDAV/CalDAV server.
 // Specifically it implements points 2 and 3 from the bootstrapping procedure
@@ -36,10 +43,8 @@ var resolver dnsResolver = &net.Resolver{}
 func DiscoverContextURL(ctx context.Context, service, domain string) (string, error) {
 	// Only lookup TLS records, plaintext connections are insecure
 	_, addrs, err := resolver.LookupSRV(ctx, service+"s", "tcp", domain)
-	if dnsErr, ok := err.(*net.DNSError); ok {
-		if dnsErr.IsTemporary {
-			return "", err
-		}
+	if isDNSNotFound(err) {
+		return "", ErrNoServiceRecord
 	} else if err != nil {
 		return "", err
 	}
@@ -58,10 +63,9 @@ func DiscoverContextURL(ctx context.Context, service, domain string) (string, er
 
 	txtName := fmt.Sprintf("_%ss._tcp.%s", service, domain)
 	txtRecords, err := resolver.LookupTXT(ctx, txtName)
-	if dnsErr, ok := err.(*net.DNSError); ok {
-		if dnsErr.IsTemporary {
-			return "", err
-		}
+	if isDNSNotFound(err) {
+		// No TXT record, use the default path
+		txtRecords = nil
 	} else if err != nil {
 		return "", err
 	}
