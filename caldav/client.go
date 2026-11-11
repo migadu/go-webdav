@@ -6,11 +6,11 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/emersion/go-ical"
@@ -427,6 +427,20 @@ func populateCalendarObject(co *CalendarObject, h http.Header) error {
 	return nil
 }
 
+// isICalendarMediaType reports whether mediaType, as returned by
+// mime.ParseMediaType, is acceptable for iCalendar data sent in a response.
+// Besides text/calendar, this accepts text/plain or no Content-Type at all,
+// which some servers such as iCloud send. A body which isn't iCalendar data is
+// still rejected when it is decoded.
+func isICalendarMediaType(mediaType string) bool {
+	switch mediaType {
+	case ical.MIMEType, "text/plain", "":
+		return true
+	default:
+		return false
+	}
+}
+
 func (c *Client) GetCalendarObject(ctx context.Context, path string) (*CalendarObject, error) {
 	req, err := c.ic.NewRequest(http.MethodGet, path, nil)
 	if err != nil {
@@ -440,17 +454,24 @@ func (c *Client) GetCalendarObject(ctx context.Context, path string) (*CalendarO
 	}
 	defer resp.Body.Close()
 
-	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if err != nil {
-		return nil, err
+	var mediaType string
+	if h := resp.Header.Get("Content-Type"); h != "" {
+		mediaType, _, err = mime.ParseMediaType(h)
+		if err != nil {
+			return nil, err
+		}
 	}
-	if !strings.EqualFold(mediaType, ical.MIMEType) {
+	if !isICalendarMediaType(mediaType) {
 		return nil, fmt.Errorf("caldav: expected Content-Type %q, got %q", ical.MIMEType, mediaType)
 	}
 
 	cal, err := ical.NewDecoder(resp.Body).Decode()
+	if err == io.EOF {
+		// The body was empty or ended within a component
+		err = io.ErrUnexpectedEOF
+	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("caldav: failed to decode iCalendar data in response with Content-Type %q: %w", mediaType, err)
 	}
 
 	co := &CalendarObject{

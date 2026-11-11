@@ -5,11 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/emersion/go-vcard"
@@ -354,6 +354,20 @@ func populateAddressObject(ao *AddressObject, h http.Header) error {
 	return nil
 }
 
+// isVCardMediaType reports whether mediaType, as returned by
+// mime.ParseMediaType, is acceptable for a vCard sent in a response. Besides
+// text/vcard, this accepts the legacy text/x-vcard, and text/plain or no
+// Content-Type at all, which some servers such as iCloud send. A body which
+// isn't a vCard is still rejected when it is decoded.
+func isVCardMediaType(mediaType string) bool {
+	switch mediaType {
+	case vcard.MIMEType, "text/x-vcard", "text/plain", "":
+		return true
+	default:
+		return false
+	}
+}
+
 func (c *Client) GetAddressObject(ctx context.Context, path string) (*AddressObject, error) {
 	req, err := c.ic.NewRequest(http.MethodGet, path, nil)
 	if err != nil {
@@ -367,17 +381,24 @@ func (c *Client) GetAddressObject(ctx context.Context, path string) (*AddressObj
 	}
 	defer resp.Body.Close()
 
-	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if err != nil {
-		return nil, err
+	var mediaType string
+	if h := resp.Header.Get("Content-Type"); h != "" {
+		mediaType, _, err = mime.ParseMediaType(h)
+		if err != nil {
+			return nil, err
+		}
 	}
-	if !strings.EqualFold(mediaType, vcard.MIMEType) {
+	if !isVCardMediaType(mediaType) {
 		return nil, fmt.Errorf("carddav: expected Content-Type %q, got %q", vcard.MIMEType, mediaType)
 	}
 
 	card, err := vcard.NewDecoder(resp.Body).Decode()
+	if err == io.EOF {
+		// The body was empty or had no content line at all
+		err = io.ErrUnexpectedEOF
+	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("carddav: failed to decode vCard in response with Content-Type %q: %w", mediaType, err)
 	}
 
 	ao := &AddressObject{
