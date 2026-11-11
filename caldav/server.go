@@ -11,6 +11,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/emersion/go-ical"
 	"github.com/emersion/go-webdav"
@@ -373,7 +374,26 @@ func decodeComp(comp *comp) (*CalendarCompRequest, error) {
 	return req, nil
 }
 
+// decodeRequiredTimeRange returns the start and end of the time range of the
+// element called name. RFC 4791 sections 9.6.5 to 9.6.7 require both, the end
+// after the start.
+func decodeRequiredTimeRange(name string, tr *requiredTimeRange) (start, end time.Time, err error) {
+	if tr.Start == nil || tr.End == nil {
+		return time.Time{}, time.Time{}, internal.HTTPErrorf(http.StatusBadRequest, "caldav: %s requires a start and an end attribute", name)
+	}
+	start, end = time.Time(*tr.Start), time.Time(*tr.End)
+	if !end.After(start) {
+		return time.Time{}, time.Time{}, internal.HTTPErrorf(http.StatusBadRequest, "caldav: the end of %s must be after its start", name)
+	}
+	return start, end, nil
+}
+
 func decodeCalendarDataReq(calendarData *calendarDataReq) (*CalendarCompRequest, error) {
+	// RFC 4791 section 9.6
+	if calendarData.Expand != nil && calendarData.LimitRecurrenceSet != nil {
+		return nil, internal.HTTPErrorf(http.StatusBadRequest, "caldav: only one of expand or limit-recurrence-set can be specified in calendar-data")
+	}
+
 	var req *CalendarCompRequest
 	if calendarData.Comp == nil {
 		req = &CalendarCompRequest{
@@ -388,9 +408,26 @@ func decodeCalendarDataReq(calendarData *calendarDataReq) (*CalendarCompRequest,
 	}
 
 	if calendarData.Expand != nil {
-		req.Expand = calendarData.Expand.request()
+		start, end, err := decodeRequiredTimeRange("expand", &calendarData.Expand.requiredTimeRange)
+		if err != nil {
+			return nil, err
+		}
+		req.Expand = &CalendarExpandRequest{Start: start, End: end}
 	}
-	// TODO: limit-recurrence-set, limit-freebusy-set
+	if calendarData.LimitRecurrenceSet != nil {
+		start, end, err := decodeRequiredTimeRange("limit-recurrence-set", &calendarData.LimitRecurrenceSet.requiredTimeRange)
+		if err != nil {
+			return nil, err
+		}
+		req.LimitRecurrenceSet = &CalendarLimitRequest{Start: start, End: end}
+	}
+	if calendarData.LimitFreeBusySet != nil {
+		start, end, err := decodeRequiredTimeRange("limit-freebusy-set", &calendarData.LimitFreeBusySet.requiredTimeRange)
+		if err != nil {
+			return nil, err
+		}
+		req.LimitFreeBusySet = &CalendarLimitRequest{Start: start, End: end}
+	}
 
 	return req, nil
 }
