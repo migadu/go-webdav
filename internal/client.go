@@ -347,8 +347,13 @@ func isDomainOrSubdomain(host, parent string) bool {
 // and the sensitive header fields, such as Authorization and Cookie, are left
 // out once a redirect leaves the domain of req and its subdomains; an HTTP
 // client adding credentials to every request, such as the one returned by
-// webdav.HTTPClientWithBasicAuth, adds them anyway. A 303 See Other redirect,
-// which asks for a GET request, and a POST request are left to the HTTP client.
+// webdav.HTTPClientWithBasicAuth, adds them anyway. For that reason, and
+// because of the body, a request for an https URL isn't sent again to an http
+// URL: Do returns an *HTTPError with the redirect status. The requests the HTTP
+// client sends itself to follow a redirect, such as that GET request, are up
+// to its CheckRedirect: http.Client sends them to an http URL on the same
+// domain with the sensitive header fields. A 303 See Other redirect, which asks
+// for a GET request, and a POST request are left to the HTTP client.
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	resp, err := c.send(req)
 	if err != nil {
@@ -411,19 +416,23 @@ func (c *Client) send(req *http.Request) (*http.Response, error) {
 		i := slices.IndexFunc(hops, func(hop *http.Request) bool {
 			return hop.Method != req.Method
 		})
-		if i < 0 {
+		// No method change, or e.g. 303 See Other: the response is to be
+		// fetched with GET
+		if i < 0 || (hops[i].Response.StatusCode != http.StatusMovedPermanently && hops[i].Response.StatusCode != http.StatusFound) {
+			// The redirects the HTTP client followed for a request sent
+			// again, such as 307 ones, count with those before
+			if redirects > 0 && redirects+len(hops) > maxRedirects {
+				discardResponse(resp)
+				return nil, tooManyRedirects(req)
+			}
 			return resp, nil
 		}
 		hop := hops[i]
-		if code := hop.Response.StatusCode; code != http.StatusMovedPermanently && code != http.StatusFound {
-			// E.g. 303 See Other: the response is to be fetched with GET
-			return resp, nil
-		}
 		discardResponse(resp)
 
 		redirects += i + 1
 		if redirects > maxRedirects {
-			return nil, fmt.Errorf("webdav: %v %v: stopped after %v redirects", req.Method, req.URL.Redacted(), maxRedirects)
+			return nil, tooManyRedirects(req)
 		}
 		for _, h := range hops[:i+1] {
 			if !isDomainOrSubdomain(h.URL.Hostname(), req.URL.Hostname()) {
@@ -436,6 +445,10 @@ func (c *Client) send(req *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 	}
+}
+
+func tooManyRedirects(req *http.Request) error {
+	return fmt.Errorf("webdav: %v %v: stopped after %v redirects", req.Method, req.URL.Redacted(), maxRedirects)
 }
 
 // redirectHops returns the requests an HTTP client sent to follow redirects
@@ -466,6 +479,15 @@ func discardResponse(resp *http.Response) {
 // req are left out.
 func redirectedRequest(req, hop *http.Request, stripSensitive bool) (*http.Request, error) {
 	u := *hop.URL
+	if req.URL.Scheme == "https" && u.Scheme == "http" {
+		// Leaving out the sensitive header fields wouldn't be enough: an
+		// HTTP client may add credentials to every request, and the body
+		// would be sent in cleartext too
+		return nil, &HTTPError{
+			Code: hop.Response.StatusCode,
+			Err:  fmt.Errorf("webdav: won't send the %v request for an https URL again over plain HTTP to follow the redirect to %v", req.Method, u.Redacted()),
+		}
+	}
 	r := req.Clone(req.Context())
 	r.URL = &u
 	r.Host = hop.Host

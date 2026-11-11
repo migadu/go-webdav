@@ -65,7 +65,9 @@ type Client struct {
 // its trailing slash, is sent again to the redirect target with its own
 // method, and the response to the GET request is discarded. The body of a file
 // written with Create can't be sent again: such a redirect is returned by its
-// Close, as an *HTTPError with the redirect status.
+// Close, as an *HTTPError with the redirect status. A request for an https URL
+// isn't sent again to an http one either, which would send its credentials
+// and body in cleartext: the redirect is returned as an *HTTPError too.
 func NewClient(c HTTPClient, endpoint string) (*Client, error) {
 	ic, err := internal.NewClient(c, endpoint)
 	if err != nil {
