@@ -713,13 +713,27 @@ func (s *CurrentUserPrivilegeSet) HasWrite() bool {
 }
 
 // NewCurrentUserPrivilegeSet returns a privilege set granting DAV:read, plus
-// DAV:write unless readOnly is set.
+// DAV:write unless readOnly is set, with the privileges of
+// NewSupportedPrivilegeSet.
+//
+// RFC 3744 section 5.4 asks for aggregate privileges to be listed along with
+// the privileges they contain, each DAV:privilege element holding a single
+// privilege: DAV:write comes with DAV:write-properties, DAV:write-content,
+// DAV:bind and DAV:unbind. DAV:read-current-user-privilege-set, which
+// DAV:read contains, is abstract, and so isn't listed.
 func NewCurrentUserPrivilegeSet(readOnly bool) *CurrentUserPrivilegeSet {
-	priv := Privilege{Read: &struct{}{}}
+	granted := &struct{}{}
+	privs := []Privilege{{Read: granted}}
 	if !readOnly {
-		priv.Write = &struct{}{}
+		privs = append(privs,
+			Privilege{Write: granted},
+			Privilege{WriteProperties: granted},
+			Privilege{WriteContent: granted},
+			Privilege{Bind: granted},
+			Privilege{Unbind: granted},
+		)
 	}
-	return &CurrentUserPrivilegeSet{Privilege: []Privilege{priv}}
+	return &CurrentUserPrivilegeSet{Privilege: privs}
 }
 
 // CalendarServerNamespace is the namespace of the CalendarServer extensions.
