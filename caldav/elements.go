@@ -228,6 +228,13 @@ type expand struct {
 	End     dateWithUTCTime `xml:"end,attr"`
 }
 
+func (e *expand) request() *CalendarExpandRequest {
+	return &CalendarExpandRequest{
+		Start: time.Time(e.Start),
+		End:   time.Time(e.End),
+	}
+}
+
 // https://tools.ietf.org/html/rfc4791#section-9.6.4
 type prop struct {
 	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav prop"`
