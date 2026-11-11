@@ -620,6 +620,11 @@ type ServePrincipalOptions struct {
 }
 
 // ServePrincipal replies to requests for a principal URL.
+//
+// Along with the principal properties of RFC 3744 section 4, the principal
+// reports the access control properties DAV:owner, itself,
+// DAV:principal-collection-set, the collection holding it, and
+// DAV:supported-privilege-set (RFC 3744 section 5).
 func ServePrincipal(w http.ResponseWriter, r *http.Request, options *ServePrincipalOptions) {
 	switch r.Method {
 	case http.MethodOptions:
@@ -658,6 +663,10 @@ func servePrincipalPropfind(w http.ResponseWriter, r *http.Request, options *Ser
 	}
 
 	internal.AddPrincipalProps(props, options.CurrentUserPrincipalPath, options.DisplayName)
+	// The principal owns itself
+	internal.AddACLProps(props, func() (string, error) {
+		return options.CurrentUserPrincipalPath, nil
+	})
 
 	// TODO: handle Depth
 

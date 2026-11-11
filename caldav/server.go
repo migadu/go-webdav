@@ -173,6 +173,14 @@ type InboxBackend interface {
 
 // Handler handles CalDAV HTTP requests. It can be used to create a CalDAV
 // server.
+//
+// The principal, the calendar home set, the calendars, the scheduling Inbox
+// and the calendar objects report the access control properties of RFC 3744
+// section 5 clients ask for: the current user principal is their DAV:owner,
+// the collection holding it their DAV:principal-collection-set, and
+// DAV:supported-privilege-set describes the privileges reported in
+// DAV:current-user-privilege-set, which the ReadOnly fields control. DAV:acl
+// isn't reported, and can't be modified with the ACL method.
 type Handler struct {
 	Backend Backend
 	Prefix  string
@@ -881,6 +889,8 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 		})
 	}
 	internal.AddPrincipalProps(props, principalPath, "")
+	// The principal owns itself
+	internal.AddACLProps(props, func() (string, error) { return principalPath, nil })
 	b.addPushProps(ctx, propfind, principalPath, props)
 	return internal.NewPropFindResponse(principalPath, propfind, props)
 }
@@ -902,6 +912,7 @@ func (b *backend) propFindHomeSet(ctx context.Context, propfind *internal.PropFi
 		}),
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName)),
 	}
+	internal.AddACLProps(props, func() (string, error) { return principalPath, nil })
 	b.addPushProps(ctx, propfind, homeSetPath, props)
 	return internal.NewPropFindResponse(homeSetPath, propfind, props)
 }
@@ -983,6 +994,7 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 
 	// TODO: CALDAV:min-date-time, CALDAV:max-date-time, CALDAV:max-instances, CALDAV:max-attendees-per-instance
 
+	b.addACLProps(ctx, props)
 	b.addPushProps(ctx, propfind, cal.Path, props)
 	return internal.NewPropFindResponse(cal.Path, propfind, props)
 }
@@ -995,6 +1007,7 @@ func (b *backend) propFindInbox(ctx context.Context, propfind *internal.PropFind
 		// sync-collection REPORTs are only served for calendars
 		internal.SupportedReportSetName: internal.PropFindValue(internal.NewSupportedReportSet(calendarQueryName, calendarMultigetName)),
 	}
+	b.addACLProps(ctx, props, newScheduleDeliverSupportedPrivilege())
 	b.addPushProps(ctx, propfind, inbox.Path, props)
 	return internal.NewPropFindResponse(inbox.Path, propfind, props)
 }
@@ -1026,6 +1039,29 @@ func newInboxPrivilegeSet(readOnly bool) *internal.CurrentUserPrivilegeSet {
 		internal.Privilege{ScheduleQueryFreeBusy: granted},
 	)
 	return &internal.CurrentUserPrivilegeSet{Privilege: privs}
+}
+
+// newScheduleDeliverSupportedPrivilege returns the CALDAV:schedule-deliver
+// privilege defined on the scheduling Inbox, which aggregates the other
+// scheduling privileges of the Inbox (RFC 6638 sections 6.1 and 6.3). The
+// scheduling privileges must be non-abstract and appear in the
+// DAV:supported-privilege-set of the Inbox (RFC 6638 section 6).
+func newScheduleDeliverSupportedPrivilege() internal.SupportedPrivilege {
+	granted := &struct{}{}
+	return internal.NewSupportedPrivilege(internal.Privilege{ScheduleDeliver: granted}, "Deliver scheduling messages",
+		internal.NewSupportedPrivilege(internal.Privilege{ScheduleDeliverInvite: granted}, "Deliver scheduling messages from organizers"),
+		internal.NewSupportedPrivilege(internal.Privilege{ScheduleDeliverReply: granted}, "Deliver scheduling messages from attendees"),
+		internal.NewSupportedPrivilege(internal.Privilege{ScheduleQueryFreeBusy: granted}, "Query free-busy information"),
+	)
+}
+
+// addACLProps adds to props the access control properties of a resource of
+// the current user (see internal.AddACLProps), with the privileges others
+// defined on it in addition.
+func (b *backend) addACLProps(ctx context.Context, props map[xml.Name]internal.PropFindFunc, others ...internal.SupportedPrivilege) {
+	internal.AddACLProps(props, func() (string, error) {
+		return b.Backend.CurrentUserPrincipal(ctx)
+	}, others...)
 }
 
 // propFindAllCalendars writes resps, which end with the response for the
@@ -1123,6 +1159,7 @@ func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal
 		})
 	}
 
+	b.addACLProps(ctx, props)
 	return internal.NewPropFindResponse(co.Path, propfind, props)
 }
 
