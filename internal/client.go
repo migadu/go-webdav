@@ -208,6 +208,38 @@ func (c *Client) DoMultiStatus(req *http.Request) (*MultiStatus, error) {
 	return &ms, nil
 }
 
+// DoAndCheckMultiStatus performs a request which acts on a resource and, if
+// it's a collection, on its members, such as DELETE, COPY or MOVE.
+//
+// The server may fail for some members and not for others, and report this
+// with a 207 Multi-Status response listing the members which failed (RFC 4918
+// sections 9.6.1, 9.8.8 and 9.9.4). Each failure is returned as an HrefError
+// wrapping an HTTPError. Members with a 2xx status are not errors.
+func (c *Client) DoAndCheckMultiStatus(req *http.Request) error {
+	resp, err := c.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMultiStatus {
+		return nil
+	}
+
+	var ms MultiStatus
+	if err := xml.NewDecoder(resp.Body).Decode(&ms); err != nil {
+		return err
+	}
+
+	var errs []error
+	for i := range ms.Responses {
+		if err := ms.Responses[i].Err(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func (c *Client) PropFind(ctx context.Context, path string, depth Depth, propfind *PropFind) (*MultiStatus, error) {
 	req, err := c.NewXMLRequest("PROPFIND", path, propfind)
 	if err != nil {
