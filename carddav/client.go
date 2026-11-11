@@ -36,6 +36,12 @@ type Client struct {
 	ic *internal.Client
 }
 
+// NewClient creates a new CardDAV client.
+//
+// The paths the client returns and takes are as described for
+// webdav.NewClient: an address book home set, address book or address object
+// on another host than the endpoint's, as with iCloud, is returned as an
+// absolute URL.
 func NewClient(c webdav.HTTPClient, endpoint string) (*Client, error) {
 	wc, err := webdav.NewClient(c, endpoint)
 	if err != nil {
@@ -72,7 +78,7 @@ func (c *Client) FindAddressBookHomeSet(ctx context.Context, principal string) (
 		return "", err
 	}
 
-	return prop.Href.Path, nil
+	return resp.HrefPath(&prop.Href), nil
 }
 
 func decodeSupportedAddressData(supported *supportedAddressData) []AddressDataType {
@@ -294,17 +300,16 @@ func (c *Client) MultiGetAddressBook(ctx context.Context, path string, multiGet 
 		return nil, err
 	}
 
-	addressbookMultiget := addressbookMultiget{Prop: propReq}
-
-	if len(multiGet.Paths) == 0 {
-		href := internal.Href{Path: path}
-		addressbookMultiget.Hrefs = []internal.Href{href}
-	} else {
-		addressbookMultiget.Hrefs = make([]internal.Href, len(multiGet.Paths))
-		for i, p := range multiGet.Paths {
-			addressbookMultiget.Hrefs[i] = internal.Href{Path: p}
-		}
+	paths := multiGet.Paths
+	if len(paths) == 0 {
+		paths = []string{path}
 	}
+	hrefs, err := c.ic.RequestHrefs(path, paths)
+	if err != nil {
+		return nil, err
+	}
+
+	addressbookMultiget := addressbookMultiget{Prop: propReq, Hrefs: hrefs}
 
 	req, err := c.ic.NewXMLRequest("REPORT", path, &addressbookMultiget)
 	if err != nil {
@@ -321,13 +326,18 @@ func (c *Client) MultiGetAddressBook(ctx context.Context, path string, multiGet 
 	return decodeAddressList(ms)
 }
 
-func populateAddressObject(ao *AddressObject, h http.Header) error {
+func (c *Client) populateAddressObject(ao *AddressObject, resp *http.Response) error {
+	h := resp.Header
 	if loc := h.Get("Location"); loc != "" {
 		u, err := url.Parse(loc)
 		if err != nil {
 			return err
 		}
-		ao.Path = u.Path
+		var base *url.URL
+		if resp.Request != nil {
+			base = resp.Request.URL
+		}
+		ao.Path = c.ic.HrefPath(base, u)
 	}
 	if s := h.Get("ETag"); s != "" {
 		var etag internal.ETag
@@ -381,10 +391,10 @@ func (c *Client) GetAddressObject(ctx context.Context, path string) (*AddressObj
 	}
 
 	ao := &AddressObject{
-		Path: resp.Request.URL.Path,
+		Path: c.ic.HrefPath(nil, resp.Request.URL),
 		Card: card,
 	}
-	if err := populateAddressObject(ao, resp.Header); err != nil {
+	if err := c.populateAddressObject(ao, resp); err != nil {
 		return nil, err
 	}
 	return ao, nil
@@ -431,7 +441,7 @@ func (c *Client) PutAddressObject(ctx context.Context, path string, card vcard.C
 	resp.Body.Close()
 
 	ao := &AddressObject{Path: path}
-	if err := populateAddressObject(ao, resp.Header); err != nil {
+	if err := c.populateAddressObject(ao, resp); err != nil {
 		return nil, err
 	}
 	return ao, nil

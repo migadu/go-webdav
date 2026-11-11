@@ -79,6 +79,15 @@ func (h *Href) String() string {
 	return u.String()
 }
 
+// pathOrURL returns the path of a relative href, or the whole URL of an
+// absolute one.
+func (h *Href) pathOrURL() string {
+	if h.Host == "" {
+		return h.Path
+	}
+	return h.String()
+}
+
 func (h *Href) MarshalText() ([]byte, error) {
 	return []byte(h.String()), nil
 }
@@ -115,6 +124,11 @@ type Response struct {
 	Error               *Error     `xml:"error,omitempty"`
 	ResponseDescription string     `xml:"responsedescription,omitempty"`
 	Location            *Location  `xml:"location,omitempty"`
+
+	// For a response received by a Client, the client and the URL its
+	// relative hrefs are relative to, for HrefPath
+	client *Client
+	base   *url.URL
 }
 
 func NewOKResponse(path string) *Response {
@@ -183,15 +197,31 @@ func (resp *Response) Err() error {
 	return errors.Join(hrefErrs...)
 }
 
+// Path returns the path of the resource the response is about, along with
+// the response's error, if any: the path of a relative href, or the whole URL
+// of an absolute one.
+//
+// The hrefs of a response received by a Client are first normalized to the
+// form returned by clients, as by Client.HrefPath.
 func (resp *Response) Path() (string, error) {
 	err := resp.Err()
 	var path string
 	if len(resp.Hrefs) == 1 {
-		path = resp.Hrefs[0].Path
+		path = resp.Hrefs[0].pathOrURL()
 	} else if err == nil {
 		err = fmt.Errorf("webdav: malformed response: expected exactly one href element, got %v", len(resp.Hrefs))
 	}
 	return path, err
+}
+
+// HrefPath returns the path of the resource at href, found in one of the
+// response's properties, in the same form as Path.
+func (resp *Response) HrefPath(href *Href) string {
+	h := *href
+	if resp.client != nil {
+		h = resp.client.normalizeHref(resp.base, h)
+	}
+	return h.pathOrURL()
 }
 
 func (resp *Response) DecodeProp(values ...interface{}) error {
