@@ -97,6 +97,10 @@ type Handler struct {
 	// absolute URLs: as for the Destination header field of COPY and MOVE,
 	// the Handler must see the full paths, rather than paths stripped of a
 	// prefix with http.StripPrefix.
+	//
+	// An If header field with more than 100 conditions is refused with 400
+	// Bad Request, and a lock whose DAV:owner element is larger than 4 KiB
+	// with 413 Content Too Large.
 	LockSystem LockSystem
 }
 
