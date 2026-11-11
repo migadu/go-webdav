@@ -140,7 +140,7 @@ func checkConditionalMatches(fi *FileInfo, ifMatch, ifNoneMatch ConditionalMatch
 	}
 
 	if ifNoneMatch.IsSet() {
-		if ok, err := ifNoneMatch.MatchETag(etag); err != nil {
+		if ok, err := ifNoneMatch.MatchETagWeak(etag); err != nil {
 			return NewHTTPError(http.StatusBadRequest, err)
 		} else if ok {
 			return NewHTTPError(http.StatusPreconditionFailed, fmt.Errorf("If-None-Match condition failed"))
