@@ -27,6 +27,15 @@ type PutCalendarObjectOptions struct {
 }
 
 // Backend is a CalDAV server backend.
+//
+// ListCalendars, ListCalendarObjects and QueryCalendarObjects can report
+// resources that couldn't be loaded along with the others, and
+// DeleteCalendarObject can report the members of a calendar it couldn't
+// delete, by returning an error made only of errors created by
+// webdav.NewHrefError (a single one, or several combined with errors.Join).
+// The server then replies with a 207 Multi-Status response listing each
+// failed resource with its own status, instead of failing the whole request.
+// Any other error fails the whole request.
 type Backend interface {
 	CalendarHomeSetPath(ctx context.Context) (string, error)
 
@@ -38,6 +47,10 @@ type Backend interface {
 	ListCalendarObjects(ctx context.Context, path string, req *CalendarCompRequest) ([]CalendarObject, error)
 	QueryCalendarObjects(ctx context.Context, path string, query *CalendarQuery) ([]CalendarObject, error)
 	PutCalendarObject(ctx context.Context, path string, calendar *ical.Calendar, opts *PutCalendarObjectOptions) (*CalendarObject, error)
+	// DeleteCalendarObject deletes the resource at path, a calendar object
+	// or a calendar. Members of a calendar that couldn't be deleted can be
+	// reported with webdav.NewHrefError; as per RFC 4918 section 9.6.1, the
+	// members that were deleted shouldn't be reported.
 	DeleteCalendarObject(ctx context.Context, path string) error
 
 	webdav.UserPrincipalBackend
@@ -293,11 +306,12 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *cal
 	q.CompFilter = *cf
 
 	cos, err := h.Backend.QueryCalendarObjects(r.Context(), r.URL.Path, &q)
+	errResps, err := internal.HrefErrorResponses(err)
 	if err != nil {
 		return err
 	}
 
-	var resps []internal.Response
+	resps := make([]internal.Response, 0, len(cos)+len(errResps))
 	for _, co := range cos {
 		b := backend{
 			Backend: h.Backend,
@@ -314,6 +328,7 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *cal
 		}
 		resps = append(resps, *resp)
 	}
+	resps = append(resps, errResps...)
 
 	ms := internal.NewMultiStatus(resps...)
 
@@ -704,6 +719,7 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 
 func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.PropFind, recurse bool) ([]internal.Response, error) {
 	abs, err := b.Backend.ListCalendars(ctx)
+	errResps, err := internal.HrefErrorResponses(err)
 	if err != nil {
 		return nil, err
 	}
@@ -723,7 +739,7 @@ func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.P
 			resps = append(resps, resps_...)
 		}
 	}
-	return resps, nil
+	return append(resps, errResps...), nil
 }
 
 func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal.PropFind, report bool, co *CalendarObject) (*internal.Response, error) {
@@ -776,11 +792,12 @@ func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal
 func (b *backend) propFindAllCalendarObjects(ctx context.Context, propfind *internal.PropFind, cal *Calendar) ([]internal.Response, error) {
 	var dataReq CalendarCompRequest
 	aos, err := b.Backend.ListCalendarObjects(ctx, cal.Path, &dataReq)
+	errResps, err := internal.HrefErrorResponses(err)
 	if err != nil {
 		return nil, err
 	}
 
-	var resps []internal.Response
+	resps := make([]internal.Response, 0, len(aos)+len(errResps))
 	for _, ao := range aos {
 		resp, err := b.propFindCalendarObject(ctx, propfind, false, &ao)
 		if err != nil {
@@ -788,7 +805,7 @@ func (b *backend) propFindAllCalendarObjects(ctx context.Context, propfind *inte
 		}
 		resps = append(resps, *resp)
 	}
-	return resps, nil
+	return append(resps, errResps...), nil
 }
 
 func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*internal.Response, error) {
