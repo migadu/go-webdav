@@ -614,6 +614,10 @@ type ServePrincipalOptions struct {
 	CurrentUserPrincipalPath string
 	HomeSets                 []BackendSuppliedHomeSet
 	Capabilities             []Capability
+	// DisplayName is the DAV:displayname of the principal. If empty, the
+	// last segment of CurrentUserPrincipalPath is used: RFC 3744 section 4
+	// requires principals to have a non-empty display name.
+	DisplayName string
 }
 
 // ServePrincipal replies to requests for a principal URL.
@@ -654,7 +658,9 @@ func servePrincipalPropfind(w http.ResponseWriter, r *http.Request, options *Ser
 		}),
 	}
 
-	// TODO: handle Depth and more properties
+	internal.AddPrincipalProps(props, options.CurrentUserPrincipalPath, options.DisplayName)
+
+	// TODO: handle Depth
 
 	for _, homeSet := range options.HomeSets {
 		props[homeSet.GetXMLName()] = internal.PropFindValue(homeSet)
