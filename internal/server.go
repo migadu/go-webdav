@@ -360,11 +360,10 @@ func onlyHrefs(resps []Response, paths []string) bool {
 	return true
 }
 
-// containsPath reports whether paths contains p, ignoring trailing slashes.
+// containsPath reports whether paths contains p, as compared by SamePath.
 func containsPath(paths []string, p string) bool {
-	p = strings.TrimSuffix(p, "/")
 	for _, path := range paths {
-		if strings.TrimSuffix(path, "/") == p {
+		if SamePath(path, p) {
 			return true
 		}
 	}

@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/emersion/go-vcard"
@@ -543,7 +542,7 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 	if err != nil {
 		return nil, err
 	}
-	collectionPath := strings.TrimSuffix(c.ic.HrefPath(nil, u), "/")
+	collectionPath := c.ic.HrefPath(nil, u)
 
 	ret := &SyncResponse{}
 	var errs []error
@@ -558,7 +557,7 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 			case httpErr.Code == http.StatusNotFound && len(resp.Hrefs) > 0:
 				ret.Deleted = append(ret.Deleted, resp.Paths()...)
 			case httpErr.Code == http.StatusInsufficientStorage &&
-				(len(resp.Hrefs) == 0 || (len(resp.Hrefs) == 1 && strings.TrimSuffix(p, "/") == collectionPath)):
+				(len(resp.Hrefs) == 0 || (len(resp.Hrefs) == 1 && internal.SamePath(p, collectionPath))):
 				// The server reports a truncated result on the request-URI
 				// (RFC 6578 section 3.6).
 				ret.Truncated = true
@@ -568,7 +567,7 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 			return nil
 		}
 
-		if strings.TrimSuffix(p, "/") == collectionPath {
+		if internal.SamePath(p, collectionPath) {
 			return nil
 		}
 
