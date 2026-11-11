@@ -138,6 +138,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "REPORT":
 		err = h.handleReport(w, r)
 	default:
+		if pb, ok := h.Backend.(PushBackend); ok {
+			var handled bool
+			if handled, err = h.servePush(w, r, pb); handled {
+				break
+			}
+		}
 		b := backend{
 			Backend: h.Backend,
 			Prefix:  strings.TrimSuffix(h.Prefix, "/"),
@@ -394,6 +400,14 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 		if _, ok := b.Backend.(AddressBookUpdater); ok {
 			allow = append(allow, "PROPPATCH")
 		}
+		// Advertise WebDAV-Push for the collections supporting it
+		// (draft-bitfire-webdav-push section 2)
+		if info, err := b.pushInfo(r.Context(), r.URL.Path); err != nil {
+			return nil, nil, err
+		} else if info != nil {
+			caps = append(caps, string(webdav.CapabilityPush))
+			allow = append(allow, http.MethodPost)
+		}
 		return caps, allow, nil
 	}
 
@@ -573,6 +587,7 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, internal.PrincipalName)),
 	}
 	internal.AddPrincipalProps(props, principalPath, "")
+	b.addPushProps(ctx, propfind, principalPath, props)
 	return internal.NewPropFindResponse(principalPath, propfind, props)
 }
 
@@ -593,6 +608,7 @@ func (b *backend) propFindHomeSet(ctx context.Context, propfind *internal.PropFi
 		},
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName)),
 	}
+	b.addPushProps(ctx, propfind, homeSetPath, props)
 	return internal.NewPropFindResponse(homeSetPath, propfind, props)
 }
 
@@ -640,6 +656,7 @@ func (b *backend) propFindAddressBook(ctx context.Context, propfind *internal.Pr
 		props[internal.GetCTagName] = internal.PropFindValue(&internal.GetCTag{CTag: ab.CTag})
 	}
 
+	b.addPushProps(ctx, propfind, ab.Path, props)
 	return internal.NewPropFindResponse(ab.Path, propfind, props)
 }
 
