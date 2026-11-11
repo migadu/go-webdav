@@ -150,6 +150,26 @@ func TestLockResponse(t *testing.T) {
 	}
 }
 
+// RFC 4918 section 6.6: a refresh restarts the timeout of the lock, which
+// keeps its timeout unless the refresh asks for another one.
+func TestLockRefreshTimeout(t *testing.T) {
+	lt := newLockTest(t)
+	clock := newFakeClock()
+	lt.ls.now = clock.now
+	w := lt.expect(http.StatusOK, "LOCK", "/file.txt", exclusiveLockInfo, "Timeout", "Second-60")
+	token, _ := lockTokenHeader(w)
+
+	clock.advance(50 * time.Second)
+	w = lt.expect(http.StatusOK, "LOCK", "/file.txt", "", "If", "(<"+token+">)")
+	if locks := lockResponse(t, w); len(locks) != 1 || locks[0].Timeout != "Second-60" {
+		t.Errorf("LOCK refresh without Timeout = %+v, want timeout Second-60", locks)
+	}
+	clock.advance(50 * time.Second)
+	lt.expect(http.StatusLocked, http.MethodPut, "/file.txt", "")
+	clock.advance(10 * time.Second)
+	lt.expect(http.StatusNoContent, http.MethodPut, "/file.txt", "")
+}
+
 // RFC 4918 section 10.7: the Timeout header field is a list, and a server
 // needn't honour it, so unknown values are ignored rather than rejected.
 func TestLockTimeoutHeader(t *testing.T) {

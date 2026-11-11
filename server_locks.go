@@ -472,12 +472,19 @@ func (b lockingBackend) Lock(r *http.Request, req *internal.LockRequest) (string
 
 	if req.Info == nil {
 		// RFC 4918 section 9.10.2
-		if found, err := b.findLock(r, req.RefreshToken); err != nil {
+		found, err := b.findLock(r, req.RefreshToken)
+		if err != nil {
 			return "", nil, false, err
 		} else if found == nil {
 			return "", nil, false, newPreconditionError(http.StatusPreconditionFailed, "lock-token-matches-request-uri")
 		}
-		lock, err := b.locks.Refresh(r.Context(), req.RefreshToken, req.Timeout.Duration)
+		// A refresh restarts the timeout of the lock (section 6.6), and may
+		// change it
+		timeout := found.Timeout
+		if req.Timeout != nil {
+			timeout = req.Timeout.Duration
+		}
+		lock, err := b.locks.Refresh(r.Context(), req.RefreshToken, timeout)
 		if errors.Is(err, ErrNoSuchLock) {
 			return "", nil, false, newPreconditionError(http.StatusPreconditionFailed, "lock-token-matches-request-uri")
 		} else if err != nil {
@@ -501,7 +508,9 @@ func (b lockingBackend) Lock(r *http.Request, req *internal.LockRequest) (string
 		// reported as requested
 		Recursive: req.Depth == internal.DepthInfinity,
 		Shared:    req.Info.LockScope.Shared != nil,
-		Timeout:   req.Timeout.Duration,
+	}
+	if req.Timeout != nil {
+		lock.Timeout = req.Timeout.Duration
 	}
 	if req.Info.Owner != nil {
 		lock.Owner, err = internal.MarshalRawXML(req.Info.Owner)

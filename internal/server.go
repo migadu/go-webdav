@@ -403,8 +403,8 @@ type LockRequest struct {
 	Info *LockInfo
 	// Depth is the depth of the lock to create, 0 or infinity
 	Depth Depth
-	// Timeout is the timeout requested by the client
-	Timeout Timeout
+	// Timeout is the timeout requested by the client, nil if none
+	Timeout *Timeout
 	// RefreshToken is the token of the lock to refresh
 	RefreshToken string
 }
@@ -882,7 +882,7 @@ func (h *Handler) handleLock(w http.ResponseWriter, r *http.Request, b LockBacke
 	// 10.7), so an invalid one is ignored
 	if s := r.Header.Get("Timeout"); s != "" {
 		if timeout, err := ParseTimeout(s); err == nil {
-			req.Timeout = timeout
+			req.Timeout = &timeout
 		}
 	}
 
