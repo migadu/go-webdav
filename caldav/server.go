@@ -181,6 +181,7 @@ func decodeComp(comp *comp) (*CalendarCompRequest, error) {
 	}
 
 	req := &CalendarCompRequest{
+		Name:     comp.Name,
 		AllProps: comp.Allprop != nil,
 		AllComps: comp.Allcomp != nil,
 	}
@@ -198,18 +199,48 @@ func decodeComp(comp *comp) (*CalendarCompRequest, error) {
 }
 
 func decodeCalendarDataReq(calendarData *calendarDataReq) (*CalendarCompRequest, error) {
+	var req *CalendarCompRequest
 	if calendarData.Comp == nil {
-		return &CalendarCompRequest{
+		req = &CalendarCompRequest{
 			AllProps: true,
 			AllComps: true,
-		}, nil
+		}
+	} else {
+		var err error
+		if req, err = decodeComp(calendarData.Comp); err != nil {
+			return nil, err
+		}
 	}
-	return decodeComp(calendarData.Comp)
+
+	if calendarData.Expand != nil {
+		req.Expand = calendarData.Expand.request()
+	}
+	// TODO: limit-recurrence-set, limit-freebusy-set
+
+	return req, nil
+}
+
+// decodeCalendarDataProp decodes the CALDAV:calendar-data element of the
+// DAV:prop element of a REPORT request.
+func decodeCalendarDataProp(prop *internal.Prop) (*CalendarCompRequest, error) {
+	var calendarData calendarDataReq
+	if err := prop.Decode(&calendarData); internal.IsNotFound(err) {
+		return &CalendarCompRequest{}, nil
+	} else if err != nil {
+		return nil, err
+	}
+	return decodeCalendarDataReq(&calendarData)
 }
 
 func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *calendarQuery) error {
 	var q CalendarQuery
-	// TODO: calendar-data in query.Prop
+	if query.Prop != nil {
+		req, err := decodeCalendarDataProp(query.Prop)
+		if err != nil {
+			return err
+		}
+		q.CompRequest = *req
+	}
 	cf, err := decodeCompFilter(&query.Filter.CompFilter)
 	if err != nil {
 		return err
@@ -247,11 +278,7 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *cal
 func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, multiget *calendarMultiget) error {
 	var dataReq CalendarCompRequest
 	if multiget.Prop != nil {
-		var calendarData calendarDataReq
-		if err := multiget.Prop.Decode(&calendarData); err != nil && !internal.IsNotFound(err) {
-			return err
-		}
-		decoded, err := decodeCalendarDataReq(&calendarData)
+		decoded, err := decodeCalendarDataProp(multiget.Prop)
 		if err != nil {
 			return err
 		}
