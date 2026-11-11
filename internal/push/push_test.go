@@ -2,10 +2,14 @@ package push
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/xml"
 	"errors"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -466,10 +470,14 @@ func propFindRequest(t *testing.T, body string) *internal.PropFind {
 	return &propfind
 }
 
+const propNameRequest = `<D:propfind xmlns:D="DAV:"><D:propname/></D:propfind>`
+
 func TestAddProps(t *testing.T) {
 	const pushProps = `<D:propfind xmlns:D="DAV:" xmlns:P="https://bitfire.at/webdav-push">
   <D:prop><P:transports/><P:topic/><P:supported-triggers/></D:prop>
 </D:propfind>`
+	errUnavailable := webdav.NewHTTPError(http.StatusServiceUnavailable, nil)
+	errNotFound := webdav.NewHTTPError(http.StatusNotFound, nil)
 
 	for _, tc := range []struct {
 		name     string
@@ -481,13 +489,20 @@ func TestAddProps(t *testing.T) {
 	}{
 		{name: "prop", propfind: pushProps, path: testPath, props: true, called: true},
 		{name: "one prop", propfind: `<D:propfind xmlns:D="DAV:"><D:prop><D:displayname/><topic xmlns="https://bitfire.at/webdav-push"/></D:prop></D:propfind>`, path: testPath, props: true, called: true},
-		{name: "propname", propfind: `<D:propfind xmlns:D="DAV:"><D:propname/></D:propfind>`, path: testPath, props: true, called: true},
+		{name: "propname", propfind: propNameRequest, path: testPath, props: true, called: true},
 		{name: "allprop include", propfind: `<D:propfind xmlns:D="DAV:"><D:allprop/><D:include><topic xmlns="https://bitfire.at/webdav-push"/></D:include></D:propfind>`, path: testPath, props: true, called: true},
 		// The push properties aren't returned by allprop requests
 		{name: "allprop", propfind: `<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>`, path: testPath},
 		{name: "other props", propfind: `<D:propfind xmlns:D="DAV:"><D:prop><D:displayname/></D:prop></D:propfind>`, path: testPath},
 		{name: "no push", propfind: pushProps, path: "/user/calendars/other/", called: true},
-		{name: "error", propfind: pushProps, path: testPath, infoErr: webdav.NewHTTPError(http.StatusServiceUnavailable, nil), props: true, called: true},
+		{name: "error", propfind: pushProps, path: testPath, infoErr: errUnavailable, props: true, called: true},
+		// A propname request can't report the error, and it's unknown
+		// whether push is available
+		{name: "propname error", propfind: propNameRequest, path: testPath, infoErr: errUnavailable, called: true},
+		// A 404 error is for a path where there's no collection, hence no
+		// push
+		{name: "not found", propfind: pushProps, path: testPath, infoErr: errNotFound, called: true},
+		{name: "propname not found", propfind: propNameRequest, path: testPath, infoErr: errNotFound, called: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newFakeBackend()
@@ -516,25 +531,54 @@ func TestAddProps(t *testing.T) {
 }
 
 // A PushInfo the server can't serve as the draft requires is reported as an
-// error.
+// error, and registrations for it are refused. A propname request doesn't
+// list the push properties.
 func TestAddPropsInvalidInfo(t *testing.T) {
-	for _, info := range []webdav.PushInfo{
-		{ContentUpdate: &webdav.PushTrigger{Depth: webdav.DepthOne}},
-		{Topic: "t"},
-		{Topic: "t", ContentUpdate: &webdav.PushTrigger{Depth: webdav.Depth(2)}},
+	const topicRequest = `<D:propfind xmlns:D="DAV:"><D:prop><topic xmlns="https://bitfire.at/webdav-push"/></D:prop></D:propfind>`
+	p384Key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	one := &webdav.PushTrigger{Depth: webdav.DepthOne}
+	for _, tc := range []struct {
+		name string
+		info webdav.PushInfo
+	}{
+		{name: "no topic", info: webdav.PushInfo{ContentUpdate: one}},
+		{name: "no trigger", info: webdav.PushInfo{Topic: "t"}},
+		{name: "invalid depth", info: webdav.PushInfo{Topic: "t", ContentUpdate: &webdav.PushTrigger{Depth: webdav.Depth(2)}}},
+		{name: "P-384 VAPID key", info: webdav.PushInfo{Topic: "t", ContentUpdate: one, VAPIDPublicKey: &p384Key.PublicKey}},
+		{name: "VAPID key off the curve", info: webdav.PushInfo{Topic: "t", ContentUpdate: one, VAPIDPublicKey: &ecdsa.PublicKey{
+			Curve: elliptic.P256(), X: big.NewInt(1), Y: big.NewInt(1),
+		}}},
+		{name: "VAPID key without coordinates", info: webdav.PushInfo{Topic: "t", ContentUpdate: one, VAPIDPublicKey: &ecdsa.PublicKey{
+			Curve: elliptic.P256(),
+		}}},
 	} {
-		b := newFakeBackend()
-		b.info[testPath] = &info
-		props := make(map[xml.Name]internal.PropFindFunc)
-		AddProps(context.Background(), b, propFindRequest(t, `<D:propfind xmlns:D="DAV:"><D:propname/></D:propfind>`), testPath, props)
-		f, ok := props[TopicName]
-		if !ok {
-			t.Errorf("%+v: topic not added", info)
-			continue
-		}
-		if _, err := f(internal.NewRawXMLElement(TopicName, nil, nil)); err == nil {
-			t.Errorf("%+v: no error", info)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			b := newFakeBackend()
+			b.info[testPath] = &tc.info
+
+			if w := serveRegister(t, b, "application/xml", draftSamplePushRegister); w.Code != http.StatusInternalServerError {
+				t.Errorf("POST: status = %v, want 500", w.Code)
+			}
+
+			props := make(map[xml.Name]internal.PropFindFunc)
+			AddProps(context.Background(), b, propFindRequest(t, topicRequest), testPath, props)
+			f, ok := props[TopicName]
+			if !ok {
+				t.Fatalf("topic not added")
+			}
+			if _, err := f(internal.NewRawXMLElement(TopicName, nil, nil)); err == nil {
+				t.Errorf("topic: no error")
+			}
+
+			props = make(map[xml.Name]internal.PropFindFunc)
+			AddProps(context.Background(), b, propFindRequest(t, propNameRequest), testPath, props)
+			for name := range props {
+				t.Errorf("propname lists %v", name.Local)
+			}
+		})
 	}
 }
 

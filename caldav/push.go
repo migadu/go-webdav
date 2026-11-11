@@ -91,7 +91,7 @@ type PushBackend interface {
 }
 
 // pushInfo returns the push information of the collection at p, or nil if
-// the backend doesn't support push for it.
+// the backend doesn't support push for it, or there's no collection at p.
 func (b *backend) pushInfo(ctx context.Context, p string) (*webdav.PushInfo, error) {
 	pb, ok := b.Backend.(PushBackend)
 	if !ok {
@@ -99,7 +99,7 @@ func (b *backend) pushInfo(ctx context.Context, p string) (*webdav.PushInfo, err
 	}
 	switch b.resourceTypeAtPath(ctx, p) {
 	case resourceTypeUserPrincipal, resourceTypeCalendarHomeSet, resourceTypeCalendar, resourceTypeScheduleInbox:
-		return pb.PushInfo(ctx, p)
+		return push.Info(ctx, pb, p)
 	}
 	return nil, nil
 }
