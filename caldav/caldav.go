@@ -5,6 +5,7 @@ package caldav
 
 import (
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/emersion/go-ical"
@@ -19,10 +20,17 @@ func NewCalendarHomeSet(path string) webdav.BackendSuppliedHomeSet {
 }
 
 // ValidateCalendarObject checks the validity of a calendar object according to
-// the contraints layed out in RFC 4791 section 4.1 and returns the only event
-// type and UID occuring in this calendar, or an error if the calendar could
-// not be validated.
+// RFC 5545 and to the constraints laid out in RFC 4791 section 4.1, and
+// returns the only event type and UID occurring in this calendar, or an error
+// if the calendar could not be validated.
 func ValidateCalendarObject(cal *ical.Calendar) (eventType string, uid string, err error) {
+	// The encoder checks the components and properties required or allowed
+	// by RFC 5545. A calendar it rejects couldn't be served back to clients
+	// either.
+	if err := ical.NewEncoder(io.Discard).Encode(cal); err != nil {
+		return "", "", fmt.Errorf("invalid iCalendar object: %w", err)
+	}
+
 	// Calendar object resources contained in calendar collections
 	// MUST NOT specify the iCalendar METHOD property.
 	if prop := cal.Props.Get(ical.PropMethod); prop != nil {
