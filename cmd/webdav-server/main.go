@@ -14,7 +14,7 @@ func main() {
 	var addr string
 	var locking bool
 	flag.StringVar(&addr, "addr", ":8080", "listening address")
-	flag.BoolVar(&locking, "locking", false, "enable locking (DAV class 2), with locks kept in memory")
+	flag.BoolVar(&locking, "locking", false, "enable locking (DAV class 2), with locks kept in memory, for an hour at most")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "usage: %s [options...] [directory]\n", os.Args[0])
 		flag.PrintDefaults()

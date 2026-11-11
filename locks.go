@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -52,6 +53,11 @@ func (lock *Lock) inScope(p string) bool {
 	return lock.Root == p || (lock.Recursive && isPathBelow(p, lock.Root))
 }
 
+// overlaps reports whether the scopes of two locks overlap.
+func (lock *Lock) overlaps(other *Lock) bool {
+	return lock.inScope(other.Root) || other.inScope(lock.Root)
+}
+
 // conflicts reports whether two locks can't be both active: whether their
 // scopes overlap and at least one of them is exclusive (RFC 4918 section
 // 6.1).
@@ -59,7 +65,7 @@ func (lock *Lock) conflicts(other *Lock) bool {
 	if lock.Shared && other.Shared {
 		return false
 	}
-	return lock.inScope(other.Root) || other.inScope(lock.Root)
+	return lock.overlaps(other)
 }
 
 // isPathBelow reports whether the clean path p is below dir.
@@ -103,6 +109,9 @@ type LockSystem interface {
 	// If the new lock conflicts with an active lock, Create returns an error
 	// wrapping ErrLocked. Two locks conflict if the scope of one includes
 	// the root of the other, unless both are shared (RFC 4918 section 6.1).
+	// Create may refuse a lock for other reasons, such as a limit on the
+	// number of locks: the Handler replies with the status of an error
+	// created with NewHTTPError, such as 507 Insufficient Storage.
 	Create(ctx context.Context, lock Lock) (Lock, error)
 	// Refresh restarts the lifetime of the lock with the given token, and
 	// sets its timeout to timeout, which it may shorten. It returns the
@@ -121,13 +130,29 @@ type LockSystem interface {
 // running on its own. Its zero value is ready to use.
 //
 // Expired locks are removed by the next call to any method. Its methods take
-// a time proportional to the number of locks, which isn't limited.
+// a time proportional to the number of locks, which MaxLocks limits.
+//
+// Create refuses a lock over the limits with a 507 Insufficient Storage
+// error (RFC 4918 section 11.5): the server can't record more locks until
+// some are removed.
 type MemLockSystem struct {
 	// MaxTimeout is the longest lifetime given to a lock, including one
-	// requested with an infinite timeout. Zero means no limit: a lock
-	// requested without timeout or with an infinite one, by a client which
-	// then goes away, is only removed when the process exits.
+	// requested with an infinite timeout. Zero means an hour. A negative
+	// value means no limit: a lock requested without timeout or with an
+	// infinite one, by a client which then goes away, is then only removed
+	// when the process exits.
 	MaxTimeout time.Duration
+	// MaxLocks is the maximum number of active locks. Zero means 10000. A
+	// negative value means no limit.
+	MaxLocks int
+	// MaxSharedLocks is the maximum number of shared locks whose scopes
+	// overlap: Create refuses a shared lock whose scope overlaps those of
+	// MaxSharedLocks active locks. It limits the number of locks on a
+	// resource, all listed in its lockdiscovery property, to MaxSharedLocks.
+	// A depth-infinity lock on a collection counts the locks of all its
+	// members, even if each member has fewer. Zero means 64. A negative
+	// value means no limit.
+	MaxSharedLocks int
 
 	mu    sync.Mutex
 	locks map[string]Lock  // by token
@@ -135,6 +160,45 @@ type MemLockSystem struct {
 }
 
 var _ LockSystem = (*MemLockSystem)(nil)
+
+// The default limits of MemLockSystem.
+const (
+	// An hour bounds how long a lock left behind by a client which went
+	// away blocks the others, and is long enough for clients to refresh
+	// their locks now and then: the timeout is in the LOCK response.
+	defaultMaxLockTimeout = time.Hour
+	// Ten thousand locks, each with a DAV:owner element of at most 4 KiB,
+	// take about 45 MB, and listing the locks of a resource among them
+	// takes a fraction of a millisecond.
+	defaultMaxLocks = 10000
+	// Clients rarely share a lock with more than a few others.
+	defaultMaxSharedLocks = 64
+)
+
+// limit returns the value of a limit field: def if v is zero, and zero,
+// meaning none, if v is negative.
+func limit(v, def int64) int64 {
+	switch {
+	case v == 0:
+		return def
+	case v < 0:
+		return 0
+	default:
+		return v
+	}
+}
+
+func (ls *MemLockSystem) maxLocks() int {
+	return int(limit(int64(ls.MaxLocks), defaultMaxLocks))
+}
+
+func (ls *MemLockSystem) maxSharedLocks() int {
+	return int(limit(int64(ls.MaxSharedLocks), defaultMaxSharedLocks))
+}
+
+func (ls *MemLockSystem) maxTimeout() time.Duration {
+	return time.Duration(limit(int64(ls.MaxTimeout), int64(defaultMaxLockTimeout)))
+}
 
 // newLockToken generates a lock token: an opaquelocktoken URI (RFC 4918
 // appendix C) made of a random (version 4) UUID (RFC 9562 section 5.4).
@@ -167,8 +231,8 @@ func (ls *MemLockSystem) setTimeout(lock *Lock, timeout time.Duration, now time.
 	if timeout < 0 {
 		timeout = 0
 	}
-	if ls.MaxTimeout > 0 && (timeout == 0 || timeout > ls.MaxTimeout) {
-		timeout = ls.MaxTimeout
+	if max := ls.maxTimeout(); max > 0 && (timeout == 0 || timeout > max) {
+		timeout = max
 	}
 	lock.Timeout = timeout
 	lock.Expires = time.Time{}
@@ -183,10 +247,19 @@ func (ls *MemLockSystem) Create(ctx context.Context, lock Lock) (Lock, error) {
 	defer ls.mu.Unlock()
 
 	now := ls.expire()
+	overlapping := 0
 	for _, other := range ls.locks {
 		if lock.conflicts(&other) {
 			return Lock{}, fmt.Errorf("%w: %v is locked", ErrLocked, other.Root)
+		} else if lock.overlaps(&other) {
+			overlapping++
 		}
+	}
+	if max := ls.maxLocks(); max > 0 && len(ls.locks) >= max {
+		return Lock{}, NewHTTPError(http.StatusInsufficientStorage, fmt.Errorf("webdav: too many locks (%v)", max))
+	}
+	if max := ls.maxSharedLocks(); max > 0 && overlapping >= max {
+		return Lock{}, NewHTTPError(http.StatusInsufficientStorage, fmt.Errorf("webdav: too many shared locks on %v (%v)", lock.Root, max))
 	}
 
 	if ls.locks == nil {

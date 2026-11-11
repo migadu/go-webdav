@@ -182,6 +182,7 @@ func TestLockTimeoutHeader(t *testing.T) {
 		{"bogus", "Infinite"},
 	} {
 		lt := newLockTest(t)
+		lt.ls.MaxTimeout = -1
 		w := lt.expect(http.StatusOK, "LOCK", "/file.txt", exclusiveLockInfo, "Timeout", tc.timeout)
 		if locks := lockResponse(t, w); len(locks) != 1 || locks[0].Timeout != tc.want {
 			t.Errorf("LOCK with Timeout %q = %+v, want timeout %v", tc.timeout, locks, tc.want)
