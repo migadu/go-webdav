@@ -168,6 +168,39 @@ func PropFindValue(value interface{}) PropFindFunc {
 	}
 }
 
+// allPropNames lists the live properties defined in RFC 4918, which an
+// allprop PROPFIND request returns (RFC 4918 section 14.2).
+var allPropNames = map[xml.Name]bool{
+	{Namespace, "creationdate"}:       true,
+	{Namespace, "displayname"}:        true,
+	{Namespace, "getcontentlanguage"}: true,
+	{Namespace, "getcontentlength"}:   true,
+	{Namespace, "getcontenttype"}:     true,
+	{Namespace, "getetag"}:            true,
+	{Namespace, "getlastmodified"}:    true,
+	{Namespace, "lockdiscovery"}:      true,
+	{Namespace, "resourcetype"}:       true,
+	{Namespace, "supportedlock"}:      true,
+}
+
+// isAllProp reports whether an allprop PROPFIND request returns a property:
+// the live properties defined in RFC 4918 are, and so are the others named in
+// the include element. Other specifications, such as RFC 4791 and RFC 6352,
+// ask for theirs not to be returned by allprop.
+func isAllProp(name xml.Name, include *Include) bool {
+	if allPropNames[name] {
+		return true
+	}
+	if include != nil {
+		for _, raw := range include.Raw {
+			if n, ok := raw.XMLName(); ok && n == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func NewPropFindResponse(path string, propfind *PropFind, props map[xml.Name]PropFindFunc) (*Response, error) {
 	resp := &Response{Hrefs: []Href{Href{Path: path}}}
 
@@ -183,8 +216,11 @@ func NewPropFindResponse(path string, propfind *PropFind, props map[xml.Name]Pro
 			}
 		}
 	} else if propfind.AllProp != nil {
-		// TODO: add support for propfind.Include
 		for xmlName, f := range props {
+			if !isAllProp(xmlName, propfind.Include) {
+				continue
+			}
+
 			emptyVal := NewRawXMLElement(xmlName, nil, nil)
 
 			val, err := f(emptyVal)

@@ -205,7 +205,7 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *add
 			AllProp:  query.AllProp,
 			PropName: query.PropName,
 		}
-		resp, err := b.propFindAddressObject(r.Context(), &propfind, &ao)
+		resp, err := b.propFindAddressObject(r.Context(), &propfind, true, &ao)
 		if err != nil {
 			return err
 		}
@@ -283,7 +283,7 @@ func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, mul
 			AllProp:  multiget.AllProp,
 			PropName: multiget.PropName,
 		}
-		resp, err := b.propFindAddressObject(ctx, &propfind, ao)
+		resp, err := b.propFindAddressObject(ctx, &propfind, true, ao)
 		if err != nil {
 			return err
 		}
@@ -461,7 +461,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 			return nil, err
 		}
 
-		resp, err := b.propFindAddressObject(r.Context(), propfind, ao)
+		resp, err := b.propFindAddressObject(r.Context(), propfind, false, ao)
 		if err != nil {
 			return nil, err
 		}
@@ -593,7 +593,7 @@ func (b *backend) propFindAllAddressBooks(ctx context.Context, propfind *interna
 	return resps, nil
 }
 
-func (b *backend) propFindAddressObject(ctx context.Context, propfind *internal.PropFind, ao *AddressObject) (*internal.Response, error) {
+func (b *backend) propFindAddressObject(ctx context.Context, propfind *internal.PropFind, report bool, ao *AddressObject) (*internal.Response, error) {
 	props := map[xml.Name]internal.PropFindFunc{
 		internal.CurrentUserPrincipalName: func(*internal.RawXMLValue) (interface{}, error) {
 			path, err := b.Backend.CurrentUserPrincipal(ctx)
@@ -605,15 +605,19 @@ func (b *backend) propFindAddressObject(ctx context.Context, propfind *internal.
 		internal.GetContentTypeName: internal.PropFindValue(&internal.GetContentType{
 			Type: vcard.MIMEType,
 		}),
-		// TODO: address-data can only be used in REPORT requests
-		addressDataName: func(*internal.RawXMLValue) (interface{}, error) {
+	}
+
+	// address-data is not a property: it is only returned by REPORT
+	// requests, not by PROPFIND (RFC 6352 section 10.4)
+	if report {
+		props[addressDataName] = func(*internal.RawXMLValue) (interface{}, error) {
 			var buf bytes.Buffer
 			if err := vcard.NewEncoder(&buf).Encode(ao.Card); err != nil {
 				return nil, err
 			}
 
 			return &addressDataResp{Data: buf.Bytes()}, nil
-		},
+		}
 	}
 
 	if ao.ContentLength > 0 {
@@ -645,7 +649,7 @@ func (b *backend) propFindAllAddressObjects(ctx context.Context, propfind *inter
 
 	var resps []internal.Response
 	for _, ao := range aos {
-		resp, err := b.propFindAddressObject(ctx, propfind, &ao)
+		resp, err := b.propFindAddressObject(ctx, propfind, false, &ao)
 		if err != nil {
 			return nil, err
 		}
