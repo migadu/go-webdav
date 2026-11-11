@@ -56,8 +56,12 @@ func (mw *MultiStatusWriter) begin() error {
 	} else if mw.enc != nil {
 		return nil
 	}
+	mw.w.Header().Set("Content-Type", xmlContentType)
 	mw.w.WriteHeader(http.StatusMultiStatus)
-	mw.enc = ServeXML(mw.w)
+	mw.enc = xml.NewEncoder(mw.w)
+	if _, err := mw.w.Write([]byte(xml.Header)); err != nil {
+		return mw.fail(err)
+	}
 	return mw.fail(mw.enc.EncodeToken(xml.StartElement{Name: multiStatusName}))
 }
 
