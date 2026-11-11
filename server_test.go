@@ -159,6 +159,38 @@ func TestHandlerUnsupportedContentEncoding(t *testing.T) {
 	}
 }
 
+func TestHandlerCompressedBodyTooLarge(t *testing.T) {
+	dir := t.TempDir()
+	h := &webdav.Handler{FileSystem: webdav.LocalFileSystem(dir)}
+
+	// 16 MiB of zeros compress to about 16 KiB
+	body := encodeBody(t, make([]byte, 16<<20), "gzip")
+	req := httptest.NewRequest(http.MethodPut, "/bomb.txt", bytes.NewReader(body))
+	req.Header.Set("Content-Encoding", "gzip")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("PUT status = %d, want %d; body:\n%s", w.Code, http.StatusRequestEntityTooLarge, w.Body)
+	}
+	if fi, err := os.Stat(filepath.Join(dir, "bomb.txt")); !os.IsNotExist(err) {
+		t.Errorf("PUT of a decompression bomb left a file behind (stat: %v, %v)", fi, err)
+	}
+
+	propfind := strings.Replace(propFindContentLength, "<d:prop>", strings.Repeat(" ", 16<<20)+"<d:prop>", 1)
+	body = encodeBody(t, []byte(propfind), "gzip")
+	req = httptest.NewRequest("PROPFIND", "/", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/xml")
+	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Depth", "0")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("PROPFIND status = %d, want %d; body:\n%s", w.Code, http.StatusRequestEntityTooLarge, w.Body)
+	}
+}
+
 const propFindCurrentUserPrincipal = `<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:">
   <d:prop>

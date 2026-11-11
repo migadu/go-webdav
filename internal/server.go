@@ -42,6 +42,12 @@ func DecodeXMLRequest(r *http.Request, v interface{}) error {
 	}
 
 	if err := xml.NewDecoder(r.Body).Decode(v); err != nil {
+		// Keep the status of errors returned while reading the body, e.g.
+		// HTTP 413 for a decompression bomb
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) {
+			return err
+		}
 		return &HTTPError{http.StatusBadRequest, err}
 	}
 	return nil
@@ -56,6 +62,15 @@ func IsRequestBodyEmpty(r *http.Request) bool {
 // DecodeRequestBody, besides "identity".
 const acceptedContentCodings = "gzip, deflate"
 
+const (
+	// minDecodedBodyLimit is the decoded request body size which is always
+	// allowed, regardless of its compression ratio.
+	minDecodedBodyLimit = 1 << 20 // 1 MiB
+	// maxDecodedBodyRatio is the maximum ratio between the size of a decoded
+	// request body and the number of encoded bytes read to produce it.
+	maxDecodedBodyRatio = 100
+)
+
 // DecodeRequestBody undoes the content codings listed in the Content-Encoding
 // header of a request (RFC 9110 section 8.4), so that the request body can be
 // read as-is.
@@ -68,6 +83,11 @@ const acceptedContentCodings = "gzip, deflate"
 // If a content coding isn't supported, an HTTP 415 error is returned and an
 // Accept-Encoding header listing the supported content codings is added to w
 // (RFC 7694 section 3).
+//
+// To defuse decompression bombs, reading the decoded body fails with an HTTP
+// 413 error once it is larger than both 1 MiB and 100 times the number of
+// bytes read so far from the encoded body. A limit on the size of the encoded
+// body, e.g. set with http.MaxBytesReader, thus also bounds the decoded body.
 func DecodeRequestBody(w http.ResponseWriter, r *http.Request) (*http.Request, error) {
 	values := r.Header.Values("Content-Encoding")
 	if len(values) == 0 {
@@ -99,9 +119,9 @@ func DecodeRequestBody(w http.ResponseWriter, r *http.Request) (*http.Request, e
 		return r2, nil
 	}
 
-	src := r.Body
-	if src == nil {
-		src = http.NoBody
+	src := &countingBody{ReadCloser: r.Body}
+	if src.ReadCloser == nil {
+		src.ReadCloser = http.NoBody
 	}
 	var body io.Reader = src
 	// Codings are listed in the order in which they were applied, so they
@@ -109,7 +129,7 @@ func DecodeRequestBody(w http.ResponseWriter, r *http.Request) (*http.Request, e
 	for i := len(codings) - 1; i >= 0; i-- {
 		body = &contentDecoder{coding: codings[i], r: body}
 	}
-	r2.Body = &decodedBody{Reader: body, Closer: src}
+	r2.Body = &decodedBody{r: body, src: src}
 	r2.ContentLength = -1
 	r2.Header.Del("Content-Length")
 	return r2, nil
@@ -154,10 +174,50 @@ func newContentDecoder(coding string, r io.Reader) (io.Reader, error) {
 	}
 }
 
+// countingBody counts the bytes read from a request body.
+type countingBody struct {
+	io.ReadCloser
+	n int64
+}
+
+func (c *countingBody) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
 // decodedBody reads the decoded request body and closes the original one.
+//
+// It fails with an HTTP 413 error once more than minDecodedBodyLimit bytes and
+// more than maxDecodedBodyRatio times the number of bytes read from the
+// original body have been decoded.
 type decodedBody struct {
-	io.Reader
-	io.Closer
+	r   io.Reader     // decoded body
+	src *countingBody // original body
+	n   int64         // number of decoded bytes
+	err error
+}
+
+func (b *decodedBody) Read(p []byte) (int, error) {
+	if b.err != nil {
+		return 0, b.err
+	}
+
+	n, err := b.r.Read(p)
+	b.n += int64(n)
+	limit := maxDecodedBodyRatio * b.src.n
+	if limit < minDecodedBodyLimit {
+		limit = minDecodedBodyLimit
+	}
+	if b.n > limit {
+		b.err = HTTPErrorf(http.StatusRequestEntityTooLarge, "webdav: decoded request body too large (compression ratio over %d:1)", maxDecodedBodyRatio)
+		return 0, b.err
+	}
+	return n, err
+}
+
+func (b *decodedBody) Close() error {
+	return b.src.Close()
 }
 
 func ServeXML(w http.ResponseWriter) *xml.Encoder {

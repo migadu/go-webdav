@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"errors"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -142,6 +143,63 @@ func TestDecodeRequestBody_corrupt(t *testing.T) {
 			}
 			if _, err := io.ReadAll(r2.Body); err == nil {
 				t.Errorf("reading a corrupt body succeeded")
+			}
+		})
+	}
+}
+
+func TestDecodeRequestBody_large(t *testing.T) {
+	// A large body with an ordinary compression ratio must not be mistaken for
+	// a decompression bomb
+	rnd := rand.New(rand.NewSource(1))
+	content := make([]byte, 4<<20)
+	for i := range content {
+		content[i] = 'a' + byte(rnd.Intn(26))
+	}
+
+	r := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(gzipData(t, content)))
+	r.Header.Set("Content-Encoding", "gzip")
+	r2, err := DecodeRequestBody(httptest.NewRecorder(), r)
+	if err != nil {
+		t.Fatalf("DecodeRequestBody() = %v", err)
+	}
+	got, err := io.ReadAll(r2.Body)
+	if err != nil {
+		t.Fatalf("failed to read decoded body: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Errorf("decoded body doesn't match the original body")
+	}
+}
+
+func TestDecodeRequestBody_bomb(t *testing.T) {
+	// 16 MiB of zeros compress to about 16 KiB with gzip, and to a few hundred
+	// bytes when compressed twice
+	content := make([]byte, 16<<20)
+	for _, coding := range []string{"gzip", "gzip, gzip"} {
+		t.Run(coding, func(t *testing.T) {
+			encoded := gzipData(t, content)
+			if coding == "gzip, gzip" {
+				encoded = gzipData(t, encoded)
+			}
+			r := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(encoded))
+			r.Header.Set("Content-Encoding", coding)
+			r2, err := DecodeRequestBody(httptest.NewRecorder(), r)
+			if err != nil {
+				t.Fatalf("DecodeRequestBody() = %v", err)
+			}
+
+			n, err := io.Copy(io.Discard, r2.Body)
+			var httpErr *HTTPError
+			if !errors.As(err, &httpErr) || httpErr.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("reading a %d bytes long body decoded to %d bytes, %v, want HTTP 413", len(encoded), n, err)
+			}
+			if limit := int64(maxDecodedBodyRatio * len(encoded)); n > minDecodedBodyLimit && n > limit {
+				t.Errorf("decoded %d bytes before failing, want at most max(%d, %d)", n, minDecodedBodyLimit, limit)
+			}
+			// The error must stick
+			if _, err := r2.Body.Read(make([]byte, 1)); !errors.As(err, &httpErr) {
+				t.Errorf("Read() after HTTP 413 = %v, want HTTP 413", err)
 			}
 		})
 	}

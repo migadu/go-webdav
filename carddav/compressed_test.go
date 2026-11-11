@@ -53,4 +53,25 @@ func TestReportCompressedBody(t *testing.T) {
 	if w.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("REPORT status = %d, want %d; body:\n%s", w.Code, http.StatusUnsupportedMediaType, w.Body)
 	}
+
+	// A highly compressible body decoding to 16 MiB must be rejected
+	buf.Reset()
+	zw = gzip.NewWriter(&buf)
+	bomb := strings.Replace(reportAddressData, "<D:prop>", strings.Repeat(" ", 16<<20)+"<D:prop>", 1)
+	if _, err := io.WriteString(zw, bomb); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest("REPORT", "/test/contacts/private/", &buf)
+	req.Header.Set("Content-Type", "application/xml")
+	req.Header.Set("Content-Encoding", "gzip")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("REPORT status = %d, want %d; body:\n%s", w.Code, http.StatusRequestEntityTooLarge, w.Body)
+	}
 }
