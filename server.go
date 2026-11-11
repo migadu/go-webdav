@@ -3,6 +3,7 @@ package webdav
 import (
 	"context"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -44,6 +45,37 @@ type FileSystem interface {
 	// Descendants that couldn't be moved can be reported with NewHrefError
 	// (RFC 4918 section 9.9.4).
 	Move(ctx context.Context, name, dest string, options *MoveOptions) (created bool, err error)
+}
+
+// DeadPropertyFileSystem is an optional interface a FileSystem can implement
+// to store dead properties (see DeadProperty), and let clients set and remove
+// them with PROPPATCH. Otherwise the server refuses to modify any property.
+//
+// Properties in the DAV: namespace are live properties, which the server
+// computes and which clients cannot modify, except DAV:displayname, which RFC
+// 4918 section 15.2 says shouldn't be protected and which is a dead property.
+//
+// Dead properties belong to their file: Copy should copy them, Move should
+// move them and RemoveAll should delete them (RFC 4918 sections 9.8.2 and
+// 9.9.1).
+type DeadPropertyFileSystem interface {
+	FileSystem
+
+	// DeadProperties returns the dead properties of a file, in any order.
+	// The server calls it when a PROPFIND request may return dead
+	// properties, for each file it lists. Properties in the DAV: namespace
+	// other than DAV:displayname are ignored. An error fails the whole
+	// request.
+	DeadProperties(ctx context.Context, name string) ([]DeadProperty, error)
+	// PatchDeadProperties applies all of the instructions of a PROPPATCH
+	// request to the dead properties of a file, or none of them (RFC 4918
+	// section 9.2). The instructions are in document order, the order they
+	// must be applied in: a later instruction for a property overrides an
+	// earlier one. Removing a property which doesn't exist isn't an error.
+	//
+	// An error fails the whole request: NewHTTPError can give it a status
+	// code, such as 507 Insufficient Storage.
+	PatchDeadProperties(ctx context.Context, name string, patch []DeadPropertyPatch) error
 }
 
 // Handler handles WebDAV HTTP requests. It can be used to create a WebDAV
@@ -119,6 +151,10 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 		"MOVE",
 	}
 
+	if _, ok := b.FileSystem.(DeadPropertyFileSystem); ok {
+		allow = append(allow, "PROPPATCH")
+	}
+
 	if !fi.IsDir {
 		allow = append(allow, http.MethodHead, http.MethodGet, http.MethodPut)
 	}
@@ -179,7 +215,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 
 		resps = make([]internal.Response, 0, len(children)+len(errResps))
 		for _, child := range children {
-			resp, err := b.propFindFile(propfind, &child)
+			resp, err := b.propFindFile(r.Context(), propfind, &child)
 			if err != nil {
 				return nil, err
 			}
@@ -187,7 +223,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		}
 		resps = append(resps, errResps...)
 	} else {
-		resp, err := b.propFindFile(propfind, fi)
+		resp, err := b.propFindFile(r.Context(), propfind, fi)
 		if err != nil {
 			return nil, err
 		}
@@ -198,7 +234,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 	return internal.NewMultiStatus(resps...), nil
 }
 
-func (b *backend) propFindFile(propfind *internal.PropFind, fi *FileInfo) (*internal.Response, error) {
+func (b *backend) propFindFile(ctx context.Context, propfind *internal.PropFind, fi *FileInfo) (*internal.Response, error) {
 	props := make(map[xml.Name]internal.PropFindFunc)
 
 	props[internal.ResourceTypeName] = func(*internal.RawXMLValue) (interface{}, error) {
@@ -233,7 +269,61 @@ func (b *backend) propFindFile(propfind *internal.PropFind, fi *FileInfo) (*inte
 		}
 	}
 
-	return internal.NewPropFindResponse(fi.Path, propfind, props)
+	var deadProps map[xml.Name]internal.PropFindFunc
+	if fs, ok := b.FileSystem.(DeadPropertyFileSystem); ok && needsDeadProps(propfind, props) {
+		l, err := fs.DeadProperties(ctx, fi.Path)
+		if err != nil {
+			return nil, err
+		}
+		deadProps = make(map[xml.Name]internal.PropFindFunc, len(l))
+		for i := range l {
+			prop := &l[i]
+			if prop.XMLName.Local == "" {
+				return nil, fmt.Errorf("webdav: dead property without a name")
+			} else if isProtectedProp(prop.XMLName) {
+				continue
+			}
+			// Check the value now, rather than fail in the middle of the
+			// response
+			if raw, err := prop.rawXMLValue(); err != nil {
+				deadProps[prop.XMLName] = func(*internal.RawXMLValue) (interface{}, error) {
+					return nil, err
+				}
+			} else {
+				deadProps[prop.XMLName] = internal.PropFindValue(raw)
+			}
+		}
+	}
+
+	return internal.NewPropFindResponseWithDeadProps(fi.Path, propfind, props, deadProps)
+}
+
+var cannotModifyProtectedPropertyName = xml.Name{internal.Namespace, "cannot-modify-protected-property"}
+
+// isProtectedProp reports whether a property is a live property which
+// clients cannot modify: the properties in the DAV: namespace, which WebDAV
+// specifications define, except DAV:displayname (RFC 4918 section 15.2).
+func isProtectedProp(name xml.Name) bool {
+	return name.Space == internal.Namespace && name != internal.DisplayNameName
+}
+
+// needsDeadProps reports whether a PROPFIND request may return dead
+// properties, besides the live properties props.
+func needsDeadProps(propfind *internal.PropFind, props map[xml.Name]internal.PropFindFunc) bool {
+	if propfind.Prop == nil {
+		// allprop or propname
+		return true
+	}
+	for _, raw := range propfind.Prop.Raw {
+		name, ok := raw.XMLName()
+		if !ok || isProtectedProp(name) {
+			continue
+		}
+		if _, live := props[name]; !live {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*internal.Response, error) {
@@ -242,7 +332,38 @@ func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*
 		return nil, err
 	}
 
-	return internal.NewPropPatchResponse(fi.Path, update, http.StatusForbidden)
+	fs, ok := b.FileSystem.(DeadPropertyFileSystem)
+	if !ok {
+		return internal.NewPropPatchResponse(fi.Path, update, http.StatusForbidden)
+	}
+
+	var patch []DeadPropertyPatch
+	f := func(raw *internal.RawXMLValue, remove bool) error {
+		name, _ := raw.XMLName()
+		if isProtectedProp(name) {
+			// RFC 4918 section 9.2.1
+			return &internal.HTTPError{
+				Code: http.StatusForbidden,
+				Err: &internal.Error{Raw: []internal.RawXMLValue{
+					*internal.NewRawXMLElement(cannotModifyProtectedPropertyName, nil, nil),
+				}},
+			}
+		}
+		p := DeadPropertyPatch{Remove: remove, Property: DeadProperty{XMLName: name}}
+		if !remove {
+			prop, err := newDeadProperty(raw)
+			if err != nil {
+				return err
+			}
+			p.Property = *prop
+		}
+		patch = append(patch, p)
+		return nil
+	}
+	commit := func() error {
+		return fs.PatchDeadProperties(r.Context(), r.URL.Path, patch)
+	}
+	return internal.PatchProps(fi.Path, update, f, commit)
 }
 
 func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {

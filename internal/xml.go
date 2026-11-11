@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -20,9 +21,54 @@ type RawXMLValue struct {
 	out interface{}
 }
 
-// NewRawXMLElement creates a new RawXMLValue for an element.
+// NewRawXMLElement creates a new RawXMLValue for an element. An element in no
+// namespace gets an empty default namespace declaration, so that it doesn't
+// end up in the namespace of the element it's encoded in.
 func NewRawXMLElement(name xml.Name, attr []xml.Attr, children []RawXMLValue) *RawXMLValue {
+	if name.Space == "" {
+		attr = append([]xml.Attr{{Name: xml.Name{Local: "xmlns"}}}, attr...)
+	}
 	return &RawXMLValue{tok: xml.StartElement{name, attr}, children: children}
+}
+
+// NewRawXMLFragment creates a new RawXMLValue for an element, as
+// NewRawXMLElement does, whose content is an XML fragment. Only the elements
+// and character data of the content are kept.
+func NewRawXMLFragment(name xml.Name, attr []xml.Attr, content []byte) (*RawXMLValue, error) {
+	if name.Local == "" {
+		return nil, fmt.Errorf("webdav: element without a name")
+	}
+	val := NewRawXMLElement(name, attr, nil)
+	d := xml.NewDecoder(bytes.NewReader(content))
+	if err := val.decodeData(d, true); err != nil {
+		return nil, err
+	}
+	return val, nil
+}
+
+// decodeData decodes the elements and character data of the content of an
+// element, up to its end tag or, for a fragment, up to the end of d.
+func (val *RawXMLValue) decodeData(d *xml.Decoder, fragment bool) error {
+	for {
+		tok, err := d.Token()
+		if err == io.EOF && fragment {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		switch tok := tok.(type) {
+		case xml.StartElement:
+			child := RawXMLValue{tok: tok.Copy()}
+			if err := child.decodeData(d, false); err != nil {
+				return err
+			}
+			val.children = append(val.children, child)
+		case xml.EndElement:
+			return nil
+		case xml.CharData:
+			val.children = append(val.children, RawXMLValue{tok: tok.Copy()})
+		}
+	}
 }
 
 // EncodeRawXMLElement encodes a value into a new RawXMLValue. The XML value
@@ -62,24 +108,100 @@ func (val *RawXMLValue) MarshalXML(e *xml.Encoder, start xml.StartElement) error
 	if val.out != nil {
 		return e.Encode(val.out)
 	}
+	return val.encode(e, false, false)
+}
 
+// encode encodes the XML value. inNamespace reports whether the element it's
+// encoded in is in a namespace. If dataOnly is set, only elements and
+// character data are encoded, without comments, processing instructions or
+// directives.
+func (val *RawXMLValue) encode(e *xml.Encoder, inNamespace, dataOnly bool) error {
 	switch tok := val.tok.(type) {
 	case xml.StartElement:
-		if err := e.EncodeToken(tok); err != nil {
+		if err := e.EncodeToken(encodableStartElement(tok, inNamespace)); err != nil {
 			return err
 		}
-		for _, child := range val.children {
-			// TODO: find a sensible value for the start argument?
-			if err := child.MarshalXML(e, xml.StartElement{}); err != nil {
+		for i := range val.children {
+			if err := val.children[i].encode(e, tok.Name.Space != "", dataOnly); err != nil {
 				return err
 			}
 		}
 		return e.EncodeToken(tok.End())
 	case xml.EndElement:
 		panic("unexpected end element")
+	case xml.CharData:
+		return e.EncodeToken(tok)
 	default:
+		if dataOnly {
+			return nil
+		}
 		return e.EncodeToken(tok)
 	}
+}
+
+func isNamespaceDecl(name xml.Name) bool {
+	return name.Space == "xmlns" || (name.Space == "" && name.Local == "xmlns")
+}
+
+// encodableStartElement returns a copy of start for xml.Encoder. xml.Encoder
+// declares the namespaces of the element and attribute names itself, and
+// garbles the namespace declarations listed among the attributes: these are
+// left out. An element in no namespace gets an empty default namespace
+// declaration, which xml.Encoder doesn't write, if it's encoded in an element
+// in a namespace, as reported by inNamespace, or if it had one, such as
+// NewRawXMLElement gives it.
+func encodableStartElement(start xml.StartElement, inNamespace bool) xml.StartElement {
+	emptyDefault := start.Name.Space == "" && inNamespace
+	attr := make([]xml.Attr, 0, len(start.Attr)+1)
+	for _, a := range start.Attr {
+		if !isNamespaceDecl(a.Name) {
+			attr = append(attr, a)
+		} else if a.Name.Space == "" && a.Value == "" && start.Name.Space == "" {
+			emptyDefault = true
+		}
+	}
+	if emptyDefault {
+		attr = append([]xml.Attr{{Name: xml.Name{Local: "xmlns"}}}, attr...)
+	}
+	return xml.StartElement{Name: start.Name, Attr: attr}
+}
+
+// Attr returns the attributes of an element, without the namespace
+// declarations.
+func (val *RawXMLValue) Attr() []xml.Attr {
+	start, ok := val.tok.(xml.StartElement)
+	if !ok {
+		return nil
+	}
+	var attr []xml.Attr
+	for _, a := range start.Attr {
+		if !isNamespaceDecl(a.Name) {
+			attr = append(attr, a)
+		}
+	}
+	return attr
+}
+
+// InnerXML encodes the content of an element: its child elements and
+// character data, without comments, processing instructions or directives.
+// The child elements declare the namespaces they use, so that the encoding is
+// well-formed on its own.
+func (val *RawXMLValue) InnerXML() ([]byte, error) {
+	start, ok := val.tok.(xml.StartElement)
+	if !ok {
+		return nil, fmt.Errorf("webdav: XML value isn't an element")
+	}
+	var buf bytes.Buffer
+	e := xml.NewEncoder(&buf)
+	for i := range val.children {
+		if err := val.children[i].encode(e, start.Name.Space != "", true); err != nil {
+			return nil, err
+		}
+	}
+	if err := e.Flush(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 var _ xml.Marshaler = (*RawXMLValue)(nil)

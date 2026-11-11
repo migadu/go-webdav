@@ -258,12 +258,14 @@ type Location struct {
 }
 
 // https://tools.ietf.org/html/rfc4918#section-14.22
+//
+// Fields are in the order required by the RFC.
 type PropStat struct {
 	XMLName             xml.Name `xml:"DAV: propstat"`
 	Prop                Prop     `xml:"prop"`
 	Status              Status   `xml:"status"`
-	ResponseDescription string   `xml:"responsedescription,omitempty"`
 	Error               *Error   `xml:"error,omitempty"`
+	ResponseDescription string   `xml:"responsedescription,omitempty"`
 }
 
 // https://tools.ietf.org/html/rfc4918#section-14.18
@@ -524,6 +526,30 @@ func (pu *PropertyUpdate) UnmarshalXML(d *xml.Decoder, start xml.StartElement) e
 			return nil
 		}
 	}
+}
+
+// MarshalXML implements xml.Marshaler. If Instructions is set, the
+// instructions are encoded in its order, and Remove and Set are ignored.
+func (pu *PropertyUpdate) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
+	if len(pu.Instructions) == 0 {
+		type propertyUpdate PropertyUpdate // without the methods
+		return e.Encode((*propertyUpdate)(pu))
+	}
+
+	start = xml.StartElement{Name: xml.Name{Namespace, "propertyupdate"}}
+	if err := e.EncodeToken(start); err != nil {
+		return err
+	}
+	for _, ins := range pu.Instructions {
+		var v interface{} = &Set{Prop: ins.Prop}
+		if ins.Remove {
+			v = &Remove{Prop: ins.Prop}
+		}
+		if err := e.Encode(v); err != nil {
+			return err
+		}
+	}
+	return e.EncodeToken(start.End())
 }
 
 // https://tools.ietf.org/html/rfc4918#section-14.23

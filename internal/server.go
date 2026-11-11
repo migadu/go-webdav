@@ -304,10 +304,26 @@ func isAllProp(name xml.Name, include *Include) bool {
 }
 
 func NewPropFindResponse(path string, propfind *PropFind, props map[xml.Name]PropFindFunc) (*Response, error) {
+	return NewPropFindResponseWithDeadProps(path, propfind, props, nil)
+}
+
+// NewPropFindResponseWithDeadProps is like NewPropFindResponse, for a resource
+// which also has the dead properties deadProps. Unlike the live properties of
+// props, an allprop request returns all of them (RFC 4918 section 9.1). A
+// live property takes precedence over a dead property of the same name.
+func NewPropFindResponseWithDeadProps(path string, propfind *PropFind, props, deadProps map[xml.Name]PropFindFunc) (*Response, error) {
 	resp := &Response{Hrefs: []Href{Href{Path: path}}}
 
 	if _, ok := props[ResourceTypeName]; !ok {
 		props[ResourceTypeName] = PropFindValue(NewResourceType())
+	}
+
+	dead := make(map[xml.Name]bool, len(deadProps))
+	for name, f := range deadProps {
+		if _, ok := props[name]; !ok {
+			props[name] = f
+			dead[name] = true
+		}
 	}
 
 	if propfind.PropName != nil {
@@ -319,7 +335,7 @@ func NewPropFindResponse(path string, propfind *PropFind, props map[xml.Name]Pro
 		}
 	} else if propfind.AllProp != nil {
 		for xmlName, f := range props {
-			if !isAllProp(xmlName, propfind.Include) {
+			if !dead[xmlName] && !isAllProp(xmlName, propfind.Include) {
 				continue
 			}
 
@@ -396,11 +412,12 @@ type PropPatchFunc func(raw *RawXMLValue, remove bool) error
 // instruction for a property overrides an earlier one; for an update without
 // Instructions, built by hand rather than decoded, the removed properties come
 // first. If f fails for any of them, the response reports the status of each
-// error, and 424 Failed Dependency for the other properties. Otherwise it
-// calls commit to apply the changes and the response reports 200 OK for every
-// property; an error returned by commit fails the whole request. A property
-// named by several instructions is reported once, with the status of the
-// first one which failed.
+// error, along with the DAV:error element it wraps if any, and 424 Failed
+// Dependency for the other properties. Otherwise it calls commit to apply the
+// changes and the response reports 200 OK for every property; an error
+// returned by commit fails the whole request. A property named by several
+// instructions is reported once, with the status of the first one which
+// failed.
 func PatchProps(path string, update *PropertyUpdate, f PropPatchFunc, commit func() error) (*Response, error) {
 	type instruction struct {
 		name   xml.Name
@@ -433,11 +450,14 @@ func PatchProps(path string, update *PropertyUpdate, f PropPatchFunc, commit fun
 
 	var names []xml.Name
 	codes := make(map[xml.Name]int)
+	errElts := make(map[xml.Name]*Error)
 	failed := false
 	for _, ins := range instructions {
 		code := http.StatusOK
+		var errElt *Error
 		if err := f(ins.raw, ins.remove); err != nil {
 			code = HTTPErrorFromError(err).Code
+			errors.As(err, &errElt)
 			failed = true
 		}
 		prev, seen := codes[ins.name]
@@ -446,6 +466,7 @@ func PatchProps(path string, update *PropertyUpdate, f PropPatchFunc, commit fun
 		}
 		if !seen || prev == http.StatusOK {
 			codes[ins.name] = code
+			errElts[ins.name] = errElt
 		}
 	}
 
@@ -460,11 +481,22 @@ func PatchProps(path string, update *PropertyUpdate, f PropPatchFunc, commit fun
 	}
 
 	resp := &Response{Hrefs: []Href{{Path: path}}}
+	var errPropStats []PropStat
 	for _, name := range names {
-		if err := resp.EncodeProp(codes[name], NewRawXMLElement(name, nil, nil)); err != nil {
+		prop := NewRawXMLElement(name, nil, nil)
+		if errElt := errElts[name]; errElt != nil {
+			// A DAV:error element describes all of the properties of its
+			// propstat element: give this property its own
+			errPropStats = append(errPropStats, PropStat{
+				Prop:   Prop{Raw: []RawXMLValue{*prop}},
+				Status: Status{Code: codes[name]},
+				Error:  errElt,
+			})
+		} else if err := resp.EncodeProp(codes[name], prop); err != nil {
 			return nil, err
 		}
 	}
+	resp.PropStats = append(resp.PropStats, errPropStats...)
 	return resp, nil
 }
 

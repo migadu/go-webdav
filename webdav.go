@@ -4,6 +4,7 @@
 package webdav
 
 import (
+	"encoding/xml"
 	"fmt"
 	"strings"
 	"time"
@@ -19,6 +20,89 @@ type FileInfo struct {
 	IsDir    bool
 	MIMEType string
 	ETag     string
+}
+
+// DeadProperty is a dead property of a file: a property which clients define
+// and set with PROPPATCH, and which the server stores and returns as is,
+// without interpreting it (RFC 4918 section 4).
+//
+// A dead property is an XML element, the property element, whose name is the
+// name of the property and whose content is its value. DeadProperty
+// implements xml.Marshaler and xml.Unmarshaler to encode and decode it.
+//
+// The value is kept as RFC 4918 section 4.3 requires: the namespace and local
+// name of the elements and attributes, the values of the attributes, and the
+// character data, whitespace included. Namespace prefixes, comments and
+// processing instructions aren't kept.
+type DeadProperty struct {
+	// XMLName is the name of the property.
+	XMLName xml.Name
+	// Attr lists the attributes of the property element, such as xml:lang,
+	// whose name is in the "http://www.w3.org/XML/1998/namespace" namespace.
+	// Namespace declarations aren't attributes.
+	Attr []xml.Attr
+	// InnerXML is the value of the property: the content of the property
+	// element, which is an XML fragment, such as character data or elements.
+	// The elements declare the namespaces they use, so that the fragment is
+	// well-formed on its own.
+	InnerXML []byte
+}
+
+// newDeadProperty converts a property element.
+func newDeadProperty(raw *internal.RawXMLValue) (*DeadProperty, error) {
+	name, ok := raw.XMLName()
+	if !ok {
+		return nil, fmt.Errorf("webdav: dead property isn't an element")
+	}
+	inner, err := raw.InnerXML()
+	if err != nil {
+		return nil, err
+	}
+	return &DeadProperty{XMLName: name, Attr: raw.Attr(), InnerXML: inner}, nil
+}
+
+// rawXMLValue converts the property into a property element. It fails if
+// InnerXML isn't well-formed.
+func (prop *DeadProperty) rawXMLValue() (*internal.RawXMLValue, error) {
+	raw, err := internal.NewRawXMLFragment(prop.XMLName, prop.Attr, prop.InnerXML)
+	if err != nil {
+		return nil, fmt.Errorf("webdav: malformed dead property <%v %v>: %w", prop.XMLName.Space, prop.XMLName.Local, err)
+	}
+	return raw, nil
+}
+
+// MarshalXML implements xml.Marshaler: it encodes the property element. It
+// fails if InnerXML isn't well-formed.
+func (prop DeadProperty) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
+	raw, err := prop.rawXMLValue()
+	if err != nil {
+		return err
+	}
+	return raw.MarshalXML(e, start)
+}
+
+// UnmarshalXML implements xml.Unmarshaler: it decodes a property element.
+func (prop *DeadProperty) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	var raw internal.RawXMLValue
+	if err := raw.UnmarshalXML(d, start); err != nil {
+		return err
+	}
+	p, err := newDeadProperty(&raw)
+	if err != nil {
+		return err
+	}
+	*prop = *p
+	return nil
+}
+
+// DeadPropertyPatch is an instruction of a PROPPATCH request: it sets or
+// removes a dead property.
+type DeadPropertyPatch struct {
+	// Remove is true to remove the property, and false to set it.
+	Remove bool
+	// Property is the property to set. To remove one, only its XMLName is
+	// used.
+	Property DeadProperty
 }
 
 type CreateOptions struct {

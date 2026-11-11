@@ -103,6 +103,34 @@ func TestPatchPropsSamePropertyFailed(t *testing.T) {
 	}
 }
 
+// Encoding an update with Instructions keeps their order.
+func TestPropertyUpdateMarshalOrder(t *testing.T) {
+	color := xml.Name{Space: "http://example.com/ns/", Local: "color"}
+	prop := func(name xml.Name) Prop {
+		return Prop{Raw: []RawXMLValue{*NewRawXMLElement(name, nil, nil)}}
+	}
+	update := PropertyUpdate{Instructions: []PropertyUpdateInstruction{
+		{Prop: prop(color)},
+		{Remove: true, Prop: prop(color)},
+		{Prop: prop(DisplayNameName)},
+	}}
+	b, err := xml.Marshal(&update)
+	if err != nil {
+		t.Fatalf("xml.Marshal() = %v", err)
+	}
+
+	rec := &patchRecorder{}
+	got := patchProps(t, string(b), rec)
+	wantCalls := []string{"set color", "remove color", "set displayname"}
+	if !reflect.DeepEqual(rec.calls, wantCalls) {
+		t.Errorf("calls = %q, want %q", rec.calls, wantCalls)
+	}
+	want := []string{"color 200", "displayname 200"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("propstats = %q, want %q", got, want)
+	}
+}
+
 // Updates built by hand carry no document order: removals come first.
 func TestPatchPropsHandBuilt(t *testing.T) {
 	color := xml.Name{Space: "http://example.com/ns/", Local: "color"}
