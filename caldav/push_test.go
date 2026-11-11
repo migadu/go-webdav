@@ -42,6 +42,7 @@ type pushTestBackend struct {
 	testBackend
 	vapidKey *ecdsa.PrivateKey
 	info     map[string]*webdav.PushInfo
+	infoErr  map[string]error // PushInfo errors, by path
 
 	mu            sync.Mutex
 	infoCalls     []string
@@ -99,6 +100,9 @@ func (b *pushTestBackend) PushInfo(ctx context.Context, path string) (*webdav.Pu
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.infoCalls = append(b.infoCalls, path)
+	if err := b.infoErr[path]; err != nil {
+		return nil, err
+	}
 	return b.info[path], nil
 }
 
@@ -397,6 +401,61 @@ func TestPushOptions(t *testing.T) {
 		}
 		if allow["POST"] != tc.push {
 			t.Errorf("OPTIONS %v: POST allowed: %v, want %v", tc.path, allow["POST"], tc.push)
+		}
+	}
+}
+
+// PushInfo may return a 404 error for a path where there's no collection,
+// which means that push isn't available there, as if it returned nil.
+func TestPushInfoNotFound(t *testing.T) {
+	const newCalendarPath = "/user/calendars/new/"
+	b := newPushTestBackend(t)
+	b.infoErr = map[string]error{newCalendarPath: webdav.NewHTTPError(http.StatusNotFound, nil)}
+
+	// OPTIONS still works before MKCALENDAR
+	t.Run("OPTIONS", func(t *testing.T) {
+		dav, allow := options(t, b, newCalendarPath)
+		if containsString(dav, "webdav-push") || allow["POST"] {
+			t.Errorf("DAV = %v, Allow = %v, want no push", dav, allow)
+		}
+		if !allow["MKCALENDAR"] {
+			t.Errorf("Allow = %v, want MKCALENDAR", allow)
+		}
+	})
+
+	// A registration is refused like for other collections without push
+	t.Run("POST", func(t *testing.T) {
+		if w := serveCalDAV(b, http.MethodPost, newCalendarPath, "", "<push-register"); w.Code != http.StatusBadRequest {
+			t.Errorf("malformed XML: status = %v, want 400", w.Code)
+		}
+		checkPushPrecondition(t, serveCalDAV(b, http.MethodPost, newCalendarPath, "", pushRegisterRequest), "push-not-available")
+		if len(b.registers) != 0 {
+			t.Errorf("RegisterPush called %d times, want none", len(b.registers))
+		}
+	})
+}
+
+// When PushInfo fails, a propname request doesn't list the push properties,
+// since it's unknown whether push is available, and a request for them gets
+// the error.
+func TestPushPropNameError(t *testing.T) {
+	b := newPushTestBackend(t)
+	b.infoErr = map[string]error{pushCalendarPath: webdav.NewHTTPError(http.StatusServiceUnavailable, nil)}
+	h := &Handler{Backend: b}
+
+	resp := propFindResponse(t, h, pushCalendarPath, "0", `<propfind xmlns="DAV:"><propname/></propfind>`, pushCalendarPath)
+	for _, propstat := range resp.PropStats {
+		for _, name := range pushPropNames {
+			if propstat.Prop.Get(name) != nil {
+				t.Errorf("propname lists %v with status %v", name.Local, propstat.Status.Code)
+			}
+		}
+	}
+
+	resp = propFindResponse(t, h, pushCalendarPath, "0", propFindPushProps, pushCalendarPath)
+	for _, name := range pushPropNames {
+		if code := propStatus(t, resp, name); code != http.StatusServiceUnavailable {
+			t.Errorf("%v: got status %v, want 503", name.Local, code)
 		}
 	}
 }

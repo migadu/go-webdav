@@ -87,16 +87,28 @@ func requested(propfind *internal.PropFind) bool {
 	return false
 }
 
+// Info returns the push information of the collection at path, or nil if push
+// isn't available for it. Backends may return a 404 error for a path where
+// there's no collection: push isn't available there either.
+func Info(ctx context.Context, b Backend, path string) (*webdav.PushInfo, error) {
+	info, err := b.PushInfo(ctx, path)
+	if internal.IsNotFound(err) {
+		return nil, nil
+	}
+	return info, err
+}
+
 // AddProps adds the push properties of the collection at path to props, if
 // the PROPFIND request may return them and push is available for the
 // collection: they mustn't be served for other resources
 // (draft-bitfire-webdav-push section 2.1). If b fails, the properties are
-// reported with its error.
+// reported with its error, except for a propname request, which doesn't list
+// them.
 func AddProps(ctx context.Context, b Backend, propfind *internal.PropFind, path string, props map[xml.Name]internal.PropFindFunc) {
 	if !requested(propfind) {
 		return
 	}
-	info, err := b.PushInfo(ctx, path)
+	info, err := Info(ctx, b, path)
 	if err == nil && info == nil {
 		return
 	}
@@ -104,6 +116,12 @@ func AddProps(ctx context.Context, b Backend, propfind *internal.PropFind, path 
 		err = checkInfo(info)
 	}
 	if err != nil {
+		// A propname response lists names without calling the PropFindFuncs,
+		// so it can't carry the error, and whether push is available is
+		// unknown: leave the properties out
+		if propfind.PropName != nil {
+			return
+		}
 		f := func(*internal.RawXMLValue) (interface{}, error) {
 			return nil, err
 		}
@@ -115,7 +133,7 @@ func AddProps(ctx context.Context, b Backend, propfind *internal.PropFind, path 
 
 	var vapidKey *vapidPublicKey
 	if info.VAPIDPublicKey != nil {
-		// checkInfo checked the curve
+		// checkInfo checked the key
 		b, _ := info.VAPIDPublicKey.Bytes()
 		vapidKey = &vapidPublicKey{Type: "p256ecdsa", Key: base64.RawURLEncoding.EncodeToString(b)}
 	}
@@ -148,8 +166,18 @@ func checkInfo(info *webdav.PushInfo) error {
 			return fmt.Errorf("webdav: push trigger with an invalid depth %d", int(t.Depth))
 		}
 	}
-	if info.VAPIDPublicKey != nil && info.VAPIDPublicKey.Curve != elliptic.P256() {
-		return fmt.Errorf("webdav: VAPID public key isn't on the P-256 curve")
+	if k := info.VAPIDPublicKey; k != nil {
+		if k.Curve != elliptic.P256() {
+			return fmt.Errorf("webdav: VAPID public key isn't on the P-256 curve")
+		}
+		// Bytes panics if a coordinate is missing, and fails if the point
+		// isn't on the curve
+		if k.X == nil || k.Y == nil {
+			return fmt.Errorf("webdav: invalid VAPID public key: missing coordinates")
+		}
+		if _, err := k.Bytes(); err != nil {
+			return fmt.Errorf("webdav: invalid VAPID public key: %v", err)
+		}
 	}
 	return nil
 }
