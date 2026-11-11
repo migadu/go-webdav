@@ -274,17 +274,56 @@ func TestHandler_copyMovePartialFailure(t *testing.T) {
 }
 
 func TestHandler_copyMoveError(t *testing.T) {
-	plainErr := webdav.NewHTTPError(http.StatusForbidden, nil)
-	for _, method := range []string{"COPY", "MOVE"} {
-		t.Run(method, func(t *testing.T) {
-			fs := &testFileSystem{copyErr: plainErr, moveErr: plainErr}
-			w := serve(&webdav.Handler{FileSystem: fs}, method, "/dir/", map[string]string{
-				"Destination": "http://example.com/dst/",
+	for _, tc := range []struct {
+		name   string
+		target string
+		dest   string
+		err    error
+		code   int
+	}{
+		{"HTTPError", "/dir/", "http://example.com/dst/", webdav.NewHTTPError(http.StatusForbidden, nil), http.StatusForbidden},
+		{
+			// A failure of the source itself isn't a partial failure.
+			"HrefError for the source",
+			"/a.txt", "http://example.com/b.txt",
+			webdav.NewHrefError("/a.txt", webdav.NewHTTPError(http.StatusLocked, nil)),
+			http.StatusLocked,
+		},
+		{
+			// Neither is a failure of the destination itself, e.g. a locked
+			// destination (RFC 4918 section 9.8.5).
+			"HrefError for the destination",
+			"/a.txt", "http://example.com/b.txt",
+			webdav.NewHrefError("/b.txt", webdav.NewHTTPError(http.StatusLocked, nil)),
+			http.StatusLocked,
+		},
+		{
+			"HrefError for the destination without trailing slash",
+			"/dir/", "http://example.com/dst/",
+			webdav.NewHrefError("/dst", webdav.NewHTTPError(http.StatusForbidden, nil)),
+			http.StatusForbidden,
+		},
+		{
+			"HrefErrors for the source and the destination",
+			"/a.txt", "/b.txt",
+			errors.Join(
+				webdav.NewHrefError("/a.txt", webdav.NewHTTPError(http.StatusLocked, nil)),
+				webdav.NewHrefError("/b.txt", webdav.NewHTTPError(http.StatusLocked, nil)),
+			),
+			http.StatusLocked,
+		},
+	} {
+		for _, method := range []string{"COPY", "MOVE"} {
+			t.Run(tc.name+"/"+method, func(t *testing.T) {
+				fs := &testFileSystem{copyErr: tc.err, moveErr: tc.err}
+				w := serve(&webdav.Handler{FileSystem: fs}, method, tc.target, map[string]string{
+					"Destination": tc.dest,
+				})
+				if w.Code != tc.code {
+					t.Errorf("status = %d, want %d; body:\n%s", w.Code, tc.code, w.Body.String())
+				}
 			})
-			if w.Code != http.StatusForbidden {
-				t.Errorf("status = %d, want %d; body:\n%s", w.Code, http.StatusForbidden, w.Body.String())
-			}
-		})
+		}
 	}
 }
 

@@ -122,27 +122,38 @@ func splitHrefErrors(err error) []*HrefError {
 // successfully aren't listed, and neither are their ancestors with a 424
 // Failed Dependency.
 //
-// Otherwise, including when the only failed resource is the request target
-// itself, err is returned to be served as the status of the whole request.
-func serveMemberErrors(w http.ResponseWriter, r *http.Request, err error) error {
+// Otherwise, including when the only failed resources are the request target
+// itself or, for COPY and MOVE, the destination, given in paths, err is
+// returned to be served as the status of the whole request.
+func serveMemberErrors(w http.ResponseWriter, err error, paths ...string) error {
 	resps, plainErr := HrefErrorResponses(err)
-	if plainErr != nil || onlyHref(resps, r.URL.Path) {
+	if plainErr != nil || onlyHrefs(resps, paths) {
 		return err
 	}
 	return ServeMultiStatus(w, NewMultiStatus(resps...))
 }
 
-// onlyHref reports whether all responses are about the resource at path.
-func onlyHref(resps []Response, path string) bool {
-	path = strings.TrimSuffix(path, "/")
+// onlyHrefs reports whether all responses are about the resources at paths.
+func onlyHrefs(resps []Response, paths []string) bool {
 	for _, resp := range resps {
 		for _, href := range resp.Hrefs {
-			if strings.TrimSuffix(href.Path, "/") != path {
+			if !containsPath(paths, href.Path) {
 				return false
 			}
 		}
 	}
 	return true
+}
+
+// containsPath reports whether paths contains p, ignoring trailing slashes.
+func containsPath(paths []string, p string) bool {
+	p = strings.TrimSuffix(p, "/")
+	for _, path := range paths {
+		if strings.TrimSuffix(path, "/") == p {
+			return true
+		}
+	}
+	return false
 }
 
 // Backend is a WebDAV server backend.
@@ -183,7 +194,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if err == nil {
 				w.WriteHeader(http.StatusNoContent)
 			} else {
-				err = serveMemberErrors(w, r, err)
+				err = serveMemberErrors(w, err, r.URL.Path)
 			}
 		case "PROPFIND":
 			err = h.handlePropfind(w, r)
@@ -394,7 +405,7 @@ func (h *Handler) handleCopyMove(w http.ResponseWriter, r *http.Request) error {
 		created, err = h.Backend.Move(r, dest, overwrite)
 	}
 	if err != nil {
-		return serveMemberErrors(w, r, err)
+		return serveMemberErrors(w, err, r.URL.Path, dest.Path)
 	}
 
 	if created {
