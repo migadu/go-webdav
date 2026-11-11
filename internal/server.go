@@ -24,8 +24,11 @@ func ServeError(w http.ResponseWriter, err error) {
 
 	var errElt *Error
 	if errors.As(err, &errElt) {
+		// The header fields must be set before the status is written
+		w.Header().Set("Content-Type", xmlContentType)
 		w.WriteHeader(code)
-		ServeXML(w).Encode(errElt)
+		w.Write([]byte(xml.Header))
+		xml.NewEncoder(w).Encode(errElt)
 		return
 	}
 
@@ -252,8 +255,11 @@ func (b *decodedBody) Close() error {
 	return b.src.Close()
 }
 
+// xmlContentType is the media type of XML responses.
+const xmlContentType = "application/xml; charset=\"utf-8\""
+
 func ServeXML(w http.ResponseWriter) *xml.Encoder {
-	w.Header().Add("Content-Type", "application/xml; charset=\"utf-8\"")
+	w.Header().Add("Content-Type", xmlContentType)
 	w.Write([]byte(xml.Header))
 	return xml.NewEncoder(w)
 }
@@ -376,6 +382,33 @@ type Backend interface {
 	Move(r *http.Request, dest *Href, overwrite bool) (created bool, err error)
 }
 
+// LockBackend is a Backend supporting locks (RFC 4918 compliance class 2).
+// Handler replies to LOCK and UNLOCK requests with 405 Method Not Allowed if
+// its Backend isn't a LockBackend.
+type LockBackend interface {
+	Backend
+	// Lock creates or refreshes a lock on the resource at the Request-URI.
+	// It returns the token of the lock, the lockdiscovery property of the
+	// resource, and whether the resource was created. Members of a
+	// collection preventing a lock from being granted can be reported with
+	// *HrefErrors, which Handler serves in a 207 Multi-Status response.
+	Lock(r *http.Request, req *LockRequest) (token string, discovery *LockDiscovery, created bool, err error)
+	// Unlock removes the lock with the given token.
+	Unlock(r *http.Request, token string) error
+}
+
+// LockRequest is a LOCK request (RFC 4918 section 9.10).
+type LockRequest struct {
+	// Info describes the lock to create, nil for a refresh
+	Info *LockInfo
+	// Depth is the depth of the lock to create, 0 or infinity
+	Depth Depth
+	// Timeout is the timeout requested by the client, nil if none
+	Timeout *Timeout
+	// RefreshToken is the token of the lock to refresh
+	RefreshToken string
+}
+
 type Handler struct {
 	Backend Backend
 }
@@ -415,6 +448,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		case "COPY", "MOVE":
 			err = h.handleCopyMove(w, r)
+		case "LOCK", "UNLOCK":
+			lb, ok := h.Backend.(LockBackend)
+			if !ok {
+				err = HTTPErrorf(http.StatusMethodNotAllowed, "webdav: unsupported method")
+			} else if r.Method == "LOCK" {
+				err = h.handleLock(w, r, lb)
+			} else {
+				err = h.handleUnlock(w, r, lb)
+			}
 		default:
 			err = HTTPErrorf(http.StatusMethodNotAllowed, "webdav: unsupported method")
 		}
@@ -790,5 +832,95 @@ func (h *Handler) handleCopyMove(w http.ResponseWriter, r *http.Request) error {
 	} else {
 		w.WriteHeader(http.StatusNoContent)
 	}
+	return nil
+}
+
+// handleLock handles a LOCK request (RFC 4918 section 9.10): a request with
+// a lockinfo body creates a lock, a request without body refreshes the lock
+// named in the If header field.
+func (h *Handler) handleLock(w http.ResponseWriter, r *http.Request, b LockBackend) error {
+	req := LockRequest{Depth: DepthInfinity}
+	if IsRequestBodyEmpty(r) {
+		token, err := ParseSubmittedToken(r.Header)
+		if err != nil {
+			return err
+		} else if token == "" {
+			return HTTPErrorf(http.StatusBadRequest, "webdav: a LOCK request without body must name the lock to refresh in the If header field")
+		}
+		req.RefreshToken = token
+	} else {
+		// Some clients don't label the body
+		if r.Header.Get("Content-Type") != "" && !isContentXML(r.Header) {
+			return HTTPErrorf(http.StatusBadRequest, "webdav: expected application/xml request")
+		}
+		var info LockInfo
+		if err := xml.NewDecoder(r.Body).Decode(&info); err != nil {
+			return &HTTPError{http.StatusBadRequest, err}
+		}
+		if (info.LockScope.Exclusive == nil) == (info.LockScope.Shared == nil) {
+			return HTTPErrorf(http.StatusBadRequest, "webdav: the lock scope must be either exclusive or shared")
+		}
+		if info.LockType.Write == nil {
+			return HTTPErrorf(http.StatusBadRequest, "webdav: only write locks are supported")
+		}
+		req.Info = &info
+
+		// The Depth header field of a refresh is ignored (RFC 4918 section
+		// 9.10.2)
+		if s := r.Header.Get("Depth"); s != "" {
+			depth, err := ParseDepth(s)
+			if err != nil {
+				return &HTTPError{http.StatusBadRequest, err}
+			} else if depth == DepthOne {
+				return HTTPErrorf(http.StatusBadRequest, `webdav: "Depth: 1" is not allowed in LOCK requests`)
+			}
+			req.Depth = depth
+		}
+	}
+
+	// The server needn't honour the Timeout header field (RFC 4918 section
+	// 10.7), so an invalid one is ignored
+	if s := r.Header.Get("Timeout"); s != "" {
+		if timeout, err := ParseTimeout(s); err == nil {
+			req.Timeout = &timeout
+		}
+	}
+
+	token, discovery, created, err := b.Lock(r, &req)
+	if err != nil {
+		// A lock which can't be granted because of members of the
+		// collection is refused with a multi-status response (RFC 4918
+		// section 9.10.9)
+		return serveMemberErrors(w, err, r.URL.Path)
+	}
+	prop, err := EncodeProp(discovery)
+	if err != nil {
+		return err
+	}
+
+	w.Header().Set("Content-Type", xmlContentType)
+	if req.Info != nil {
+		w.Header().Set("Lock-Token", FormatLockToken(token))
+	}
+	if created {
+		w.WriteHeader(http.StatusCreated)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+	w.Write([]byte(xml.Header))
+	return xml.NewEncoder(w).Encode(prop)
+}
+
+func (h *Handler) handleUnlock(w http.ResponseWriter, r *http.Request, b LockBackend) error {
+	tokenHref, err := ParseLockToken(r.Header.Get("Lock-Token"))
+	if err != nil {
+		return &HTTPError{http.StatusBadRequest, err}
+	}
+
+	if err := b.Unlock(r, tokenHref); err != nil {
+		return err
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 	return nil
 }

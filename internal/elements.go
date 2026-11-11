@@ -20,6 +20,8 @@ var (
 	GetContentTypeName   = xml.Name{Namespace, "getcontenttype"}
 	GetLastModifiedName  = xml.Name{Namespace, "getlastmodified"}
 	GetETagName          = xml.Name{Namespace, "getetag"}
+	SupportedLockName    = xml.Name{Namespace, "supportedlock"}
+	LockDiscoveryName    = xml.Name{Namespace, "lockdiscovery"}
 
 	CollectionName = xml.Name{Namespace, "collection"}
 	PrincipalName  = xml.Name{Namespace, "principal"}
@@ -398,6 +400,19 @@ type GetContentType struct {
 	Type    string   `xml:",chardata"`
 }
 
+// https://www.rfc-editor.org/rfc/rfc4918#section-15.10
+type SupportedLock struct {
+	XMLName     xml.Name    `xml:"DAV: supportedlock"`
+	LockEntries []LockEntry `xml:"lockentry"`
+}
+
+// https://www.rfc-editor.org/rfc/rfc4918#section-14.10
+type LockEntry struct {
+	XMLName   xml.Name  `xml:"DAV: lockentry"`
+	LockScope LockScope `xml:"lockscope"`
+	LockType  LockType  `xml:"locktype"`
+}
+
 type Time time.Time
 
 func (t *Time) UnmarshalText(b []byte) error {
@@ -654,4 +669,55 @@ var GetCTagName = xml.Name{CalendarServerNamespace, "getctag"}
 type GetCTag struct {
 	XMLName xml.Name `xml:"http://calendarserver.org/ns/ getctag"`
 	CTag    string   `xml:",chardata"`
+}
+
+// https://www.rfc-editor.org/rfc/rfc4918#section-14.11
+type LockInfo struct {
+	XMLName   xml.Name     `xml:"DAV: lockinfo"`
+	LockScope LockScope    `xml:"lockscope"`
+	LockType  LockType     `xml:"locktype"`
+	Owner     *RawXMLValue `xml:"owner,omitempty"` // https://www.rfc-editor.org/rfc/rfc4918#section-14.17
+}
+
+// https://www.rfc-editor.org/rfc/rfc4918#section-14.13
+type LockScope struct {
+	XMLName   xml.Name  `xml:"DAV: lockscope"`
+	Exclusive *struct{} `xml:"exclusive"`
+	Shared    *struct{} `xml:"shared"`
+}
+
+// https://www.rfc-editor.org/rfc/rfc4918#section-14.15
+type LockType struct {
+	XMLName xml.Name  `xml:"DAV: locktype"`
+	Write   *struct{} `xml:"write"`
+}
+
+// https://www.rfc-editor.org/rfc/rfc4918#section-15.8
+type LockDiscovery struct {
+	XMLName    xml.Name     `xml:"DAV: lockdiscovery"`
+	ActiveLock []ActiveLock `xml:"activelock,omitempty"`
+}
+
+// https://www.rfc-editor.org/rfc/rfc4918#section-14.1
+type ActiveLock struct {
+	XMLName   xml.Name     `xml:"DAV: activelock"`
+	LockScope LockScope    `xml:"lockscope"`
+	LockType  LockType     `xml:"locktype"`
+	Depth     Depth        `xml:"depth"`
+	Owner     *RawXMLValue `xml:"owner,omitempty"`
+	Timeout   *Timeout     `xml:"timeout,omitempty"`
+	LockToken *LockToken   `xml:"locktoken,omitempty"`
+	LockRoot  LockRoot     `xml:"lockroot"`
+}
+
+// https://www.rfc-editor.org/rfc/rfc4918#section-14.14
+type LockToken struct {
+	XMLName xml.Name `xml:"DAV: locktoken"`
+	Href    string   `xml:"href"`
+}
+
+// https://www.rfc-editor.org/rfc/rfc4918#section-14.12
+type LockRoot struct {
+	XMLName xml.Name `xml:"DAV: lockroot"`
+	Href    Href     `xml:"href"`
 }

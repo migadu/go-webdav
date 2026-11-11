@@ -207,6 +207,23 @@ func (val *RawXMLValue) InnerXML() ([]byte, error) {
 var _ xml.Marshaler = (*RawXMLValue)(nil)
 var _ xml.Unmarshaler = (*RawXMLValue)(nil)
 
+// MarshalRawXML encodes a raw XML element into a standalone XML document, to
+// be decoded by UnmarshalRawXML. The namespaces of the element and of its
+// children are declared again, as when encoding it in another document.
+func MarshalRawXML(val *RawXMLValue) (string, error) {
+	b, err := xml.Marshal(val)
+	return string(b), err
+}
+
+// UnmarshalRawXML decodes a raw XML element encoded by MarshalRawXML.
+func UnmarshalRawXML(s string) (*RawXMLValue, error) {
+	var val RawXMLValue
+	if err := xml.Unmarshal([]byte(s), &val); err != nil {
+		return nil, err
+	}
+	return &val, nil
+}
+
 func (val *RawXMLValue) Decode(v interface{}) error {
 	return xml.NewTokenDecoder(val.TokenReader()).Decode(&v)
 }
