@@ -35,7 +35,7 @@ func (lt *lockTest) lock(code int, target, body string, header ...string) string
 	return token
 }
 
-// RFC 4918 sections 6.1 and 7.5: a depth-infinity lock on a collection
+// RFC 4918 sections 6.1 and 7.4: a depth-infinity lock on a collection
 // locks the collection and all of its members. These are the lock_collection
 // tests of the litmus locks test suite, where neon tags its If header fields
 // with the root of the lock.
@@ -70,7 +70,7 @@ func TestLockCollection(t *testing.T) {
 	lt.expect(http.StatusNoContent, http.MethodPut, "/dir/a.txt", "")
 }
 
-// RFC 4918 section 7.5: a depth 0 lock on a collection protects its set of
+// RFC 4918 section 7.4: a depth 0 lock on a collection protects its set of
 // members, not their contents.
 func TestLockCollectionDepthZero(t *testing.T) {
 	lt := newLockTest(t)

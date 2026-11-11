@@ -85,8 +85,15 @@ type Handler struct {
 	FileSystem FileSystem
 	// LockSystem, if set, enables locking (RFC 4918 compliance class 2): the
 	// Handler then advertises DAV class 2, supports LOCK and UNLOCK requests,
-	// and enforces locks. Otherwise, LOCK and UNLOCK requests are refused
-	// with 405 Method Not Allowed.
+	// evaluates the If header field and enforces locks. Otherwise, LOCK and
+	// UNLOCK requests are refused with 405 Method Not Allowed and the If
+	// header field is ignored.
+	//
+	// Locks apply to the paths of the request URLs, and so do the
+	// resources tagged in the If header field, which clients name with
+	// absolute URLs: as for the Destination header field of COPY and MOVE,
+	// the Handler must see the full paths, rather than paths stripped of a
+	// prefix with http.StripPrefix.
 	LockSystem LockSystem
 }
 

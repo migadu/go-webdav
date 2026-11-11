@@ -29,7 +29,7 @@ type Lock struct {
 	// Recursive is set for a lock created with "Depth: infinity", which
 	// locks a collection and all of its members, unset for a lock created
 	// with "Depth: 0", which locks only the resource at Root and, for a
-	// collection, the set of its members (RFC 4918 section 7.5).
+	// collection, the set of its members (RFC 4918 section 7.4).
 	Recursive bool
 	// Shared is set for a shared lock, unset for an exclusive one (RFC 4918
 	// section 6.1).
@@ -79,7 +79,20 @@ func isPathBelow(p, dir string) bool {
 // Paths are absolute slash-separated paths, cleaned as with path.Clean: they
 // don't end with a slash, except for "/". A lock's scope is the resource at
 // its root and, for a recursive lock, all of its members, that is all the
-// paths below the root (RFC 4918 section 6.4).
+// paths below the root (RFC 4918 section 7.4).
+//
+// Locks are identified by the paths of the resources: a LockSystem holds the
+// locks of a single tree of resources. Handlers serving different trees at
+// the same paths, such as a FileSystem per user, need a LockSystem each, or
+// one telling the trees apart, for instance from the request context.
+//
+// Locks coordinate the clients writing resources, they don't restrict who
+// writes them. The Handler doesn't check that a lock token is submitted by
+// the principal which created the lock (RFC 4918 section 6.4): a client
+// which can read the lockdiscovery property can use the tokens listed there.
+// The Handler checks the locks before carrying out a request, not
+// atomically with it: a lock created meanwhile doesn't stop a request which
+// was already checked.
 //
 // The methods of a LockSystem may be called concurrently.
 type LockSystem interface {
@@ -107,10 +120,13 @@ type LockSystem interface {
 // MemLockSystem is a LockSystem keeping locks in memory, for a server
 // running on its own. Its zero value is ready to use.
 //
-// Expired locks are removed by the next call to any method.
+// Expired locks are removed by the next call to any method. Its methods take
+// a time proportional to the number of locks, which isn't limited.
 type MemLockSystem struct {
 	// MaxTimeout is the longest lifetime given to a lock, including one
-	// requested with an infinite timeout. Zero means no limit.
+	// requested with an infinite timeout. Zero means no limit: a lock
+	// requested without timeout or with an infinite one, by a client which
+	// then goes away, is only removed when the process exits.
 	MaxTimeout time.Duration
 
 	mu    sync.Mutex

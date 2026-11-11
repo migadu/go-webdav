@@ -216,7 +216,7 @@ func TestLockTokenSubmitted(t *testing.T) {
 	lt.expect(http.StatusCreated, http.MethodPut, "/file.txt", "")
 }
 
-// RFC 4918 section 7.5: a lock on a collection protects its set of members:
+// RFC 4918 section 7.4: a lock on a collection protects its set of members:
 // adding, removing or renaming a member needs the token of the collection's
 // lock, but modifying an existing member only needs the token of a lock on
 // the member itself. A depth-infinity lock also protects the members.
