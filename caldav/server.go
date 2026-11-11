@@ -774,6 +774,11 @@ func decodeCalendarTimezone(s string) (*ical.Calendar, error) {
 	if len(cal.Children) != 1 || cal.Children[0].Name != ical.CompTimezone {
 		return nil, NewPreconditionError(PreconditionValidCalendarData)
 	}
+	// The decoder doesn't validate, but the encoder does: reject anything we
+	// wouldn't be able to return in PROPFIND responses
+	if err := ical.NewEncoder(new(bytes.Buffer)).Encode(cal); err != nil {
+		return nil, NewPreconditionError(PreconditionValidCalendarData)
+	}
 	return cal, nil
 }
 
