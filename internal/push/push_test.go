@@ -236,6 +236,8 @@ func TestServeRegisterInvalid(t *testing.T) {
 		{name: "no push resource", body: webPushBody("<P:push-resource>https://up.example.net/yohd4yai5Phiz1wi</P:push-resource>", ""), precondition: "invalid-subscription"},
 		{name: "push resource over HTTP", body: webPushBody("https://up.example.net", "http://up.example.net"), precondition: "invalid-subscription"},
 		{name: "relative push resource", body: webPushBody("https://up.example.net/", "/"), precondition: "invalid-subscription"},
+		{name: "push resource with userinfo", body: webPushBody("https://up.example.net", "https://user:secret@up.example.net"), precondition: "invalid-subscription"},
+		{name: "push resource with fragment", body: webPushBody("yohd4yai5Phiz1wi</P:push-resource>", "yohd4yai5Phiz1wi#frag</P:push-resource>"), precondition: "invalid-subscription"},
 		{name: "unsupported content encoding", body: webPushBody(">aes128gcm<", ">aesgcm<"), precondition: "invalid-subscription"},
 		{name: "no public key", body: webPushBody(`<P:subscription-public-key type="p256dh">`+testP256DH+`</P:subscription-public-key>`, ""), precondition: "invalid-subscription"},
 		{name: "unsupported key type", body: webPushBody(`type="p256dh"`, `type="x25519"`), precondition: "invalid-subscription"},
@@ -407,14 +409,20 @@ func TestServeRegisterBackendError(t *testing.T) {
 
 func TestServeRegisterLocation(t *testing.T) {
 	for _, tc := range []struct {
-		url  string
-		tls  bool
-		want string
+		url    string
+		tls    bool
+		noHost bool
+		want   string
 	}{
 		{url: "https://dav.example.org/push/a", want: "https://dav.example.org/push/a"},
 		{url: "/push/a", want: "http://example.com/push/a"},
 		{url: "/push/a", tls: true, want: "https://example.com/push/a"},
 		{url: "a", want: "http://example.com/user/calendars/work/a"},
+		// Without a host, the URL can't be absolute: the client resolves
+		// the reference against the request URL (RFC 9110 section 10.2.2)
+		{url: "/push/a", noHost: true, want: "/push/a"},
+		{url: "a", noHost: true, tls: true, want: "/user/calendars/work/a"},
+		{url: "https://dav.example.org/push/a", noHost: true, want: "https://dav.example.org/push/a"},
 	} {
 		b := newFakeBackend()
 		b.reg.URL = tc.url
@@ -422,6 +430,9 @@ func TestServeRegisterLocation(t *testing.T) {
 		r.Header.Set("Content-Type", "application/xml")
 		if tc.tls {
 			r.TLS = &tls.ConnectionState{}
+		}
+		if tc.noHost {
+			r.Host = ""
 		}
 		w := httptest.NewRecorder()
 		if err := ServeRegister(w, r, b, b.info[testPath]); err != nil {

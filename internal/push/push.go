@@ -320,9 +320,12 @@ func decodeWebPushSubscription(sub *subscription) (*webdav.WebPushSubscription, 
 		return nil, errInvalidSubscription
 	}
 
-	// HTTP over TLS must be used with push services (section 7.3)
+	// HTTP over TLS must be used with push services (section 7.3). The push
+	// resource is the target URI of the push message requests: it can't have
+	// userinfo (RFC 9110 section 4.2.4) or a fragment, which
+	// webdav.SendWebPush refuses too.
 	pushResource := strings.TrimSpace(wp.PushResource[0])
-	if u, err := url.Parse(pushResource); err != nil || u.Scheme != "https" || u.Host == "" {
+	if u, err := url.Parse(pushResource); err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
 		return nil, errInvalidSubscription
 	}
 
@@ -411,7 +414,9 @@ func downgradeTrigger(req, sup *webdav.PushTrigger) *webdav.PushTrigger {
 }
 
 // absoluteURL resolves ref against the URL of the request r. An absolute URL
-// is returned as is.
+// is returned as is. If r has no host, its URL isn't known: ref is only
+// resolved against its path, and the client resolves the result against the
+// request URL (RFC 9110 section 10.2.2).
 func absoluteURL(r *http.Request, ref string) (string, error) {
 	u, err := url.Parse(ref)
 	if err != nil {
@@ -420,9 +425,13 @@ func absoluteURL(r *http.Request, ref string) (string, error) {
 	if u.IsAbs() && u.Host != "" {
 		return ref, nil
 	}
-	base := url.URL{Scheme: "http", Host: r.Host, Path: r.URL.Path}
-	if r.TLS != nil {
-		base.Scheme = "https"
+	base := url.URL{Path: r.URL.Path}
+	if r.Host != "" {
+		base.Scheme = "http"
+		base.Host = r.Host
+		if r.TLS != nil {
+			base.Scheme = "https"
+		}
 	}
 	return base.ResolveReference(u).String(), nil
 }

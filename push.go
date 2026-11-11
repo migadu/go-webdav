@@ -130,8 +130,9 @@ type PushRegistration struct {
 	// The server replies with an absolute URL: a URL reference such as a
 	// path is resolved against the URL of the request, made of the Host
 	// header field and of https if the request was received over TLS, http
-	// otherwise. A server behind a reverse proxy may need to return an
-	// absolute URL.
+	// otherwise. If the request has no host, the reference is only resolved
+	// against its path. A server behind a reverse proxy may need to return
+	// an absolute URL.
 	URL string
 	// Expires is the expiration time of the registration, which must be set.
 	// It can be earlier than the time requested by the client.
