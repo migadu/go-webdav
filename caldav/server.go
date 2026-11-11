@@ -193,7 +193,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Path == "/.well-known/caldav" {
+	if internal.SamePath(r.URL.Path, "/.well-known/caldav") {
 		principalPath, err := h.Backend.CurrentUserPrincipal(r.Context())
 		if err != nil {
 			http.Error(w, "caldav: failed to determine current user principal", http.StatusInternalServerError)
