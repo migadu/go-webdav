@@ -26,11 +26,24 @@ type PutAddressObjectOptions struct {
 }
 
 // Backend is a CardDAV server backend.
+//
+// ListAddressBooks, ListAddressObjects and QueryAddressObjects can report
+// resources that couldn't be loaded along with the others, and
+// DeleteAddressBook can report the address objects it couldn't delete, by
+// returning an error made only of errors created by webdav.NewHrefError (a
+// single one, or several combined with errors.Join). The server then replies
+// with a 207 Multi-Status response listing each failed resource with its own
+// status, instead of failing the whole request. Any other error fails the
+// whole request.
 type Backend interface {
 	AddressBookHomeSetPath(ctx context.Context) (string, error)
 	ListAddressBooks(ctx context.Context) ([]AddressBook, error)
 	GetAddressBook(ctx context.Context, path string) (*AddressBook, error)
 	CreateAddressBook(ctx context.Context, addressBook *AddressBook) error
+	// DeleteAddressBook deletes an address book and its address objects.
+	// Address objects that couldn't be deleted can be reported with
+	// webdav.NewHrefError; as per RFC 4918 section 9.6.1, the address
+	// objects that were deleted shouldn't be reported.
 	DeleteAddressBook(ctx context.Context, path string) error
 	GetAddressObject(ctx context.Context, path string, req *AddressDataRequest) (*AddressObject, error)
 	ListAddressObjects(ctx context.Context, path string, req *AddressDataRequest) ([]AddressObject, error)
@@ -182,11 +195,12 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *add
 	}
 
 	aos, err := h.Backend.QueryAddressObjects(r.Context(), r.URL.Path, &q)
+	errResps, err := internal.HrefErrorResponses(err)
 	if err != nil {
 		return err
 	}
 
-	var resps []internal.Response
+	resps := make([]internal.Response, 0, len(aos)+len(errResps))
 	for _, ao := range aos {
 		b := backend{
 			Backend: h.Backend,
@@ -203,6 +217,7 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *add
 		}
 		resps = append(resps, *resp)
 	}
+	resps = append(resps, errResps...)
 
 	ms := internal.NewMultiStatus(resps...)
 	return internal.ServeMultiStatus(w, ms)
@@ -521,6 +536,7 @@ func (b *backend) propFindAddressBook(ctx context.Context, propfind *internal.Pr
 
 func (b *backend) propFindAllAddressBooks(ctx context.Context, propfind *internal.PropFind, recurse bool) ([]internal.Response, error) {
 	abs, err := b.Backend.ListAddressBooks(ctx)
+	errResps, err := internal.HrefErrorResponses(err)
 	if err != nil {
 		return nil, err
 	}
@@ -540,7 +556,7 @@ func (b *backend) propFindAllAddressBooks(ctx context.Context, propfind *interna
 			resps = append(resps, resps_...)
 		}
 	}
-	return resps, nil
+	return append(resps, errResps...), nil
 }
 
 func (b *backend) propFindAddressObject(ctx context.Context, propfind *internal.PropFind, ao *AddressObject) (*internal.Response, error) {
@@ -589,11 +605,12 @@ func (b *backend) propFindAddressObject(ctx context.Context, propfind *internal.
 func (b *backend) propFindAllAddressObjects(ctx context.Context, propfind *internal.PropFind, ab *AddressBook) ([]internal.Response, error) {
 	var dataReq AddressDataRequest
 	aos, err := b.Backend.ListAddressObjects(ctx, ab.Path, &dataReq)
+	errResps, err := internal.HrefErrorResponses(err)
 	if err != nil {
 		return nil, err
 	}
 
-	var resps []internal.Response
+	resps := make([]internal.Response, 0, len(aos)+len(errResps))
 	for _, ao := range aos {
 		resp, err := b.propFindAddressObject(ctx, propfind, &ao)
 		if err != nil {
@@ -601,7 +618,7 @@ func (b *backend) propFindAllAddressObjects(ctx context.Context, propfind *inter
 		}
 		resps = append(resps, *resp)
 	}
-	return resps, nil
+	return append(resps, errResps...), nil
 }
 
 func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*internal.Response, error) {

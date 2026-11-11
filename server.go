@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -13,14 +14,35 @@ import (
 )
 
 // FileSystem is a WebDAV server backend.
+//
+// The methods acting on several files (ReadDir, RemoveAll, Copy and Move) can
+// report that some of these files failed while the others succeeded, by
+// returning an error made only of errors created by NewHrefError: either a
+// single one, or several combined with errors.Join. The server then replies
+// with a 207 Multi-Status response listing each failed file with its own
+// status, instead of failing the whole request. Any other error fails the
+// whole request.
 type FileSystem interface {
 	Open(ctx context.Context, name string) (io.ReadCloser, error)
 	Stat(ctx context.Context, name string) (*FileInfo, error)
+	// ReadDir lists the files in a directory. Files that couldn't be read
+	// can be reported with NewHrefError, along with the other files.
 	ReadDir(ctx context.Context, name string, recursive bool) ([]FileInfo, error)
 	Create(ctx context.Context, name string, body io.ReadCloser, opts *CreateOptions) (fileInfo *FileInfo, created bool, err error)
+	// RemoveAll deletes a file, and all of its descendants if it's a
+	// directory. Descendants that couldn't be deleted can be reported with
+	// NewHrefError; as per RFC 4918 section 9.6.1, the descendants that were
+	// deleted and the directories that couldn't be deleted because of them
+	// shouldn't be reported.
 	RemoveAll(ctx context.Context, name string, opts *RemoveAllOptions) error
 	Mkdir(ctx context.Context, name string) error
+	// Copy copies a file, and its descendants if it's a directory and
+	// options.NoRecursive isn't set. Descendants that couldn't be copied can
+	// be reported with NewHrefError (RFC 4918 section 9.8.5).
 	Copy(ctx context.Context, name, dest string, options *CopyOptions) (created bool, err error)
+	// Move moves a file, and its descendants if it's a directory.
+	// Descendants that couldn't be moved can be reported with NewHrefError
+	// (RFC 4918 section 9.9.4).
 	Move(ctx context.Context, name, dest string, options *MoveOptions) (created bool, err error)
 }
 
@@ -54,6 +76,27 @@ type HTTPError = internal.HTTPError
 // (intended for humans).
 func NewHTTPError(statusCode int, cause error) error {
 	return &internal.HTTPError{Code: statusCode, Err: cause}
+}
+
+// HrefError is an error about a single resource. NewHrefError returns one,
+// and a Client returns one, wrapping an HTTPError, for each resource a server
+// reported as failed in a multi-status response.
+type HrefError = internal.HrefError
+
+// NewHrefError creates a new error about the resource at path, caused by err.
+//
+// Backend methods acting on several resources return such errors, alone or
+// combined with errors.Join, to report the resources that failed while the
+// others succeeded (see FileSystem, caldav.Backend and carddav.Backend). The
+// server then lists each of these resources in a 207 Multi-Status response,
+// with the status of an HTTPError wrapped in err (see NewHTTPError), or else
+// 500 Internal Server Error, and a description of err.
+//
+// An error created by NewHrefError that is wrapped in another error (e.g. by
+// fmt.Errorf with a single %w verb), or joined with errors of other kinds,
+// fails the whole request, like any other error.
+func NewHrefError(path string, err error) error {
+	return &internal.HrefError{Href: url.URL{Path: path}, Err: err}
 }
 
 type backend struct {
@@ -121,8 +164,6 @@ func (b *backend) HeadGet(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth internal.Depth) (*internal.MultiStatus, error) {
-	// TODO: use partial error Response on error
-
 	fi, err := b.FileSystem.Stat(r.Context(), r.URL.Path)
 	if err != nil {
 		return nil, err
@@ -131,18 +172,20 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 	var resps []internal.Response
 	if depth != internal.DepthZero && fi.IsDir {
 		children, err := b.FileSystem.ReadDir(r.Context(), r.URL.Path, depth == internal.DepthInfinity)
+		errResps, err := internal.HrefErrorResponses(err)
 		if err != nil {
 			return nil, err
 		}
 
-		resps = make([]internal.Response, len(children))
-		for i, child := range children {
+		resps = make([]internal.Response, 0, len(children)+len(errResps))
+		for _, child := range children {
 			resp, err := b.propFindFile(propfind, &child)
 			if err != nil {
 				return nil, err
 			}
-			resps[i] = *resp
+			resps = append(resps, *resp)
 		}
+		resps = append(resps, errResps...)
 	} else {
 		resp, err := b.propFindFile(propfind, fi)
 		if err != nil {

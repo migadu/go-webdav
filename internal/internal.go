@@ -110,13 +110,15 @@ func (err *HTTPError) Unwrap() error {
 	return err.Err
 }
 
+// HrefError is an error about a single resource, e.g. one of the resources
+// listed in a multi-status response.
 type HrefError struct {
 	Href url.URL
 	Err  error
 }
 
 func (err *HrefError) Error() string {
-	return fmt.Sprintf("%v: %v", err.Href, err.Err)
+	return fmt.Sprintf("%v: %v", err.Href.String(), err.Err)
 }
 
 func (err *HrefError) Unwrap() error {

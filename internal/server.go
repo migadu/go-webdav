@@ -61,6 +61,95 @@ func ServeMultiStatus(w http.ResponseWriter, ms *MultiStatus) error {
 	return ServeXML(w).Encode(ms)
 }
 
+// HrefErrorResponses splits err, an error a backend returned along with
+// partial results, into per-resource error responses.
+//
+// If err is an *HrefError, or a multi-error (as built by errors.Join, or
+// fmt.Errorf with several %w verbs) made only of *HrefErrors, possibly
+// nested, the request partially succeeded: HrefErrorResponses returns one
+// error response per *HrefError, built by NewErrorResponse, and a nil error.
+// Otherwise err is a failure of the whole request, and is returned as is;
+// this includes an *HrefError wrapped in another error.
+func HrefErrorResponses(err error) ([]Response, error) {
+	if err == nil {
+		return nil, nil
+	}
+	hrefErrs := splitHrefErrors(err)
+	if len(hrefErrs) == 0 {
+		return nil, err
+	}
+	resps := make([]Response, len(hrefErrs))
+	for i, hrefErr := range hrefErrs {
+		resp := NewErrorResponse(hrefErr.Href.Path, hrefErr.Err)
+		resp.Hrefs = []Href{Href(hrefErr.Href)}
+		resps[i] = *resp
+	}
+	return resps, nil
+}
+
+// splitHrefErrors returns the *HrefErrors err is made of, or nil if any part
+// of err is something else.
+func splitHrefErrors(err error) []*HrefError {
+	switch err := err.(type) {
+	case *HrefError:
+		if err == nil {
+			return nil
+		}
+		return []*HrefError{err}
+	case interface{ Unwrap() []error }:
+		var l []*HrefError
+		for _, e := range err.Unwrap() {
+			if e == nil {
+				continue
+			}
+			sub := splitHrefErrors(e)
+			if sub == nil {
+				return nil
+			}
+			l = append(l, sub...)
+		}
+		return l
+	default:
+		return nil
+	}
+}
+
+// serveMemberErrors handles err, the error returned by the backend for a
+// DELETE, COPY or MOVE request. If the request failed only for some members
+// of the target collection, as reported by *HrefErrors (see
+// HrefErrorResponses), these members are listed in a 207 Multi-Status
+// response (RFC 4918 sections 9.6.1, 9.8.5 and 9.9.4). Members processed
+// successfully aren't listed, and neither are their ancestors with a 424
+// Failed Dependency.
+//
+// Otherwise, including when the only failed resource is the request target
+// itself, err is returned to be served as the status of the whole request.
+func serveMemberErrors(w http.ResponseWriter, r *http.Request, err error) error {
+	resps, plainErr := HrefErrorResponses(err)
+	if plainErr != nil || onlyHref(resps, r.URL.Path) {
+		return err
+	}
+	return ServeMultiStatus(w, NewMultiStatus(resps...))
+}
+
+// onlyHref reports whether all responses are about the resource at path.
+func onlyHref(resps []Response, path string) bool {
+	path = strings.TrimSuffix(path, "/")
+	for _, resp := range resps {
+		for _, href := range resp.Hrefs {
+			if strings.TrimSuffix(href.Path, "/") != path {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Backend is a WebDAV server backend.
+//
+// Delete, Copy and Move can report the members of the target collection that
+// failed while the others succeeded with *HrefErrors (see
+// HrefErrorResponses): Handler then replies with a 207 Multi-Status response.
 type Backend interface {
 	Options(r *http.Request) (caps []string, allow []string, err error)
 	HeadGet(w http.ResponseWriter, r *http.Request) error
@@ -90,10 +179,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPut:
 			err = h.Backend.Put(w, r)
 		case http.MethodDelete:
-			// TODO: send a multistatus in case of partial failure
 			err = h.Backend.Delete(r)
 			if err == nil {
 				w.WriteHeader(http.StatusNoContent)
+			} else {
+				err = serveMemberErrors(w, r, err)
 			}
 		case "PROPFIND":
 			err = h.handlePropfind(w, r)
@@ -304,7 +394,7 @@ func (h *Handler) handleCopyMove(w http.ResponseWriter, r *http.Request) error {
 		created, err = h.Backend.Move(r, dest, overwrite)
 	}
 	if err != nil {
-		return err
+		return serveMemberErrors(w, r, err)
 	}
 
 	if created {

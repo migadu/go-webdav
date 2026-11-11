@@ -105,13 +105,15 @@ func NewMultiStatus(resps ...Response) *MultiStatus {
 }
 
 // https://tools.ietf.org/html/rfc4918#section-14.24
+//
+// Fields are in the order required by the RFC.
 type Response struct {
 	XMLName             xml.Name   `xml:"DAV: response"`
 	Hrefs               []Href     `xml:"href"`
-	PropStats           []PropStat `xml:"propstat,omitempty"`
-	ResponseDescription string     `xml:"responsedescription,omitempty"`
 	Status              *Status    `xml:"status,omitempty"`
+	PropStats           []PropStat `xml:"propstat,omitempty"`
 	Error               *Error     `xml:"error,omitempty"`
+	ResponseDescription string     `xml:"responsedescription,omitempty"`
 	Location            *Location  `xml:"location,omitempty"`
 }
 
@@ -133,11 +135,21 @@ func NewErrorResponse(path string, err error) *Response {
 	var errElt *Error
 	errors.As(err, &errElt)
 
+	// The status already conveys the code of an HTTPError, and the error
+	// element a DAV:error: only describe the rest.
+	var desc string
+	if httpErr, ok := err.(*HTTPError); ok {
+		err = httpErr.Err
+	}
+	if err != nil && err != error(errElt) {
+		desc = err.Error()
+	}
+
 	href := Href{Path: path}
 	return &Response{
 		Hrefs:               []Href{href},
 		Status:              &Status{Code: code},
-		ResponseDescription: err.Error(),
+		ResponseDescription: desc,
 		Error:               errElt,
 	}
 }
