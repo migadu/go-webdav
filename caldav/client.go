@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/emersion/go-ical"
@@ -22,8 +23,13 @@ var calendarProps = []xml.Name{
 	internal.ResourceTypeName,
 	internal.DisplayNameName,
 	calendarDescriptionName,
+	calendarColorName,
+	calendarTimezoneName,
 	maxResourceSizeName,
 	supportedCalendarComponentSetName,
+	internal.SyncTokenName,
+	internal.GetCTagName,
+	internal.CurrentUserPrivilegeSetName,
 }
 
 // ErrNoServiceRecord is returned by DiscoverContextURL when the domain has no
@@ -70,13 +76,20 @@ func (c *Client) FindCalendar(ctx context.Context, path string) (*Calendar, erro
 	if err != nil {
 		return nil, err
 	}
-
-	calendar, err := decodeCalendar(path, resp)
+	p, err := resp.Path()
 	if err != nil {
 		return nil, err
 	}
 
-	return calendar, nil
+	var resType internal.ResourceType
+	if err := resp.DecodeProp(&resType); err != nil {
+		return nil, err
+	}
+	if !resType.Is(calendarName) {
+		return nil, fmt.Errorf("caldav: resource at %q is not a calendar", p)
+	}
+
+	return decodeCalendar(p, resp)
 }
 
 func (c *Client) FindCalendarHomeSet(ctx context.Context, principal string) (string, error) {
@@ -145,7 +158,7 @@ func decodeCalendar(path string, resp *internal.Response) (*Calendar, error) {
 		return nil, err
 	}
 	if maxResSize.Size < 0 {
-		return nil, fmt.Errorf("carddav: max-resource-size must be a positive integer")
+		return nil, fmt.Errorf("caldav: max-resource-size must be a positive integer")
 	}
 
 	var supportedCompSet supportedCalendarComponentSet
@@ -158,12 +171,54 @@ func decodeCalendar(path string, resp *internal.Response) (*Calendar, error) {
 		compNames = append(compNames, comp.Name)
 	}
 
+	var color calendarColor
+	if err := resp.DecodeProp(&color); err != nil && !internal.IsNotFound(err) {
+		return nil, err
+	}
+
+	var tz *ical.Calendar
+	var calTZ calendarTimezone
+	if err := resp.DecodeProp(&calTZ); err == nil {
+		if s := strings.TrimSpace(calTZ.Timezone); s != "" {
+			decoded, err := ical.NewDecoder(strings.NewReader(s)).Decode()
+			if err != nil {
+				return nil, fmt.Errorf("caldav: failed to decode calendar-timezone: %w", err)
+			}
+			tz = decoded
+		}
+	} else if !internal.IsNotFound(err) {
+		return nil, err
+	}
+
+	var syncToken internal.SyncToken
+	if err := resp.DecodeProp(&syncToken); err != nil && !internal.IsNotFound(err) {
+		return nil, err
+	}
+
+	var ctag internal.GetCTag
+	if err := resp.DecodeProp(&ctag); err != nil && !internal.IsNotFound(err) {
+		return nil, err
+	}
+
+	var readOnly bool
+	var privSet internal.CurrentUserPrivilegeSet
+	if err := resp.DecodeProp(&privSet); err == nil {
+		readOnly = !privSet.HasWrite()
+	} else if !internal.IsNotFound(err) {
+		return nil, err
+	}
+
 	return &Calendar{
 		Path:                  path,
 		Name:                  dispName.Name,
 		Description:           desc.Description,
+		Color:                 strings.TrimSpace(color.Color),
+		Timezone:              tz,
 		MaxResourceSize:       maxResSize.Size,
+		SyncToken:             syncToken.Token,
 		SupportedComponentSet: compNames,
+		ReadOnly:              readOnly,
+		CTag:                  ctag.CTag,
 	}, nil
 }
 
