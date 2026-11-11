@@ -151,11 +151,13 @@ func (val ConditionalMatch) etags() ([]internal.ETag, error) {
 	return l, nil
 }
 
-// opaqueTag strips the weakness indicator of an entity-tag.
+// opaqueTag strips the weakness indicator of an entity-tag. A malformed weak
+// entity-tag, such as a backend may store, is returned whole: it contains a
+// double quote, so it matches no parsed opaque-tag.
 func opaqueTag(etag internal.ETag) string {
-	if etag.IsWeak() {
-		s := string(etag)
+	s := string(etag)
+	if etag.IsWeak() && len(s) >= 4 && strings.HasSuffix(s, `"`) {
 		return s[3 : len(s)-1]
 	}
-	return string(etag)
+	return s
 }

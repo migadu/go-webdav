@@ -42,6 +42,11 @@ func TestConditionalMatch(t *testing.T) {
 		{header: `"a`, etag: "a", expectError: true},
 		{header: `"a" "b"`, etag: "a", expectError: true},
 		{header: `,`, etag: "a", expectError: true},
+		// Malformed current entity-tags, as a backend may store, match nothing
+		{header: `"a"`, etag: `W/"`},
+		{header: `W/"a"`, etag: `W/"`},
+		{header: `""`, etag: `W/"a`},
+		{header: `W/""`, etag: `W/"a`},
 	} {
 		val := ConditionalMatch(tc.header)
 		strong, err := val.MatchETag(tc.etag)
