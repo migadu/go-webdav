@@ -25,6 +25,7 @@ const (
 // event, and no scheduling Inbox.
 func newSchedulingTestBackend() testBackend {
 	event := calendarObjectWithInvite(strings.TrimSuffix(schedulingCalendarPath, "/"), "Team Meeting")
+	event.ETag = "event"
 	return testBackend{
 		calendars: []Calendar{{Path: schedulingCalendarPath}},
 		objectMap: map[string][]CalendarObject{
@@ -41,12 +42,14 @@ type schedulingBackend struct {
 	inbox *Inbox
 
 	inboxCalls int
+	created    []string
 }
 
 func newSchedulingBackend(inbox *Inbox) *schedulingBackend {
 	b := &schedulingBackend{testBackend: newSchedulingTestBackend(), inbox: inbox}
 	if inbox != nil {
 		invite := calendarObjectWithInvite(strings.TrimSuffix(inbox.Path, "/"), "Team Meeting Invite")
+		invite.ETag = "invite"
 		b.objectMap[inbox.Path] = []CalendarObject{invite}
 	}
 	return b
@@ -55,6 +58,11 @@ func newSchedulingBackend(inbox *Inbox) *schedulingBackend {
 func (b *schedulingBackend) GetInbox(ctx context.Context) (*Inbox, error) {
 	b.inboxCalls++
 	return b.inbox, nil
+}
+
+func (b *schedulingBackend) CreateCalendar(ctx context.Context, cal *Calendar) error {
+	b.created = append(b.created, cal.Path)
+	return nil
 }
 
 const propFindPrivileges = `<?xml version="1.0" encoding="UTF-8"?>
@@ -277,4 +285,137 @@ func TestSchedulingDisabledForUser(t *testing.T) {
 		"/user/calendars/":     http.StatusOK,
 		schedulingCalendarPath: http.StatusOK,
 	})
+}
+
+func checkIsInbox(t *testing.T, resp *internal.Response) {
+	t.Helper()
+	var rt internal.ResourceType
+	if err := resp.DecodeProp(&rt); err != nil {
+		t.Fatalf("%v: resourcetype: %v", resp.Hrefs, err)
+	}
+	if !rt.Is(internal.CollectionName) || !rt.Is(scheduleInboxName) {
+		t.Errorf("%v: resourcetype %v isn't a schedule-inbox collection", resp.Hrefs, rt.Raw)
+	}
+}
+
+// The Inbox is matched whether or not its path, or the request's, has a
+// trailing slash, and backend paths include the handler prefix, as for
+// calendars.
+func TestInboxPathMatching(t *testing.T) {
+	for _, tc := range []struct {
+		prefix, inboxPath, target string
+	}{
+		{"", "/user/calendars/inbox/", "/user/calendars/inbox/"},
+		{"", "/user/calendars/inbox/", "/user/calendars/inbox"},
+		{"", "/user/calendars/inbox", "/user/calendars/inbox/"},
+		{"/dav", "/dav/user/calendars/inbox/", "/dav/user/calendars/inbox/"},
+		{"/dav/", "/dav/user/calendars/inbox", "/dav/user/calendars/inbox"},
+	} {
+		h := &Handler{Backend: newSchedulingBackend(&Inbox{Path: tc.inboxPath}), Prefix: tc.prefix}
+		req := httptest.NewRequest("PROPFIND", tc.target, strings.NewReader(propFindPrivileges))
+		req.Header.Set("Content-Type", "application/xml")
+		req.Header.Set("Depth", "0")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusMultiStatus {
+			t.Errorf("prefix %q, Inbox %v: PROPFIND %v: got status %v, want 207; body:\n%s", tc.prefix, tc.inboxPath, tc.target, w.Code, w.Body.String())
+			continue
+		}
+		resp := propFindResponse(t, h, tc.target, "0", propFindPrivileges, tc.inboxPath)
+		checkIsInbox(t, resp)
+	}
+}
+
+// The members of the Inbox are calendar objects, wherever the Inbox is.
+func TestInboxMembers(t *testing.T) {
+	const inboxPath = "/user/inbox/"
+	const inviteHref = inboxPath + "invite1.ics"
+	h := &Handler{Backend: newSchedulingBackend(&Inbox{Path: inboxPath})}
+
+	resp := propFindResponse(t, h, inviteHref, "0", propFindETag, inviteHref)
+	if code := propStatus(t, resp, internal.GetETagName); code != http.StatusOK {
+		t.Errorf("PROPFIND %v: getetag: got status %v, want 200", inviteHref, code)
+	}
+
+	w := serveCalDAV(h.Backend, http.MethodOptions, inviteHref, "", "")
+	if allow := w.Header().Get("Allow"); !strings.Contains(allow, http.MethodPut) || !strings.Contains(allow, http.MethodDelete) {
+		t.Errorf("OPTIONS %v: Allow: %v, want PUT and DELETE", inviteHref, allow)
+	}
+}
+
+// Paths deeper than calendar objects aren't the Inbox.
+func TestDeepPathIsNotInbox(t *testing.T) {
+	h := &Handler{Backend: newSchedulingBackend(&Inbox{Path: schedulingInboxPath})}
+	w := serveCalDAV(h.Backend, "PROPFIND", "/user/calendars/a/b/c", "0", propFindPrivileges)
+	if strings.Contains(w.Body.String(), "schedule-inbox") {
+		t.Errorf("PROPFIND /user/calendars/a/b/c returned the Inbox:\n%s", w.Body.String())
+	}
+}
+
+// GetInbox is called once per request at most, and not for the root.
+func TestGetInboxCalls(t *testing.T) {
+	for _, tc := range []struct {
+		method, target, depth, body string
+		want                        int
+	}{
+		{"PROPFIND", "/", "0", propFindPrivileges, 0},
+		{http.MethodOptions, "/user/", "", "", 1},
+		{"PROPFIND", "/user/", "1", propFindPrincipalScheduling, 1},
+		{"PROPFIND", "/user/calendars/", "1", propFindPrivileges, 1},
+		{"PROPFIND", schedulingInboxPath, "1", propFindPrivileges, 1},
+		{"PROPFIND", schedulingCalendarPath, "1", propFindPrivileges, 1},
+		{http.MethodGet, schedulingEventHref, "", "", 0},
+	} {
+		b := newSchedulingBackend(&Inbox{Path: schedulingInboxPath})
+		w := serveCalDAV(b, tc.method, tc.target, tc.depth, tc.body)
+		if w.Code >= 300 {
+			t.Errorf("%v %v: got status %v; body:\n%s", tc.method, tc.target, w.Code, w.Body.String())
+		}
+		if b.inboxCalls != tc.want {
+			t.Errorf("%v %v: GetInbox called %d times, want %d", tc.method, tc.target, b.inboxCalls, tc.want)
+		}
+	}
+}
+
+// The Inbox is listed in the calendar home set when it's a member of it, as
+// RFC 4918 section 9.1 restricts Depth: 1 to the internal members of a
+// collection.
+func TestInboxInHomeSet(t *testing.T) {
+	b := newSchedulingBackend(&Inbox{Path: "/user/calendars/inbox/"})
+	w := serveCalDAV(b, "PROPFIND", "/user/calendars/", "1", propFindPrivileges)
+	checkStatusCodes(t, multiStatusCodes(t, w), map[string]int{
+		"/user/calendars/":       http.StatusOK,
+		schedulingCalendarPath:   http.StatusOK,
+		"/user/calendars/inbox/": http.StatusOK,
+	})
+
+	w = serveCalDAV(b, "PROPFIND", "/user/calendars/", "infinity", propFindPrivileges)
+	checkStatusCodes(t, multiStatusCodes(t, w), map[string]int{
+		"/user/calendars/":                  http.StatusOK,
+		schedulingCalendarPath:              http.StatusOK,
+		schedulingEventHref:                 http.StatusOK,
+		"/user/calendars/inbox/":            http.StatusOK,
+		"/user/calendars/inbox/invite1.ics": http.StatusOK,
+	})
+
+	b = newSchedulingBackend(&Inbox{Path: "/user/inbox/"})
+	w = serveCalDAV(b, "PROPFIND", "/user/calendars/", "1", propFindPrivileges)
+	checkStatusCodes(t, multiStatusCodes(t, w), map[string]int{
+		"/user/calendars/":     http.StatusOK,
+		schedulingCalendarPath: http.StatusOK,
+	})
+}
+
+// RFC 6638 section 2: clients can't create the Inbox.
+func TestMkcalendarAtInbox(t *testing.T) {
+	for _, method := range []string{"MKCALENDAR", "MKCOL"} {
+		b := newSchedulingBackend(&Inbox{Path: "/user/calendars/inbox/"})
+		w := serveCalDAV(b, method, "/user/calendars/inbox", "", "")
+		if w.Code != http.StatusForbidden {
+			t.Errorf("%v at the Inbox: got status %v, want 403", method, w.Code)
+		}
+		if len(b.created) > 0 {
+			t.Errorf("%v at the Inbox created %v", method, b.created)
+		}
+	}
 }

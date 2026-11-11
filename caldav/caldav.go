@@ -186,7 +186,9 @@ type SyncResponse struct {
 type Inbox struct {
 	// Path is the path of the Inbox collection, which mustn't be inside a
 	// calendar. It's served as the CALDAV:schedule-inbox-URL property of the
-	// principal.
+	// principal, and the Inbox is listed along with the calendars when it's
+	// a member of the calendar home set, such as "/user/calendars/inbox/".
+	// The paths of the scheduling messages are those of its members.
 	Path string
 	// UserAddressSet lists the calendar user addresses of the user, such as
 	// "mailto:user@example.com", which identify the user as the ORGANIZER or

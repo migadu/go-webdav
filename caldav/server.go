@@ -512,9 +512,15 @@ func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, mul
 	return internal.ServeMultiStatus(w, ms)
 }
 
+// backend serves a single request.
 type backend struct {
 	Backend Backend
 	Prefix  string
+
+	// The scheduling Inbox of the current user, see scheduleInbox
+	inbox       *Inbox
+	inboxErr    error
+	inboxLoaded bool
 }
 
 type resourceType int
@@ -525,32 +531,47 @@ const (
 	resourceTypeCalendarHomeSet
 	resourceTypeCalendar
 	resourceTypeCalendarObject
-	resourceTypeScheduleInbox
 )
 
+// resourceTypeScheduleInbox is the type of the scheduling Inbox, which is
+// found by its path rather than by its depth.
+const resourceTypeScheduleInbox resourceType = -1
+
 func (b *backend) resourceTypeAtPath(ctx context.Context, reqPath string) resourceType {
-	p := path.Clean(reqPath)
-	p = strings.TrimPrefix(p, b.Prefix)
+	reqPath = path.Clean(reqPath)
+	p := strings.TrimPrefix(reqPath, b.Prefix)
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
 	}
-	if inbox, err := b.scheduleInbox(ctx); err == nil && inbox != nil && inbox.Path == p {
-		return resourceTypeScheduleInbox
-	}
 	if p == "/" {
 		return resourceTypeRoot
+	}
+	// Like the other backend paths, the Inbox path includes the prefix. An
+	// error is reported by the requests for the Inbox properties.
+	if inbox, err := b.scheduleInbox(ctx); err == nil && inbox != nil {
+		switch inboxPath := path.Clean(inbox.Path); {
+		case reqPath == inboxPath:
+			return resourceTypeScheduleInbox
+		case path.Dir(reqPath) == inboxPath:
+			return resourceTypeCalendarObject
+		}
 	}
 	return resourceType(len(strings.Split(p, "/")) - 1)
 }
 
 // scheduleInbox returns the scheduling Inbox of the current user, or nil if
-// the backend doesn't implement InboxBackend or the user has no Inbox.
+// the backend doesn't implement InboxBackend or the user has no Inbox. It
+// calls GetInbox once at most: the result is kept for the rest of the request.
 func (b *backend) scheduleInbox(ctx context.Context) (*Inbox, error) {
 	inboxBackend, ok := b.Backend.(InboxBackend)
 	if !ok {
 		return nil, nil
 	}
-	return inboxBackend.GetInbox(ctx)
+	if !b.inboxLoaded {
+		b.inbox, b.inboxErr = inboxBackend.GetInbox(ctx)
+		b.inboxLoaded = true
+	}
+	return b.inbox, b.inboxErr
 }
 
 func (b *backend) Options(r *http.Request) (caps []string, allow []string, err error) {
@@ -648,7 +669,11 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 				}
 				resps = append(resps, *resp)
 				if depth == internal.DepthInfinity {
-					resps_, err := b.propFindAllCalendars(r.Context(), propfind, true)
+					homeSetPath, err := b.Backend.CalendarHomeSetPath(r.Context())
+					if err != nil {
+						return nil, err
+					}
+					resps_, err := b.propFindAllCalendars(r.Context(), propfind, homeSetPath, true)
 					if err != nil {
 						return nil, err
 					}
@@ -669,7 +694,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 			resps = append(resps, *resp)
 			if depth != internal.DepthZero {
 				recurse := depth == internal.DepthInfinity
-				resps_, err := b.propFindAllCalendars(r.Context(), propfind, recurse)
+				resps_, err := b.propFindAllCalendars(r.Context(), propfind, homeSetPath, recurse)
 				if err != nil {
 					return nil, err
 				}
@@ -914,7 +939,9 @@ func newInboxPrivilegeSet(readOnly bool) *internal.CurrentUserPrivilegeSet {
 	return &internal.CurrentUserPrivilegeSet{Privilege: privs}
 }
 
-func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.PropFind, recurse bool) ([]internal.Response, error) {
+// propFindAllCalendars returns the responses for the members of the calendar
+// home set: the calendars, and the scheduling Inbox if it's one of them.
+func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.PropFind, homeSetPath string, recurse bool) ([]internal.Response, error) {
 	abs, err := b.Backend.ListCalendars(ctx)
 	errResps, err := internal.HrefErrorResponses(err)
 	if err != nil {
@@ -940,12 +967,21 @@ func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.P
 	if err != nil {
 		return nil, err
 	}
-	if inbox != nil {
+	// A Depth: 1 PROPFIND only returns the internal members of a collection
+	// (RFC 4918 section 9.1)
+	if inbox != nil && path.Dir(path.Clean(inbox.Path)) == path.Clean(homeSetPath) {
 		resp, err := b.propFindInbox(propfind, inbox)
 		if err != nil {
 			return nil, err
 		}
 		resps = append(resps, *resp)
+		if recurse {
+			resps_, err := b.propFindAllCalendarObjects(ctx, propfind, inbox.Path)
+			if err != nil {
+				return nil, err
+			}
+			resps = append(resps, resps_...)
+		}
 	}
 	return append(resps, errResps...), nil
 }
