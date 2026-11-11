@@ -92,6 +92,7 @@ type ParamFilter struct {
 
 type TextMatch struct {
 	Text            string
+	Collation       string // defaults to "i;unicode-casemap"
 	NegateCondition bool
 	MatchType       MatchType // defaults to MatchContains
 }

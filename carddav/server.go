@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"mime"
 	"net/http"
@@ -190,7 +191,11 @@ func decodePropFilter(el *propFilter) (*PropFilter, error) {
 		pf.IsNotDefined = true
 	}
 	for _, tm := range el.TextMatches {
-		pf.TextMatches = append(pf.TextMatches, *decodeTextMatch(&tm))
+		decodedTM, err := decodeTextMatch(&tm)
+		if err != nil {
+			return nil, err
+		}
+		pf.TextMatches = append(pf.TextMatches, *decodedTM)
 	}
 	for _, paramEl := range el.Params {
 		param, err := decodeParamFilter(&paramEl)
@@ -211,17 +216,25 @@ func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {
 		pf.IsNotDefined = true
 	}
 	if el.TextMatch != nil {
-		pf.TextMatch = decodeTextMatch(el.TextMatch)
+		decodedTM, err := decodeTextMatch(el.TextMatch)
+		if err != nil {
+			return nil, err
+		}
+		pf.TextMatch = decodedTM
 	}
 	return pf, nil
 }
 
-func decodeTextMatch(tm *textMatch) *TextMatch {
+func decodeTextMatch(tm *textMatch) (*TextMatch, error) {
+	if !internal.IsSupportedCollation(tm.Collation) {
+		return nil, newPreconditionError(http.StatusForbidden, PreconditionSupportedCollation)
+	}
 	return &TextMatch{
 		Text:            tm.Text,
+		Collation:       tm.Collation,
 		NegateCondition: bool(tm.NegateCondition),
 		MatchType:       MatchType(tm.MatchType),
-	}
+	}, nil
 }
 
 func decodeAddressDataReq(addressData *addressDataReq) (*AddressDataRequest, error) {
@@ -263,6 +276,10 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *add
 	for _, el := range query.Filter.Props {
 		pf, err := decodePropFilter(&el)
 		if err != nil {
+			var httpErr *internal.HTTPError
+			if errors.As(err, &httpErr) {
+				return err
+			}
 			return &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
 		}
 		q.PropFilters = append(q.PropFilters, *pf)
@@ -973,13 +990,18 @@ const (
 	PreconditionSupportedAddressData PreconditionType = "supported-address-data"
 	PreconditionValidAddressData     PreconditionType = "valid-address-data"
 	PreconditionMaxResourceSize      PreconditionType = "max-resource-size"
+	PreconditionSupportedCollation   PreconditionType = "supported-collation"
 )
 
 func NewPreconditionError(err PreconditionType) error {
+	return newPreconditionError(http.StatusConflict, err)
+}
+
+func newPreconditionError(code int, err PreconditionType) error {
 	name := xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: string(err)}
 	elem := internal.NewRawXMLElement(name, nil, nil)
 	return &internal.HTTPError{
-		Code: 409,
+		Code: code,
 		Err: &internal.Error{
 			Raw: []internal.RawXMLValue{*elem},
 		},

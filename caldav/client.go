@@ -337,6 +337,7 @@ func encodeTextMatch(tm *TextMatch) *textMatch {
 
 	encoded := &textMatch{
 		Text:            tm.Text,
+		Collation:       tm.Collation,
 		NegateCondition: negateCondition(tm.NegateCondition),
 	}
 	return encoded

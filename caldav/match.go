@@ -1,10 +1,12 @@
 package caldav
 
 import (
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/emersion/go-ical"
+	"github.com/emersion/go-webdav/internal"
 )
 
 // Filter returns the filtered list of calendar objects matching the provided query.
@@ -125,7 +127,11 @@ func matchPropFilter(filter PropFilter, comp *ical.Component) (bool, error) {
 
 func matchProp(filter PropFilter, field *ical.Prop) (bool, error) {
 	for _, paramFilter := range filter.ParamFilter {
-		if !matchParamFilter(paramFilter, field) {
+		ok, err := matchParamFilter(paramFilter, field)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
 			return false, nil
 		}
 	}
@@ -134,7 +140,7 @@ func matchProp(filter PropFilter, field *ical.Prop) (bool, error) {
 		return matchPropTimeRange(filter.Start, filter.End, field)
 	}
 	if filter.TextMatch != nil {
-		return matchTextMatch(*filter.TextMatch, field.Value), nil
+		return matchTextMatch(*filter.TextMatch, field.Value)
 	}
 	// empty prop-filter, property exists
 	return true, nil
@@ -311,20 +317,24 @@ func matchPropTimeRange(start, end time.Time, field *ical.Prop) (bool, error) {
 	return !ptime.Before(start) && (end.IsZero() || ptime.Before(end)), nil
 }
 
-func matchParamFilter(filter ParamFilter, field *ical.Prop) bool {
+func matchParamFilter(filter ParamFilter, field *ical.Prop) (bool, error) {
 	values := field.Params.Values(filter.Name)
 	if len(values) == 0 {
-		return filter.IsNotDefined
+		return filter.IsNotDefined, nil
 	}
 	if filter.IsNotDefined {
-		return false
+		return false, nil
 	}
 	if filter.TextMatch != nil {
 		tm := *filter.TextMatch
 		tm.NegateCondition = false
 		matched := false
 		for _, v := range values {
-			if matchTextMatch(tm, v) {
+			m, err := matchTextMatch(tm, v)
+			if err != nil {
+				return false, err
+			}
+			if m {
 				matched = true
 				break
 			}
@@ -332,16 +342,20 @@ func matchParamFilter(filter ParamFilter, field *ical.Prop) bool {
 		if filter.TextMatch.NegateCondition {
 			matched = !matched
 		}
-		return matched
+		return matched, nil
 	}
-	return true
+	return true, nil
 }
 
-func matchTextMatch(txt TextMatch, value string) bool {
-	// TODO: handle text-match collation attribute
-	match := strings.Contains(value, txt.Text)
+func matchTextMatch(txt TextMatch, value string) (bool, error) {
+	valKey, ok := internal.CollateKey(value, txt.Collation, internal.CollationASCIICasemap)
+	if !ok {
+		return false, newPreconditionError(http.StatusForbidden, PreconditionSupportedCollation)
+	}
+	subKey, _ := internal.CollateKey(txt.Text, txt.Collation, internal.CollationASCIICasemap)
+	match := strings.Contains(valKey, subKey)
 	if txt.NegateCondition {
 		match = !match
 	}
-	return match
+	return match, nil
 }

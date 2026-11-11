@@ -2,9 +2,11 @@ package carddav
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/emersion/go-vcard"
+	"github.com/emersion/go-webdav/internal"
 )
 
 func filterProperties(req AddressDataRequest, ao AddressObject) AddressObject {
@@ -260,23 +262,28 @@ func matchTextMatch(txt TextMatch, field *vcard.Field) (bool, error) {
 }
 
 func matchTextMatchValue(txt TextMatch, value string) (bool, error) {
-	// TODO: handle text-match collation attribute
+	valKey, supported := internal.CollateKey(value, txt.Collation, internal.CollationUnicodeCasemap)
+	if !supported {
+		return false, newPreconditionError(http.StatusForbidden, PreconditionSupportedCollation)
+	}
+	subKey, _ := internal.CollateKey(txt.Text, txt.Collation, internal.CollationUnicodeCasemap)
+
 	var ok bool
 	switch txt.MatchType {
 	default:
 		return false, fmt.Errorf("unknown textmatch type %q", txt.MatchType)
 
 	case MatchEquals:
-		ok = txt.Text == value
+		ok = subKey == valKey
 
 	case MatchContains, "":
-		ok = strings.Contains(value, txt.Text)
+		ok = strings.Contains(valKey, subKey)
 
 	case MatchStartsWith:
-		ok = strings.HasPrefix(value, txt.Text)
+		ok = strings.HasPrefix(valKey, subKey)
 
 	case MatchEndsWith:
-		ok = strings.HasSuffix(value, txt.Text)
+		ok = strings.HasSuffix(valKey, subKey)
 	}
 
 	if txt.NegateCondition {
