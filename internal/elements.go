@@ -522,6 +522,20 @@ type CurrentUserPrincipal struct {
 	Unauthenticated *struct{} `xml:"unauthenticated,omitempty"`
 }
 
+// MarshalXML implements xml.Marshaler. The property holds either an href or
+// DAV:unauthenticated, so Href is left out if Unauthenticated is set:
+// omitempty doesn't leave out a struct.
+func (p *CurrentUserPrincipal) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
+	if p.Unauthenticated == nil {
+		type currentUserPrincipal CurrentUserPrincipal // without the methods
+		return e.Encode((*currentUserPrincipal)(p))
+	}
+	return e.Encode(&struct {
+		XMLName         xml.Name `xml:"DAV: current-user-principal"`
+		Unauthenticated struct{} `xml:"unauthenticated"`
+	}{})
+}
+
 // https://tools.ietf.org/html/rfc4918#section-14.19
 type PropertyUpdate struct {
 	XMLName xml.Name `xml:"DAV: propertyupdate"`
