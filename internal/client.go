@@ -649,22 +649,40 @@ func (c *Client) DoAndCheckMultiStatus(req *http.Request) error {
 		return nil
 	}
 
-	var ms MultiStatus
-	if err := xml.NewDecoder(resp.Body).Decode(&ms); err != nil {
-		return err
-	}
-	c.normalizeMultiStatus(&ms, req, resp)
-
+	// Only the errors are kept, not the responses
+	base := responseBase(req, resp)
 	var errs []error
-	for i := range ms.Responses {
-		if err := ms.Responses[i].Err(); err != nil {
+	_, err = decodeMultiStatus(resp.Body, func(r *Response) error {
+		c.normalizeResponse(r, base)
+		if err := r.Err(); err != nil {
 			errs = append(errs, err)
 		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	return errors.Join(errs...)
 }
 
 func (c *Client) PropFind(ctx context.Context, path string, depth Depth, propfind *PropFind) (*MultiStatus, error) {
+	var resps []Response
+	ms, err := c.PropFindFunc(ctx, path, depth, propfind, func(resp *Response) error {
+		resps = append(resps, *resp)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	ms.Responses = resps
+	return ms, nil
+}
+
+// PropFindFunc performs a PROPFIND request, as PropFind does, but calls f
+// with each response as soon as it's decoded (see DoMultiStatusFunc). The
+// returned multistatus holds the rest of the response, without the
+// responses.
+func (c *Client) PropFindFunc(ctx context.Context, path string, depth Depth, propfind *PropFind, f func(resp *Response) error) (*MultiStatus, error) {
 	req, err := c.NewXMLRequest("PROPFIND", path, propfind)
 	if err != nil {
 		return nil, err
@@ -672,7 +690,7 @@ func (c *Client) PropFind(ctx context.Context, path string, depth Depth, propfin
 
 	req.Header.Add("Depth", depth.String())
 
-	return c.DoMultiStatus(req.WithContext(ctx))
+	return c.DoMultiStatusFunc(req.WithContext(ctx), f)
 }
 
 // PropfindFlat performs a PROPFIND request with a zero depth.

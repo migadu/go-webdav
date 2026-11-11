@@ -182,20 +182,23 @@ func (c *Client) ReadDir(ctx context.Context, name string, recursive bool) ([]Fi
 		depth = internal.DepthInfinity
 	}
 
-	ms, err := c.ic.PropFind(ctx, name, depth, fileInfoPropFind)
-	if err != nil {
-		return nil, err
-	}
-
-	l := make([]FileInfo, 0, len(ms.Responses))
-	errs := make([]error, 0, len(ms.Responses))
-	for _, resp := range ms.Responses {
-		fi, err := fileInfoFromResponse(&resp)
+	// Each response is converted as soon as it's decoded: only the FileInfo
+	// is kept
+	l := []FileInfo{}
+	var errs []error
+	_, err := c.ic.PropFindFunc(ctx, name, depth, fileInfoPropFind, func(resp *internal.Response) error {
+		fi, err := fileInfoFromResponse(resp)
 		if err != nil {
 			errs = append(errs, err)
 		} else {
 			l = append(l, *fi)
 		}
+		return nil
+	})
+	if err != nil {
+		// Not the files received so far: they may look like the whole
+		// listing
+		return nil, err
 	}
 
 	return l, errors.Join(errs...)

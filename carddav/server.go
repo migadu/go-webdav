@@ -285,6 +285,17 @@ func decodeAddressDataProp(prop *internal.Prop) (*AddressDataRequest, error) {
 }
 
 func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *addressbookQuery) error {
+	propfind := internal.PropFind{
+		Prop:     query.Prop,
+		AllProp:  query.AllProp,
+		PropName: query.PropName,
+	}
+	// Check it before the backend is queried: otherwise the request fails
+	// only if an object matches
+	if err := internal.CheckPropFind(&propfind); err != nil {
+		return err
+	}
+
 	var q AddressBookQuery
 	if query.Prop != nil {
 		req, err := decodeAddressDataProp(query.Prop)
@@ -321,11 +332,6 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *add
 	b := backend{
 		Backend: h.Backend,
 		Prefix:  strings.TrimSuffix(h.Prefix, "/"),
-	}
-	propfind := internal.PropFind{
-		Prop:     query.Prop,
-		AllProp:  query.AllProp,
-		PropName: query.PropName,
 	}
 	return internal.StreamMultiStatus(w, r, func(mw *internal.MultiStatusWriter) error {
 		for i := range aos {

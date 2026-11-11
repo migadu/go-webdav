@@ -464,6 +464,17 @@ func decodeCalendarDataProp(prop *internal.Prop) (*CalendarCompRequest, error) {
 }
 
 func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *calendarQuery) error {
+	propfind := internal.PropFind{
+		Prop:     query.Prop,
+		AllProp:  query.AllProp,
+		PropName: query.PropName,
+	}
+	// Check it before the backend is queried: otherwise the request fails
+	// only if an object matches
+	if err := internal.CheckPropFind(&propfind); err != nil {
+		return err
+	}
+
 	var q CalendarQuery
 	if query.Prop != nil {
 		req, err := decodeCalendarDataProp(query.Prop)
@@ -491,11 +502,6 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *cal
 	b := backend{
 		Backend: h.Backend,
 		Prefix:  strings.TrimSuffix(h.Prefix, "/"),
-	}
-	propfind := internal.PropFind{
-		Prop:     query.Prop,
-		AllProp:  query.AllProp,
-		PropName: query.PropName,
 	}
 	return internal.StreamMultiStatus(w, r, func(mw *internal.MultiStatusWriter) error {
 		for i := range cos {
