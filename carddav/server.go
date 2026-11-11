@@ -216,6 +216,17 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *add
 	return internal.ServeMultiStatus(w, ms)
 }
 
+// AddressObjectsBackend is an optional interface a Backend can implement to
+// fetch the address objects of a addressbook-multiget REPORT in a single call,
+// rather than calling GetAddressObject for each of them.
+type AddressObjectsBackend interface {
+	// GetAddressObjects returns the address objects found at paths, in any order.
+	// The Path of each must be the path it was requested by: paths without
+	// an object are reported as 404 Not Found. An error fails the whole
+	// request.
+	GetAddressObjects(ctx context.Context, paths []string, req *AddressDataRequest) ([]AddressObject, error)
+}
+
 func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, multiget *addressbookMultiget) error {
 	var dataReq AddressDataRequest
 	if multiget.Prop != nil {
@@ -230,9 +241,33 @@ func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, mul
 		dataReq = *decoded
 	}
 
+	var objects map[string]*AddressObject
+	if mb, ok := h.Backend.(AddressObjectsBackend); ok {
+		paths := make([]string, len(multiget.Hrefs))
+		for i, href := range multiget.Hrefs {
+			paths[i] = href.Path
+		}
+		l, err := mb.GetAddressObjects(ctx, paths, &dataReq)
+		if err != nil {
+			return err
+		}
+		objects = make(map[string]*AddressObject, len(l))
+		for i := range l {
+			objects[l[i].Path] = &l[i]
+		}
+	}
+
 	var resps []internal.Response
 	for _, href := range multiget.Hrefs {
-		ao, err := h.Backend.GetAddressObject(ctx, href.Path, &dataReq)
+		var ao *AddressObject
+		var err error
+		if objects != nil {
+			if ao = objects[href.Path]; ao == nil {
+				err = internal.HTTPErrorf(http.StatusNotFound, "carddav: address object not found")
+			}
+		} else {
+			ao, err = h.Backend.GetAddressObject(ctx, href.Path, &dataReq)
+		}
 		if err != nil {
 			resp := internal.NewErrorResponse(href.Path, err)
 			resps = append(resps, *resp)

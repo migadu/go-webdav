@@ -257,6 +257,17 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *cal
 	return internal.ServeMultiStatus(w, ms)
 }
 
+// CalendarObjectsBackend is an optional interface a Backend can implement to
+// fetch the calendar objects of a calendar-multiget REPORT in a single call,
+// rather than calling GetCalendarObject for each of them.
+type CalendarObjectsBackend interface {
+	// GetCalendarObjects returns the calendar objects found at paths, in any order.
+	// The Path of each must be the path it was requested by: paths without
+	// an object are reported as 404 Not Found. An error fails the whole
+	// request.
+	GetCalendarObjects(ctx context.Context, paths []string, req *CalendarCompRequest) ([]CalendarObject, error)
+}
+
 func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, multiget *calendarMultiget) error {
 	var dataReq CalendarCompRequest
 	if multiget.Prop != nil {
@@ -271,9 +282,33 @@ func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, mul
 		dataReq = *decoded
 	}
 
+	var objects map[string]*CalendarObject
+	if mb, ok := h.Backend.(CalendarObjectsBackend); ok {
+		paths := make([]string, len(multiget.Hrefs))
+		for i, href := range multiget.Hrefs {
+			paths[i] = href.Path
+		}
+		l, err := mb.GetCalendarObjects(ctx, paths, &dataReq)
+		if err != nil {
+			return err
+		}
+		objects = make(map[string]*CalendarObject, len(l))
+		for i := range l {
+			objects[l[i].Path] = &l[i]
+		}
+	}
+
 	var resps []internal.Response
 	for _, href := range multiget.Hrefs {
-		co, err := h.Backend.GetCalendarObject(ctx, href.Path, &dataReq)
+		var co *CalendarObject
+		var err error
+		if objects != nil {
+			if co = objects[href.Path]; co == nil {
+				err = internal.HTTPErrorf(http.StatusNotFound, "caldav: calendar object not found")
+			}
+		} else {
+			co, err = h.Backend.GetCalendarObject(ctx, href.Path, &dataReq)
+		}
 		if err != nil {
 			resp := internal.NewErrorResponse(href.Path, err)
 			resps = append(resps, *resp)
