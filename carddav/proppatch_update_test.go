@@ -103,3 +103,49 @@ func TestPropPatchUpdateAddressBookAtomic(t *testing.T) {
 		t.Errorf("address book updated with %+v, want no update", backend.updates)
 	}
 }
+
+// RFC 4918 section 9.2: instructions are processed in document order, so the
+// last one naming a property wins.
+func TestPropPatchUpdateAddressBookOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		instructions string
+		want         string
+	}{
+		{
+			name: "set then remove",
+			instructions: `<D:set><D:prop><D:displayname>Friends</D:displayname></D:prop></D:set>
+  <D:remove><D:prop><D:displayname/></D:prop></D:remove>`,
+			want: "",
+		},
+		{
+			name: "remove then set",
+			instructions: `<D:remove><D:prop><D:displayname/></D:prop></D:remove>
+  <D:set><D:prop><D:displayname>Friends</D:displayname></D:prop></D:set>`,
+			want: "Friends",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := &updateBackend{}
+			h := &Handler{Backend: backend}
+
+			codes := propPatchAddressBook(t, h, `<?xml version="1.0" encoding="UTF-8"?>
+<D:propertyupdate xmlns:D="DAV:">
+  `+tc.instructions+`
+</D:propertyupdate>`)
+
+			want := map[xml.Name]int{internal.DisplayNameName: http.StatusOK}
+			if !reflect.DeepEqual(codes, want) {
+				t.Errorf("propstat codes = %v, want %v", codes, want)
+			}
+			if len(backend.updates) != 1 || backend.updates[0].Description != nil {
+				t.Fatalf("updates = %+v, want a single name update", backend.updates)
+			}
+			if name := backend.updates[0].Name; name == nil {
+				t.Errorf("name not updated, want %q", tc.want)
+			} else if *name != tc.want {
+				t.Errorf("name updated to %q, want %q", *name, tc.want)
+			}
+		})
+	}
+}

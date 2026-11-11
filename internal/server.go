@@ -392,11 +392,15 @@ type PropPatchFunc func(raw *RawXMLValue, remove bool) error
 // PatchProps returns the response to a PROPPATCH request for path, which is
 // executed in full or not at all (RFC 4918 section 9.2).
 //
-// It calls f for each property of update, the removed ones first. If f fails
-// for any of them, the response reports the status of each error, and 424
-// Failed Dependency for the other properties. Otherwise it calls commit to
-// apply the changes and the response reports 200 OK for every property; an
-// error returned by commit fails the whole request.
+// It calls f for each property of update in document order, so that a later
+// instruction for a property overrides an earlier one; for an update without
+// Instructions, built by hand rather than decoded, the removed properties come
+// first. If f fails for any of them, the response reports the status of each
+// error, and 424 Failed Dependency for the other properties. Otherwise it
+// calls commit to apply the changes and the response reports 200 OK for every
+// property; an error returned by commit fails the whole request. A property
+// named by several instructions is reported once, with the status of the
+// first one which failed.
 func PatchProps(path string, update *PropertyUpdate, f PropPatchFunc, commit func() error) (*Response, error) {
 	type instruction struct {
 		name   xml.Name
@@ -411,30 +415,44 @@ func PatchProps(path string, update *PropertyUpdate, f PropPatchFunc, commit fun
 			}
 		}
 	}
-	for i := range update.Remove {
-		add(&update.Remove[i].Prop, true)
-	}
-	for i := range update.Set {
-		add(&update.Set[i].Prop, false)
+	if len(update.Instructions) > 0 {
+		for i := range update.Instructions {
+			add(&update.Instructions[i].Prop, update.Instructions[i].Remove)
+		}
+	} else {
+		for i := range update.Remove {
+			add(&update.Remove[i].Prop, true)
+		}
+		for i := range update.Set {
+			add(&update.Set[i].Prop, false)
+		}
 	}
 	if len(instructions) == 0 {
 		return nil, HTTPErrorf(http.StatusBadRequest, "webdav: request missing properties to update")
 	}
 
-	codes := make([]int, len(instructions))
+	var names []xml.Name
+	codes := make(map[xml.Name]int)
 	failed := false
-	for i, ins := range instructions {
-		codes[i] = http.StatusOK
+	for _, ins := range instructions {
+		code := http.StatusOK
 		if err := f(ins.raw, ins.remove); err != nil {
-			codes[i] = HTTPErrorFromError(err).Code
+			code = HTTPErrorFromError(err).Code
 			failed = true
+		}
+		prev, seen := codes[ins.name]
+		if !seen {
+			names = append(names, ins.name)
+		}
+		if !seen || prev == http.StatusOK {
+			codes[ins.name] = code
 		}
 	}
 
 	if failed {
-		for i := range codes {
-			if codes[i] == http.StatusOK {
-				codes[i] = http.StatusFailedDependency
+		for name, code := range codes {
+			if code == http.StatusOK {
+				codes[name] = http.StatusFailedDependency
 			}
 		}
 	} else if err := commit(); err != nil {
@@ -442,8 +460,8 @@ func PatchProps(path string, update *PropertyUpdate, f PropPatchFunc, commit fun
 	}
 
 	resp := &Response{Hrefs: []Href{{Path: path}}}
-	for i, ins := range instructions {
-		if err := resp.EncodeProp(codes[i], NewRawXMLElement(ins.name, nil, nil)); err != nil {
+	for _, name := range names {
+		if err := resp.EncodeProp(codes[name], NewRawXMLElement(name, nil, nil)); err != nil {
 			return nil, err
 		}
 	}

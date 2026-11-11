@@ -470,6 +470,60 @@ type PropertyUpdate struct {
 	XMLName xml.Name `xml:"DAV: propertyupdate"`
 	Remove  []Remove `xml:"remove"`
 	Set     []Set    `xml:"set"`
+
+	// Instructions lists the remove and set instructions in document order,
+	// which RFC 4918 section 9.2 requires servers to process them in.
+	// Decoding fills it along with Remove and Set.
+	Instructions []PropertyUpdateInstruction `xml:"-"`
+}
+
+// PropertyUpdateInstruction is a remove or set instruction of a
+// PropertyUpdate.
+type PropertyUpdateInstruction struct {
+	Remove bool
+	Prop   Prop
+}
+
+// UnmarshalXML implements xml.Unmarshaler.
+func (pu *PropertyUpdate) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if start.Name != (xml.Name{Namespace, "propertyupdate"}) {
+		return fmt.Errorf("webdav: expected propertyupdate element, got %q %q", start.Name.Space, start.Name.Local)
+	}
+	*pu = PropertyUpdate{XMLName: start.Name}
+
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch tok := tok.(type) {
+		case xml.StartElement:
+			// Match the local name only, as the struct tags do: decoding into
+			// Remove or Set rejects another namespace
+			switch tok.Name.Local {
+			case "remove":
+				var remove Remove
+				if err := d.DecodeElement(&remove, &tok); err != nil {
+					return err
+				}
+				pu.Remove = append(pu.Remove, remove)
+				pu.Instructions = append(pu.Instructions, PropertyUpdateInstruction{Remove: true, Prop: remove.Prop})
+			case "set":
+				var set Set
+				if err := d.DecodeElement(&set, &tok); err != nil {
+					return err
+				}
+				pu.Set = append(pu.Set, set)
+				pu.Instructions = append(pu.Instructions, PropertyUpdateInstruction{Prop: set.Prop})
+			default:
+				if err := d.Skip(); err != nil {
+					return err
+				}
+			}
+		case xml.EndElement:
+			return nil
+		}
+	}
 }
 
 // https://tools.ietf.org/html/rfc4918#section-14.23
