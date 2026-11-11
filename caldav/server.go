@@ -750,7 +750,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 
 	switch resType {
 	case resourceTypeRoot:
-		resp, err := b.propFindRoot(ctx, propfind)
+		resp, err := b.propFindRoot(ctx, r.URL.Path, propfind)
 		if err != nil {
 			return err
 		}
@@ -760,8 +760,8 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		if err != nil {
 			return err
 		}
-		if r.URL.Path != principalPath {
-			return nil
+		if principalPath == "" || !internal.SamePath(r.URL.Path, principalPath) {
+			return internal.HTTPErrorf(http.StatusNotFound, "caldav: principal not found")
 		}
 		resp, err := b.propFindUserPrincipal(ctx, propfind)
 		if err != nil {
@@ -790,8 +790,8 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		if err != nil {
 			return err
 		}
-		if r.URL.Path != homeSetPath {
-			return nil
+		if homeSetPath == "" || !internal.SamePath(r.URL.Path, homeSetPath) {
+			return internal.HTTPErrorf(http.StatusNotFound, "caldav: calendar home set not found")
 		}
 		resp, err := b.propFindHomeSet(ctx, propfind)
 		if err != nil {
@@ -830,8 +830,8 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		if err != nil {
 			return err
 		}
-		if inbox == nil {
-			return nil
+		if inbox == nil || inbox.Path == "" || !internal.SamePath(r.URL.Path, inbox.Path) {
+			return internal.HTTPErrorf(http.StatusNotFound, "caldav: scheduling Inbox not found")
 		}
 		resp, err := b.propFindInbox(ctx, propfind, inbox)
 		if err != nil {
@@ -842,10 +842,10 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		}
 		return b.propFindAllCalendarObjects(ctx, mw, propfind, inbox.Path, resp)
 	}
-	return nil
+	return internal.HTTPErrorf(http.StatusNotFound, "caldav: resource not found")
 }
 
-func (b *backend) propFindRoot(ctx context.Context, propfind *internal.PropFind) (*internal.Response, error) {
+func (b *backend) propFindRoot(ctx context.Context, rootPath string, propfind *internal.PropFind) (*internal.Response, error) {
 	principalPath, err := b.Backend.CurrentUserPrincipal(ctx)
 	if err != nil {
 		return nil, err
@@ -857,7 +857,7 @@ func (b *backend) propFindRoot(ctx context.Context, propfind *internal.PropFind)
 		}),
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName)),
 	}
-	return internal.NewPropFindResponse(principalPath, propfind, props)
+	return internal.NewPropFindResponse(rootPath, propfind, props)
 }
 
 func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.PropFind) (*internal.Response, error) {
@@ -1319,12 +1319,14 @@ func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (b *backend) Delete(r *http.Request) error {
-	// Clients can't delete the Inbox, only the scheduling messages in it (RFC
-	// 6638 section 2)
-	if b.resourceTypeAtPath(r.Context(), r.URL.Path) == resourceTypeScheduleInbox {
-		return internal.HTTPErrorf(http.StatusForbidden, "caldav: the scheduling Inbox can't be deleted")
+	// Only calendars and calendar objects (including scheduling messages in the
+	// Inbox, RFC 6638 section 2; clients can't delete the Inbox itself) can be
+	// deleted.
+	switch b.resourceTypeAtPath(r.Context(), r.URL.Path) {
+	case resourceTypeCalendar, resourceTypeCalendarObject:
+		return b.Backend.DeleteCalendarObject(r.Context(), r.URL.Path)
 	}
-	return b.Backend.DeleteCalendarObject(r.Context(), r.URL.Path)
+	return internal.HTTPErrorf(http.StatusForbidden, "caldav: cannot delete resource at given location")
 }
 
 func (b *backend) Mkcol(r *http.Request) error {
