@@ -57,9 +57,53 @@ func DecodeXMLRequest(r *http.Request, v interface{}) error {
 	return nil
 }
 
+// IsRequestBodyEmpty reports whether the body of r is empty, or missing.
+//
+// It finds out by reading the first byte of the body, since a read of zero
+// bytes tells nothing: http.MaxBytesReader, for one, answers it without
+// reading anything. It then replaces r.Body with a body which returns that
+// byte again, followed by the rest of the original body, so that the whole
+// body can still be read from r.Body. A body which fails to read isn't
+// empty: reading it from r.Body fails with the same error.
 func IsRequestBodyEmpty(r *http.Request) bool {
-	_, err := r.Body.Read(nil)
-	return err == io.EOF
+	switch body := r.Body.(type) {
+	case nil:
+		return true
+	case *peekedBody:
+		// Already peeked at
+		return false
+	default:
+		if body == http.NoBody {
+			return true
+		}
+	}
+
+	var b [1]byte
+	n, err := io.ReadFull(r.Body, b[:])
+	if err == io.EOF {
+		return true
+	}
+	r.Body = &peekedBody{ReadCloser: r.Body, b: b[:n], err: err}
+	return false
+}
+
+// peekedBody is a request body whose first byte, or the error reading it, was
+// read by IsRequestBodyEmpty, and is returned again.
+type peekedBody struct {
+	io.ReadCloser // original body
+	b             []byte
+	err           error
+}
+
+func (pb *peekedBody) Read(p []byte) (int, error) {
+	if len(pb.b) > 0 {
+		n := copy(p, pb.b)
+		pb.b = pb.b[n:]
+		return n, nil
+	} else if pb.err != nil {
+		return 0, pb.err
+	}
+	return pb.ReadCloser.Read(p)
 }
 
 // acceptedContentCodings lists the request content codings supported by
