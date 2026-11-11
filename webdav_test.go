@@ -73,6 +73,47 @@ func TestConditionalMatch(t *testing.T) {
 	}
 }
 
+func TestNewConditionalMatch(t *testing.T) {
+	if val := NewConditionalMatch(); val.IsSet() {
+		t.Errorf("NewConditionalMatch() = %q, want an unset value", val)
+	}
+
+	val := NewConditionalMatch("a", `W/"b"`, "c,d")
+	if want := ConditionalMatch(`"a", W/"b", "c,d"`); val != want {
+		t.Fatalf("NewConditionalMatch() = %q, want %q", val, want)
+	}
+	for _, tc := range []struct {
+		etag   string
+		strong bool
+		weak   bool
+	}{
+		{etag: "a", strong: true, weak: true},
+		{etag: `W/"a"`, weak: true},
+		{etag: "b", weak: true},
+		{etag: `W/"b"`, weak: true},
+		{etag: "c,d", strong: true, weak: true},
+		{etag: "c"},
+		{etag: "x"},
+	} {
+		if strong, err := val.MatchETag(tc.etag); err != nil {
+			t.Errorf("%s: MatchETag(%q) = %v", val, tc.etag, err)
+		} else if strong != tc.strong {
+			t.Errorf("%s: MatchETag(%q) = %v, want %v", val, tc.etag, strong, tc.strong)
+		}
+		if weak, err := val.MatchETagWeak(tc.etag); err != nil {
+			t.Errorf("%s: MatchETagWeak(%q) = %v", val, tc.etag, err)
+		} else if weak != tc.weak {
+			t.Errorf("%s: MatchETagWeak(%q) = %v, want %v", val, tc.etag, weak, tc.weak)
+		}
+	}
+
+	if etag, err := NewConditionalMatch(`W/"b"`).ETag(); err != nil {
+		t.Errorf("ETag() = %v", err)
+	} else if etag != `W/"b"` {
+		t.Errorf("ETag() = %q, want %q", etag, `W/"b"`)
+	}
+}
+
 func TestPutConditional(t *testing.T) {
 	h := Handler{FileSystem: LocalFileSystem(t.TempDir())}
 	put := func(header, value string) *httptest.ResponseRecorder {

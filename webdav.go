@@ -45,6 +45,19 @@ type MoveOptions struct {
 // comma-separated list of entity-tags.
 type ConditionalMatch string
 
+// NewConditionalMatch builds the value of an If-Match or If-None-Match header
+// field matching the given entity-tags, as found in FileInfo.ETag,
+// caldav.CalendarObject.ETag and carddav.AddressObject.ETag: a bare strong
+// opaque-tag, or a weak entity-tag in the W/"..." form. With no entity-tags,
+// the value is empty, that is, not set.
+func NewConditionalMatch(etags ...string) ConditionalMatch {
+	l := make([]string, len(etags))
+	for i, etag := range etags {
+		l[i] = internal.ETag(etag).String()
+	}
+	return ConditionalMatch(strings.Join(l, ", "))
+}
+
 func (val ConditionalMatch) IsSet() bool {
 	return val != ""
 }
