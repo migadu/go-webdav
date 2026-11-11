@@ -101,6 +101,14 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
 	return internal.HTTPErrorf(http.StatusBadRequest, "caldav: expected calendar-query or calendar-multiget element in REPORT request")
 }
 
+func decodeTextMatch(el *textMatch) *TextMatch {
+	// TODO: handle the collation attribute
+	return &TextMatch{
+		Text:            el.Text,
+		NegateCondition: bool(el.NegateCondition),
+	}
+}
+
 func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {
 	pf := &ParamFilter{Name: el.Name}
 	if el.IsNotDefined != nil {
@@ -110,7 +118,7 @@ func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {
 		pf.IsNotDefined = true
 	}
 	if el.TextMatch != nil {
-		pf.TextMatch = &TextMatch{Text: el.TextMatch.Text}
+		pf.TextMatch = decodeTextMatch(el.TextMatch)
 	}
 	return pf, nil
 }
@@ -124,7 +132,7 @@ func decodePropFilter(el *propFilter) (*PropFilter, error) {
 		pf.IsNotDefined = true
 	}
 	if el.TextMatch != nil {
-		pf.TextMatch = &TextMatch{Text: el.TextMatch.Text}
+		pf.TextMatch = decodeTextMatch(el.TextMatch)
 	}
 	if el.TimeRange != nil {
 		pf.Start = time.Time(el.TimeRange.Start)
