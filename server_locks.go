@@ -3,6 +3,7 @@ package webdav
 import (
 	"encoding/xml"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -192,6 +193,9 @@ func parentTarget(p string) lockTarget {
 
 // missingLocks returns the roots of the locks protecting the targets whose
 // tokens the request didn't submit.
+//
+// A resource locked by several shared locks can be modified with the token
+// of any of them, so their roots are only returned if none was submitted.
 func (b *backend) missingLocks(r *http.Request, targets ...lockTarget) ([]string, error) {
 	var missing []string
 	seen := make(map[string]bool)
@@ -200,16 +204,41 @@ func (b *backend) missingLocks(r *http.Request, targets ...lockTarget) ([]string
 		if err != nil {
 			return nil, err
 		}
-		for _, lock := range locks {
-			if b.submitted[lock.Token] || seen[lock.Token] {
+
+		// The resources whose locks are needed: the target, and the
+		// locked members of the target
+		paths := []string{t.path}
+		if t.members {
+			for _, lock := range locks {
+				if isPathBelow(lock.Root, t.path) {
+					paths = append(paths, lock.Root)
+				}
+			}
+		}
+
+		for _, p := range paths {
+			var needed []*Lock
+			submitted := false
+			for i := range locks {
+				if locks[i].inScope(p) {
+					needed = append(needed, &locks[i])
+					submitted = submitted || b.submitted[locks[i].Token]
+				}
+			}
+			if submitted {
 				continue
 			}
-			seen[lock.Token] = true
-			href := lock.Root
-			if t.parent || isPathBelow(t.path, lock.Root) || (t.collection && lock.Root == t.path) {
-				href = collectionHref(lock.Root)
+			for _, lock := range needed {
+				if seen[lock.Token] {
+					continue
+				}
+				seen[lock.Token] = true
+				href := lock.Root
+				if t.parent || isPathBelow(t.path, lock.Root) || (t.collection && lock.Root == t.path) {
+					href = collectionHref(lock.Root)
+				}
+				missing = append(missing, href)
 			}
-			missing = append(missing, href)
 		}
 	}
 	return missing, nil
@@ -395,19 +424,52 @@ func (pl *propFindLocks) discovery(fi *FileInfo) (*internal.LockDiscovery, error
 	return discovery, nil
 }
 
+// lockConflictError returns the error of a LOCK request whose lock conflicts
+// with existing locks (RFC 4918 section 9.10.6). If some of these locks are
+// rooted at members of the Request-URI, it lists them, failing the
+// Request-URI with 424 Failed Dependency, to be served in a multi-status
+// response (section 9.10.9).
+func (b *backend) lockConflictError(r *http.Request, lock *Lock) error {
+	locks, err := b.locks.Locks(r.Context(), lock.Root, lock.Recursive)
+	if err != nil {
+		return err
+	}
+	var hrefs, members []string
+	for i := range locks {
+		if !lock.conflicts(&locks[i]) {
+			continue
+		}
+		switch root := locks[i].Root; {
+		case isPathBelow(lock.Root, root):
+			hrefs = append(hrefs, collectionHref(root))
+		case root == lock.Root:
+			hrefs = append(hrefs, r.URL.Path)
+		default:
+			members = append(members, root)
+		}
+	}
+	if len(members) > 0 && len(hrefs) == 0 {
+		errs := make([]error, 0, len(members)+1)
+		for _, member := range members {
+			errs = append(errs, NewHrefError(member, newPreconditionError(http.StatusLocked, "no-conflicting-lock")))
+		}
+		errs = append(errs, NewHrefError(r.URL.Path, &internal.HTTPError{Code: http.StatusFailedDependency}))
+		return errors.Join(errs...)
+	}
+	return newPreconditionError(http.StatusLocked, "no-conflicting-lock", append(hrefs, members...)...)
+}
+
 // Lock creates or refreshes a lock (RFC 4918 section 9.10).
 func (b lockingBackend) Lock(r *http.Request, req *internal.LockRequest) (string, *internal.LockDiscovery, bool, error) {
-	// TODO: locking unmapped URLs
+	p := path.Clean(r.URL.Path)
 	fi, err := b.FileSystem.Stat(r.Context(), r.URL.Path)
-	if err != nil {
+	if internal.IsNotFound(err) {
+		fi = nil
+	} else if err != nil {
 		return "", nil, false, err
 	}
-	if fi.IsDir {
-		return "", nil, false, internal.HTTPErrorf(http.StatusBadRequest, "webdav: locking collections is not supported")
-	}
-	p := path.Clean(r.URL.Path)
+	isDir := fi != nil && fi.IsDir
 
-	var lock Lock
 	if req.Info == nil {
 		// RFC 4918 section 9.10.2
 		if found, err := b.findLock(r, req.RefreshToken); err != nil {
@@ -415,36 +477,70 @@ func (b lockingBackend) Lock(r *http.Request, req *internal.LockRequest) (string
 		} else if found == nil {
 			return "", nil, false, newPreconditionError(http.StatusPreconditionFailed, "lock-token-matches-request-uri")
 		}
-		lock, err = b.locks.Refresh(r.Context(), req.RefreshToken, req.Timeout.Duration)
+		lock, err := b.locks.Refresh(r.Context(), req.RefreshToken, req.Timeout.Duration)
 		if errors.Is(err, ErrNoSuchLock) {
 			return "", nil, false, newPreconditionError(http.StatusPreconditionFailed, "lock-token-matches-request-uri")
 		} else if err != nil {
 			return "", nil, false, err
 		}
-	} else {
-		lock = Lock{
-			Root:      p,
-			Recursive: req.Depth == internal.DepthInfinity,
-			Shared:    req.Info.LockScope.Shared != nil,
-			Timeout:   req.Timeout.Duration,
-		}
-		if req.Info.Owner != nil {
-			lock.Owner, err = internal.MarshalRawXML(req.Info.Owner)
-			if err != nil {
-				return "", nil, false, &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
-			}
-		}
+		discovery, err := b.lockDiscovery(r, p, isDir, &lock)
+		return lock.Token, discovery, false, err
+	}
 
-		lock, err = b.locks.Create(r.Context(), lock)
-		if errors.Is(err, ErrLocked) {
-			return "", nil, false, newPreconditionError(http.StatusLocked, "no-conflicting-lock")
-		} else if err != nil {
+	// Locking an unmapped URL creates a resource in the parent collection
+	// (RFC 4918 section 7.3)
+	if fi == nil {
+		if err := b.checkLocks(r, parentTarget(p)); err != nil {
 			return "", nil, false, err
 		}
 	}
 
-	discovery, err := b.lockDiscovery(r, p, fi.IsDir, &lock)
-	return lock.Token, discovery, false, err
+	lock := Lock{
+		Root: p,
+		// "Depth: infinity" only makes a difference for collections, but is
+		// reported as requested
+		Recursive: req.Depth == internal.DepthInfinity,
+		Shared:    req.Info.LockScope.Shared != nil,
+		Timeout:   req.Timeout.Duration,
+	}
+	if req.Info.Owner != nil {
+		lock.Owner, err = internal.MarshalRawXML(req.Info.Owner)
+		if err != nil {
+			return "", nil, false, &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
+		}
+	}
+	granted, err := b.locks.Create(r.Context(), lock)
+	if errors.Is(err, ErrLocked) {
+		return "", nil, false, b.lockConflictError(r, &lock)
+	} else if err != nil {
+		return "", nil, false, err
+	}
+	lock = granted
+
+	created := false
+	if fi == nil {
+		// The resource is created once the lock is held, so that no one
+		// else can write it in between. It's empty: the lock owner will
+		// PUT its contents.
+		opts := CreateOptions{IfNoneMatch: "*"}
+		_, _, err := b.FileSystem.Create(r.Context(), r.URL.Path, io.NopCloser(strings.NewReader("")), &opts)
+		if err != nil {
+			b.locks.Unlock(r.Context(), lock.Token)
+			var httpErr *internal.HTTPError
+			if internal.IsNotFound(err) {
+				// The parent collection doesn't exist
+				return "", nil, false, &internal.HTTPError{Code: http.StatusConflict, Err: err}
+			} else if errors.As(err, &httpErr) && httpErr.Code == http.StatusPreconditionFailed {
+				// Created concurrently
+				return "", nil, false, &internal.HTTPError{Code: http.StatusConflict, Err: err}
+			}
+			return "", nil, false, err
+		}
+		created = true
+	}
+
+	discovery, err := b.lockDiscovery(r, p, isDir, &lock)
+	return lock.Token, discovery, created, err
 }
 
 // Unlock removes a lock whose scope includes the Request-URI (RFC 4918

@@ -389,7 +389,9 @@ type LockBackend interface {
 	Backend
 	// Lock creates or refreshes a lock on the resource at the Request-URI.
 	// It returns the token of the lock, the lockdiscovery property of the
-	// resource, and whether the resource was created.
+	// resource, and whether the resource was created. Members of a
+	// collection preventing a lock from being granted can be reported with
+	// *HrefErrors, which Handler serves in a 207 Multi-Status response.
 	Lock(r *http.Request, req *LockRequest) (token string, discovery *LockDiscovery, created bool, err error)
 	// Unlock removes the lock with the given token.
 	Unlock(r *http.Request, token string) error
@@ -858,9 +860,6 @@ func (h *Handler) handleLock(w http.ResponseWriter, r *http.Request, b LockBacke
 		if (info.LockScope.Exclusive == nil) == (info.LockScope.Shared == nil) {
 			return HTTPErrorf(http.StatusBadRequest, "webdav: the lock scope must be either exclusive or shared")
 		}
-		if info.LockScope.Shared != nil {
-			return HTTPErrorf(http.StatusBadRequest, "webdav: only exclusive locks are supported")
-		}
 		if info.LockType.Write == nil {
 			return HTTPErrorf(http.StatusBadRequest, "webdav: only write locks are supported")
 		}
@@ -889,7 +888,10 @@ func (h *Handler) handleLock(w http.ResponseWriter, r *http.Request, b LockBacke
 
 	token, discovery, created, err := b.Lock(r, &req)
 	if err != nil {
-		return err
+		// A lock which can't be granted because of members of the
+		// collection is refused with a multi-status response (RFC 4918
+		// section 9.10.9)
+		return serveMemberErrors(w, err, r.URL.Path)
 	}
 	prop, err := EncodeProp(discovery)
 	if err != nil {

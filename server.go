@@ -167,6 +167,10 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 	fi, err := b.FileSystem.Stat(r.Context(), r.URL.Path)
 	if internal.IsNotFound(err) {
 		allow = []string{http.MethodOptions, http.MethodPut, "MKCOL"}
+		if b.locks != nil {
+			// Locking an unmapped URL creates a resource
+			allow = append(allow, "LOCK")
+		}
 		return caps, allow, nil
 	} else if err != nil {
 		return nil, nil, err
@@ -292,10 +296,16 @@ func (b *backend) propFindFile(ctx context.Context, propfind *internal.PropFind,
 
 	if locks != nil {
 		props[internal.SupportedLockName] = internal.PropFindValue(&internal.SupportedLock{
-			LockEntries: []internal.LockEntry{{
-				LockScope: internal.LockScope{Exclusive: &struct{}{}},
-				LockType:  internal.LockType{Write: &struct{}{}},
-			}},
+			LockEntries: []internal.LockEntry{
+				{
+					LockScope: internal.LockScope{Exclusive: &struct{}{}},
+					LockType:  internal.LockType{Write: &struct{}{}},
+				},
+				{
+					LockScope: internal.LockScope{Shared: &struct{}{}},
+					LockType:  internal.LockType{Write: &struct{}{}},
+				},
+			},
 		})
 		props[internal.LockDiscoveryName] = func(*internal.RawXMLValue) (interface{}, error) {
 			return locks.discovery(fi)
