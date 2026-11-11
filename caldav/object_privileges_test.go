@@ -14,7 +14,7 @@ func TestPropFindCalendarObjectPrivileges(t *testing.T) {
 		readOnly bool
 		want     string
 	}{
-		{false, `<current-user-privilege-set xmlns="DAV:"><privilege xmlns="DAV:"><read xmlns="DAV:"></read><write xmlns="DAV:"></write></privilege></current-user-privilege-set>`},
+		{false, `<current-user-privilege-set xmlns="DAV:"><privilege xmlns="DAV:"><read xmlns="DAV:"></read></privilege><privilege xmlns="DAV:"><write xmlns="DAV:"></write></privilege><privilege xmlns="DAV:"><write-properties xmlns="DAV:"></write-properties></privilege><privilege xmlns="DAV:"><write-content xmlns="DAV:"></write-content></privilege><privilege xmlns="DAV:"><bind xmlns="DAV:"></bind></privilege><privilege xmlns="DAV:"><unbind xmlns="DAV:"></unbind></privilege></current-user-privilege-set>`},
 		{true, `<current-user-privilege-set xmlns="DAV:"><privilege xmlns="DAV:"><read xmlns="DAV:"></read></privilege></current-user-privilege-set>`},
 	} {
 		co := newDataRequestTestObject(calPath + "1.ics")

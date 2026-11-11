@@ -210,7 +210,8 @@ type testPrivilegeSet struct {
 }
 
 // RFC 3744 section 5.4: each privilege of DAV:current-user-privilege-set is a
-// non-abstract privilege of DAV:supported-privilege-set.
+// non-abstract privilege of DAV:supported-privilege-set, in its own
+// DAV:privilege element.
 func TestCurrentUserPrivilegesSupported(t *testing.T) {
 	const body = `<?xml version="1.0" encoding="UTF-8"?>
 <D:propfind xmlns:D="DAV:">
@@ -236,6 +237,9 @@ func TestCurrentUserPrivilegesSupported(t *testing.T) {
 				t.Fatalf("PROPFIND %v: current-user-privilege-set: %v", p, err)
 			}
 			for _, priv := range current.Privileges {
+				if len(priv.Raw) != 1 {
+					t.Errorf("readOnly=%v: PROPFIND %v: DAV:privilege element holds %d privileges, want one", readOnly, p, len(priv.Raw))
+				}
 				for _, raw := range priv.Raw {
 					name, _ := raw.XMLName()
 					if !supported[name.Space+" "+name.Local] {

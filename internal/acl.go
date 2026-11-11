@@ -16,10 +16,12 @@ var (
 // resource. It isn't the DAV:owner element of LOCK requests (RFC 4918
 // section 14.17), which holds any information about the creator of a lock.
 //
+// It's empty if Href is nil, when there's no owner information.
+//
 // https://datatracker.ietf.org/doc/html/rfc3744#section-5.1
 type Owner struct {
 	XMLName xml.Name `xml:"DAV: owner"`
-	Href    Href     `xml:"href"`
+	Href    *Href    `xml:"href,omitempty"`
 }
 
 // SupportedPrivilegeSet identifies the privileges defined for a resource.
@@ -127,7 +129,9 @@ func NewPrincipalCollectionSet(principalPath string) *PrincipalCollectionSet {
 // whose principal path principalPath returns: DAV:owner, the current user,
 // DAV:principal-collection-set and DAV:supported-privilege-set, with the
 // privileges of NewSupportedPrivilegeSet and others. principalPath is only
-// called to return a property which depends on it.
+// called to return a property which depends on it. It returns an empty path
+// if there's no current user (RFC 5397 section 3): DAV:owner and
+// DAV:principal-collection-set are then empty.
 //
 // DAV:acl isn't reported: the servers only know the privileges of the
 // current user, not the access other principals may have.
@@ -137,7 +141,11 @@ func AddACLProps(props map[xml.Name]PropFindFunc, principalPath func() (string, 
 		if err != nil {
 			return nil, err
 		}
-		return &Owner{Href: Href{Path: p}}, nil
+		if p == "" {
+			// No owner information (RFC 3744 section 5.1)
+			return &Owner{}, nil
+		}
+		return &Owner{Href: &Href{Path: p}}, nil
 	}
 	props[PrincipalCollectionSetName] = func(*RawXMLValue) (interface{}, error) {
 		p, err := principalPath()
