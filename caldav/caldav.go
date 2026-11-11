@@ -155,6 +155,9 @@ type CalendarObject struct {
 	ContentLength int64
 	ETag          string
 	Data          *ical.Calendar
+	// ReadOnly reports that the current user may only read this object. It
+	// controls the DAV:current-user-privilege-set reported by the server.
+	ReadOnly bool
 }
 
 // SyncQuery is the query struct represents a sync-collection request

@@ -626,6 +626,7 @@ func (b *backend) propFindAddressObject(ctx context.Context, propfind *internal.
 			}
 			return &internal.CurrentUserPrincipal{Href: internal.Href{Path: path}}, nil
 		},
+		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(internal.NewCurrentUserPrivilegeSet(ao.ReadOnly)),
 		internal.GetContentTypeName: internal.PropFindValue(&internal.GetContentType{
 			Type: vcard.MIMEType,
 		}),

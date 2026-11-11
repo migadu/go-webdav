@@ -751,6 +751,7 @@ func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal
 			}
 			return &internal.CurrentUserPrincipal{Href: internal.Href{Path: path}}, nil
 		},
+		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(internal.NewCurrentUserPrivilegeSet(co.ReadOnly)),
 		internal.GetContentTypeName: internal.PropFindValue(&internal.GetContentType{
 			Type: ical.MIMEType,
 		}),
