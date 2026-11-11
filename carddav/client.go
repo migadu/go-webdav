@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/emersion/go-vcard"
@@ -224,7 +225,8 @@ func encodeAddressPropReq(req *AddressDataRequest) (*internal.Prop, error) {
 
 	getLastModReq := internal.NewRawXMLElement(internal.GetLastModifiedName, nil, nil)
 	getETagReq := internal.NewRawXMLElement(internal.GetETagName, nil, nil)
-	return internal.EncodeProp(&addrDataReq, getLastModReq, getETagReq)
+	getContentLengthReq := internal.NewRawXMLElement(internal.GetContentLengthName, nil, nil)
+	return internal.EncodeProp(&addrDataReq, getLastModReq, getETagReq, getContentLengthReq)
 }
 
 func encodePropFilter(pf *PropFilter) (*propFilter, error) {
@@ -537,6 +539,12 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 		return nil, err
 	}
 
+	u, err := c.ic.ResolveHref(path)
+	if err != nil {
+		return nil, err
+	}
+	collectionPath := strings.TrimSuffix(c.ic.HrefPath(nil, u), "/")
+
 	ret := &SyncResponse{}
 	var errs []error
 	ms, err := c.ic.SyncCollection(ctx, path, query.SyncToken, internal.DepthOne, limit, propReq, func(resp *internal.Response) error {
@@ -547,9 +555,10 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 			switch {
 			case !errors.As(err, &httpErr):
 				errs = append(errs, err)
-			case httpErr.Code == http.StatusNotFound:
-				ret.Deleted = append(ret.Deleted, p)
-			case httpErr.Code == http.StatusInsufficientStorage:
+			case httpErr.Code == http.StatusNotFound && len(resp.Hrefs) > 0:
+				ret.Deleted = append(ret.Deleted, resp.Paths()...)
+			case httpErr.Code == http.StatusInsufficientStorage &&
+				(len(resp.Hrefs) == 0 || (len(resp.Hrefs) == 1 && strings.TrimSuffix(p, "/") == collectionPath)):
 				// The server reports a truncated result on the request-URI
 				// (RFC 6578 section 3.6).
 				ret.Truncated = true
@@ -559,7 +568,7 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 			return nil
 		}
 
-		if p == path || path == fmt.Sprintf("%s/", p) {
+		if strings.TrimSuffix(p, "/") == collectionPath {
 			return nil
 		}
 
@@ -573,11 +582,29 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 			return err
 		}
 
-		o := AddressObject{
-			Path:    p,
-			ModTime: time.Time(getLastMod.LastModified),
-			ETag:    string(getETag.ETag),
+		var getContentLength internal.GetContentLength
+		if err := resp.DecodeProp(&getContentLength); err != nil && !internal.IsNotFound(err) {
+			return err
 		}
+
+		o := AddressObject{
+			Path:          p,
+			ModTime:       time.Time(getLastMod.LastModified),
+			ContentLength: getContentLength.Length,
+			ETag:          string(getETag.ETag),
+		}
+
+		var addrData addressDataResp
+		if err := resp.DecodeProp(&addrData); err == nil {
+			card, err := vcard.NewDecoder(bytes.NewReader(addrData.Data)).Decode()
+			if err != nil {
+				return err
+			}
+			o.Card = card
+		} else if !internal.IsNotFound(err) {
+			return err
+		}
+
 		ret.Updated = append(ret.Updated, o)
 		return nil
 	})
