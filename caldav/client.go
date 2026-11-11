@@ -436,8 +436,10 @@ func (c *Client) GetCalendarObject(ctx context.Context, path string) (*CalendarO
 // opts performs an unconditional PUT; a non-nil opts may carry an If-Match
 // (overwrite only if the resource still has this ETag) or If-None-Match
 // (create only if absent) precondition. A failed precondition surfaces as an
-// error whose status code is 412 Precondition Failed, readable via
-// webdav.HTTPErrorCode.
+// *webdav.HTTPError with code 412 Precondition Failed.
+//
+// The values of opts are sent as is, so they must be quoted entity-tags as in
+// the header fields, e.g. `"` + co.ETag + `"`, or "*".
 func (c *Client) PutCalendarObject(ctx context.Context, path string, cal *ical.Calendar, opts *PutCalendarObjectOptions) (*CalendarObject, error) {
 	// TODO: some servers want a Content-Length header, so we can't stream the
 	// request body here. See the Radicale issue:

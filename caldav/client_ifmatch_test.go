@@ -2,6 +2,7 @@ package caldav
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -82,7 +83,7 @@ func TestPutCalendarObjectNilOptsOmitsIfMatch(t *testing.T) {
 }
 
 // TestPutCalendarObjectPreconditionFailed verifies a 412 response surfaces as
-// an error whose status code consumers can read via webdav.HTTPErrorCode.
+// an error whose status code is a webdav.HTTPError.
 func TestPutCalendarObjectPreconditionFailed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusPreconditionFailed)
@@ -98,11 +99,34 @@ func TestPutCalendarObjectPreconditionFailed(t *testing.T) {
 	if err == nil {
 		t.Fatal("PutCalendarObject: want error on 412, got nil")
 	}
-	code, ok := webdav.HTTPErrorCode(err)
-	if !ok {
-		t.Fatalf("HTTPErrorCode: not an HTTP error: %v", err)
+	var httpErr *webdav.HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("not an HTTP error: %v", err)
 	}
-	if code != http.StatusPreconditionFailed {
-		t.Errorf("status code = %d, want %d", code, http.StatusPreconditionFailed)
+	if httpErr.Code != http.StatusPreconditionFailed {
+		t.Errorf("status code = %d, want %d", httpErr.Code, http.StatusPreconditionFailed)
+	}
+}
+
+// TestPutCalendarObjectSendsIfNoneMatch verifies a create-only PUT sends
+// If-None-Match: *.
+func TestPutCalendarObjectSendsIfNoneMatch(t *testing.T) {
+	var gotIfNoneMatch string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotIfNoneMatch = r.Header.Get("If-None-Match")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	c, err := NewClient(http.DefaultClient, srv.URL)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	opts := &PutCalendarObjectOptions{IfNoneMatch: "*"}
+	if _, err := c.PutCalendarObject(context.Background(), "/cal/test-uid.ics", minimalCalendar(), opts); err != nil {
+		t.Fatalf("PutCalendarObject: %v", err)
+	}
+	if gotIfNoneMatch != "*" {
+		t.Errorf("If-None-Match header = %q, want %q", gotIfNoneMatch, "*")
 	}
 }
