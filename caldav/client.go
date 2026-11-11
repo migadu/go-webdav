@@ -200,6 +200,11 @@ func encodeCalendarReq(c *CalendarCompRequest) (*internal.Prop, error) {
 
 func encodeCompFilter(filter *CompFilter) *compFilter {
 	encoded := compFilter{Name: filter.Name}
+	if filter.IsNotDefined {
+		// is-not-defined can't have siblings, see RFC 4791 section 9.7.1
+		encoded.IsNotDefined = &struct{}{}
+		return &encoded
+	}
 	if !filter.Start.IsZero() || !filter.End.IsZero() {
 		encoded.TimeRange = &timeRange{
 			Start: dateWithUTCTime(filter.Start),
@@ -217,6 +222,11 @@ func encodeCompFilter(filter *CompFilter) *compFilter {
 
 func encodePropFilter(filter *PropFilter) *propFilter {
 	encoded := propFilter{Name: filter.Name}
+	if filter.IsNotDefined {
+		// is-not-defined can't have siblings, see RFC 4791 section 9.7.2
+		encoded.IsNotDefined = &struct{}{}
+		return &encoded
+	}
 	if !filter.Start.IsZero() || !filter.End.IsZero() {
 		encoded.TimeRange = &timeRange{
 			Start: dateWithUTCTime(filter.Start),
@@ -231,10 +241,13 @@ func encodePropFilter(filter *PropFilter) *propFilter {
 }
 
 func encodeParamFilter(pf ParamFilter) paramFilter {
-	encoded := paramFilter{
-		Name:      pf.Name,
-		TextMatch: encodeTextMatch(pf.TextMatch),
+	encoded := paramFilter{Name: pf.Name}
+	if pf.IsNotDefined {
+		// is-not-defined can't have siblings, see RFC 4791 section 9.7.3
+		encoded.IsNotDefined = &struct{}{}
+		return encoded
 	}
+	encoded.TextMatch = encodeTextMatch(pf.TextMatch)
 	return encoded
 }
 
