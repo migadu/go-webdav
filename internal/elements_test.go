@@ -215,3 +215,30 @@ func TestETag_UnmarshalAndMarshalText(t *testing.T) {
 		})
 	}
 }
+
+// RFC 7232 section 2.3: an opaque-tag is a quoted string without escapes, and
+// a backslash is an ordinary character in it.
+func TestETagNoEscapes(t *testing.T) {
+	for _, s := range []string{`"a\b"`, `"日本"`, `"a\"`} {
+		var etag ETag
+		if err := etag.UnmarshalText([]byte(s)); err != nil {
+			t.Errorf("UnmarshalText(%s) = %v", s, err)
+			continue
+		}
+		if want := s[1 : len(s)-1]; string(etag) != want {
+			t.Errorf("UnmarshalText(%s) = %q, want %q", s, string(etag), want)
+		}
+		if got := etag.String(); got != s {
+			t.Errorf("String() = %s, want %s", got, s)
+		}
+	}
+}
+
+func TestETagMalformed(t *testing.T) {
+	for _, s := range []string{`"abc`, `abc"`, `a"bc`} {
+		var etag ETag
+		if err := etag.UnmarshalText([]byte(s)); err == nil {
+			t.Errorf("UnmarshalText(%s) = %q, want an error", s, string(etag))
+		}
+	}
+}
