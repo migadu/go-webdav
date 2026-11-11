@@ -298,40 +298,153 @@ func (b *backend) findLock(r *http.Request, token string) (*Lock, error) {
 	return nil, nil
 }
 
-func (b lockingBackend) Lock(r *http.Request, depth internal.Depth, timeout time.Duration, refreshToken string) (*internal.Lock, bool, error) {
+// lockTimeout returns the time left before a lock expires, zero meaning
+// never.
+func lockTimeout(lock *Lock) time.Duration {
+	if lock.Expires.IsZero() {
+		return 0
+	}
+	d := time.Until(lock.Expires)
+	if d <= 0 {
+		// About to expire, but not infinite
+		d = 1
+	}
+	return d
+}
+
+// newActiveLock returns the DAV:activelock element describing a lock, in the
+// lockdiscovery property of the resource at the clean path p, a collection if
+// isDir. timeout is the time left before the lock expires.
+func newActiveLock(lock *Lock, timeout time.Duration, p string, isDir bool) internal.ActiveLock {
+	al := internal.ActiveLock{
+		LockType:  internal.LockType{Write: &struct{}{}},
+		Depth:     internal.DepthZero,
+		Timeout:   &internal.Timeout{Duration: timeout},
+		LockToken: &internal.LockToken{Href: lock.Token},
+	}
+	if lock.Shared {
+		al.LockScope.Shared = &struct{}{}
+	} else {
+		al.LockScope.Exclusive = &struct{}{}
+	}
+	if lock.Recursive {
+		al.Depth = internal.DepthInfinity
+	}
+	if lock.Owner != "" {
+		// A LockSystem may hold an invalid owner: leave it out
+		if owner, err := internal.UnmarshalRawXML(lock.Owner); err == nil {
+			al.Owner = owner
+		}
+	}
+	root := lock.Root
+	if isPathBelow(p, root) || (root == p && isDir) {
+		root = collectionHref(root)
+	}
+	al.LockRoot.Href = internal.Href{Path: root}
+	return al
+}
+
+// lockDiscovery returns the lockdiscovery property (RFC 4918 section 15.8)
+// of the resource at the clean path p, a collection if isDir, with first a
+// lock just created or refreshed, if any.
+func (b *backend) lockDiscovery(r *http.Request, p string, isDir bool, first *Lock) (*internal.LockDiscovery, error) {
+	locks, err := b.locks.Locks(r.Context(), p, false)
+	if err != nil {
+		return nil, err
+	}
+	discovery := &internal.LockDiscovery{}
+	if first != nil {
+		discovery.ActiveLock = append(discovery.ActiveLock, newActiveLock(first, first.Timeout, p, isDir))
+	}
+	for i := range locks {
+		if first == nil || locks[i].Token != first.Token {
+			discovery.ActiveLock = append(discovery.ActiveLock, newActiveLock(&locks[i], lockTimeout(&locks[i]), p, isDir))
+		}
+	}
+	return discovery, nil
+}
+
+// propFindLocks lists the locks of the resources of a PROPFIND response,
+// fetching them once, when the lockdiscovery property is first needed.
+type propFindLocks struct {
+	b       *backend
+	r       *http.Request
+	path    string // clean path of the Request-URI
+	members bool   // the response includes the members of the resource
+
+	fetched bool
+	locks   []Lock
+	err     error
+}
+
+func (pl *propFindLocks) discovery(fi *FileInfo) (*internal.LockDiscovery, error) {
+	if !pl.fetched {
+		pl.locks, pl.err = pl.b.locks.Locks(pl.r.Context(), pl.path, pl.members)
+		pl.fetched = true
+	}
+	if pl.err != nil {
+		return nil, pl.err
+	}
+	p := path.Clean(fi.Path)
+	discovery := &internal.LockDiscovery{}
+	for i := range pl.locks {
+		if pl.locks[i].inScope(p) {
+			discovery.ActiveLock = append(discovery.ActiveLock, newActiveLock(&pl.locks[i], lockTimeout(&pl.locks[i]), p, fi.IsDir))
+		}
+	}
+	return discovery, nil
+}
+
+// Lock creates or refreshes a lock (RFC 4918 section 9.10).
+func (b lockingBackend) Lock(r *http.Request, req *internal.LockRequest) (string, *internal.LockDiscovery, bool, error) {
 	// TODO: locking unmapped URLs
 	fi, err := b.FileSystem.Stat(r.Context(), r.URL.Path)
 	if err != nil {
-		return nil, false, err
+		return "", nil, false, err
 	}
 	if fi.IsDir {
-		return nil, false, internal.HTTPErrorf(http.StatusBadRequest, "webdav: locking collections is not supported")
+		return "", nil, false, internal.HTTPErrorf(http.StatusBadRequest, "webdav: locking collections is not supported")
 	}
+	p := path.Clean(r.URL.Path)
 
-	if refreshToken != "" {
+	var lock Lock
+	if req.Info == nil {
 		// RFC 4918 section 9.10.2
-		lock, err := b.findLock(r, refreshToken)
-		if err != nil {
-			return nil, false, err
-		} else if lock == nil {
-			return nil, false, newPreconditionError(http.StatusPreconditionFailed, "lock-token-matches-request-uri")
+		if found, err := b.findLock(r, req.RefreshToken); err != nil {
+			return "", nil, false, err
+		} else if found == nil {
+			return "", nil, false, newPreconditionError(http.StatusPreconditionFailed, "lock-token-matches-request-uri")
 		}
-		refreshed, err := b.locks.Refresh(r.Context(), refreshToken, lock.Timeout)
+		lock, err = b.locks.Refresh(r.Context(), req.RefreshToken, req.Timeout.Duration)
 		if errors.Is(err, ErrNoSuchLock) {
-			return nil, false, newPreconditionError(http.StatusPreconditionFailed, "lock-token-matches-request-uri")
+			return "", nil, false, newPreconditionError(http.StatusPreconditionFailed, "lock-token-matches-request-uri")
 		} else if err != nil {
-			return nil, false, err
+			return "", nil, false, err
 		}
-		return &internal.Lock{Href: refreshed.Token, Root: fi.Path, Timeout: refreshed.Timeout}, false, nil
+	} else {
+		lock = Lock{
+			Root:      p,
+			Recursive: req.Depth == internal.DepthInfinity,
+			Shared:    req.Info.LockScope.Shared != nil,
+			Timeout:   req.Timeout.Duration,
+		}
+		if req.Info.Owner != nil {
+			lock.Owner, err = internal.MarshalRawXML(req.Info.Owner)
+			if err != nil {
+				return "", nil, false, &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
+			}
+		}
+
+		lock, err = b.locks.Create(r.Context(), lock)
+		if errors.Is(err, ErrLocked) {
+			return "", nil, false, newPreconditionError(http.StatusLocked, "no-conflicting-lock")
+		} else if err != nil {
+			return "", nil, false, err
+		}
 	}
 
-	lock, err := b.locks.Create(r.Context(), Lock{Root: path.Clean(r.URL.Path)})
-	if errors.Is(err, ErrLocked) {
-		return nil, false, newPreconditionError(http.StatusLocked, "no-conflicting-lock")
-	} else if err != nil {
-		return nil, false, err
-	}
-	return &internal.Lock{Href: lock.Token, Root: fi.Path}, false, nil
+	discovery, err := b.lockDiscovery(r, p, fi.IsDir, &lock)
+	return lock.Token, discovery, false, err
 }
 
 // Unlock removes a lock whose scope includes the Request-URI (RFC 4918

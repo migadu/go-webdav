@@ -21,6 +21,7 @@ var (
 	GetLastModifiedName  = xml.Name{Namespace, "getlastmodified"}
 	GetETagName          = xml.Name{Namespace, "getetag"}
 	SupportedLockName    = xml.Name{Namespace, "supportedlock"}
+	LockDiscoveryName    = xml.Name{Namespace, "lockdiscovery"}
 
 	CollectionName = xml.Name{Namespace, "collection"}
 	PrincipalName  = xml.Name{Namespace, "principal"}
@@ -672,10 +673,10 @@ type GetCTag struct {
 
 // https://www.rfc-editor.org/rfc/rfc4918#section-14.11
 type LockInfo struct {
-	XMLName   xml.Name  `xml:"DAV: lockinfo"`
-	LockScope LockScope `xml:"lockscope"`
-	LockType  LockType  `xml:"locktype"`
-	Owner     *Owner    `xml:"owner,omitempty"`
+	XMLName   xml.Name     `xml:"DAV: lockinfo"`
+	LockScope LockScope    `xml:"lockscope"`
+	LockType  LockType     `xml:"locktype"`
+	Owner     *RawXMLValue `xml:"owner,omitempty"` // https://www.rfc-editor.org/rfc/rfc4918#section-14.17
 }
 
 // https://www.rfc-editor.org/rfc/rfc4918#section-14.13
@@ -691,12 +692,6 @@ type LockType struct {
 	Write   *struct{} `xml:"write"`
 }
 
-// https://www.rfc-editor.org/rfc/rfc4918#section-14.17
-type Owner struct {
-	XMLName xml.Name `xml:"DAV: owner"`
-	// TODO
-}
-
 // https://www.rfc-editor.org/rfc/rfc4918#section-15.8
 type LockDiscovery struct {
 	XMLName    xml.Name     `xml:"DAV: lockdiscovery"`
@@ -705,14 +700,14 @@ type LockDiscovery struct {
 
 // https://www.rfc-editor.org/rfc/rfc4918#section-14.1
 type ActiveLock struct {
-	XMLName   xml.Name   `xml:"DAV: activelock"`
-	LockScope LockScope  `xml:"lockscope"`
-	LockType  LockType   `xml:"locktype"`
-	Depth     Depth      `xml:"depth"`
-	Owner     *Owner     `xml:"owner,omitempty"`
-	Timeout   *Timeout   `xml:"timeout,omitempty"`
-	LockToken *LockToken `xml:"locktoken,omitempty"`
-	LockRoot  LockRoot   `xml:"lockroot"`
+	XMLName   xml.Name     `xml:"DAV: activelock"`
+	LockScope LockScope    `xml:"lockscope"`
+	LockType  LockType     `xml:"locktype"`
+	Depth     Depth        `xml:"depth"`
+	Owner     *RawXMLValue `xml:"owner,omitempty"`
+	Timeout   *Timeout     `xml:"timeout,omitempty"`
+	LockToken *LockToken   `xml:"locktoken,omitempty"`
+	LockRoot  LockRoot     `xml:"lockroot"`
 }
 
 // https://www.rfc-editor.org/rfc/rfc4918#section-14.14
@@ -724,5 +719,5 @@ type LockToken struct {
 // https://www.rfc-editor.org/rfc/rfc4918#section-14.12
 type LockRoot struct {
 	XMLName xml.Name `xml:"DAV: lockroot"`
-	Href    string   `xml:"href"`
+	Href    Href     `xml:"href"`
 }

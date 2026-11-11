@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 
@@ -237,6 +238,16 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		return nil, err
 	}
 
+	var locks *propFindLocks
+	if b.locks != nil {
+		locks = &propFindLocks{
+			b:       b,
+			r:       r,
+			path:    path.Clean(r.URL.Path),
+			members: depth != internal.DepthZero && fi.IsDir,
+		}
+	}
+
 	var resps []internal.Response
 	if depth != internal.DepthZero && fi.IsDir {
 		children, err := b.FileSystem.ReadDir(r.Context(), r.URL.Path, depth == internal.DepthInfinity)
@@ -247,7 +258,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 
 		resps = make([]internal.Response, 0, len(children)+len(errResps))
 		for _, child := range children {
-			resp, err := b.propFindFile(r.Context(), propfind, &child)
+			resp, err := b.propFindFile(r.Context(), propfind, &child, locks)
 			if err != nil {
 				return nil, err
 			}
@@ -255,7 +266,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		}
 		resps = append(resps, errResps...)
 	} else {
-		resp, err := b.propFindFile(r.Context(), propfind, fi)
+		resp, err := b.propFindFile(r.Context(), propfind, fi, locks)
 		if err != nil {
 			return nil, err
 		}
@@ -266,7 +277,9 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 	return internal.NewMultiStatus(resps...), nil
 }
 
-func (b *backend) propFindFile(ctx context.Context, propfind *internal.PropFind, fi *FileInfo) (*internal.Response, error) {
+// propFindFile returns the properties of a file. locks is nil if locking is
+// disabled.
+func (b *backend) propFindFile(ctx context.Context, propfind *internal.PropFind, fi *FileInfo, locks *propFindLocks) (*internal.Response, error) {
 	props := make(map[xml.Name]internal.PropFindFunc)
 
 	props[internal.ResourceTypeName] = func(*internal.RawXMLValue) (interface{}, error) {
@@ -277,13 +290,16 @@ func (b *backend) propFindFile(ctx context.Context, propfind *internal.PropFind,
 		return internal.NewResourceType(types...), nil
 	}
 
-	if b.locks != nil {
+	if locks != nil {
 		props[internal.SupportedLockName] = internal.PropFindValue(&internal.SupportedLock{
 			LockEntries: []internal.LockEntry{{
 				LockScope: internal.LockScope{Exclusive: &struct{}{}},
 				LockType:  internal.LockType{Write: &struct{}{}},
 			}},
 		})
+		props[internal.LockDiscoveryName] = func(*internal.RawXMLValue) (interface{}, error) {
+			return locks.discovery(fi)
+		}
 	}
 
 	if !fi.IsDir {
