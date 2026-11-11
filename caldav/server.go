@@ -840,14 +840,25 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 
 func (b *backend) propFindInbox(propfind *internal.PropFind, path string) (*internal.Response, error) {
 	props := map[xml.Name]internal.PropFindFunc{
-		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, scheduleInboxName)),
-		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(&internal.CurrentUserPrivilegeSet{
-			Privilege: []internal.Privilege{{
-				SchedulerDeliver: &struct{}{},
-			}},
-		}),
+		internal.ResourceTypeName:            internal.PropFindValue(internal.NewResourceType(internal.CollectionName, scheduleInboxName)),
+		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(newInboxPrivilegeSet()),
 	}
 	return internal.NewPropFindResponse(path, propfind, props)
+}
+
+// newInboxPrivilegeSet returns the DAV:current-user-privilege-set of the
+// scheduling Inbox of the current user. CALDAV:schedule-deliver is an
+// aggregate privilege (RFC 6638 section 6.3), and RFC 3744 section 5.4 asks
+// for the privileges an aggregate contains to be listed along with it. Each
+// DAV:privilege element holds a single privilege.
+func newInboxPrivilegeSet() *internal.CurrentUserPrivilegeSet {
+	granted := &struct{}{}
+	return &internal.CurrentUserPrivilegeSet{Privilege: []internal.Privilege{
+		{ScheduleDeliver: granted},
+		{ScheduleDeliverInvite: granted},
+		{ScheduleDeliverReply: granted},
+		{ScheduleQueryFreeBusy: granted},
+	}}
 }
 
 func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.PropFind, recurse bool) ([]internal.Response, error) {

@@ -237,7 +237,7 @@ func TestCalendarWithInbox(t *testing.T) {
 	}
 	resp = string(data)
 
-	if !strings.Contains(resp, `<current-user-privilege-set xmlns="DAV:"><privilege xmlns="DAV:"><schedule-deliver xmlns="DAV:"></schedule-deliver></privilege></current-user-privilege-set>`) {
+	if !strings.Contains(resp, `<privilege xmlns="DAV:"><schedule-deliver xmlns="urn:ietf:params:xml:ns:caldav"></schedule-deliver></privilege>`) {
 		t.Errorf("Expected schedule-deliver privilege in response:\n%s", resp)
 	}
 
