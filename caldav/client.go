@@ -206,10 +206,7 @@ func encodeCompFilter(filter *CompFilter) *compFilter {
 		return &encoded
 	}
 	if !filter.Start.IsZero() || !filter.End.IsZero() {
-		encoded.TimeRange = &timeRange{
-			Start: dateWithUTCTime(filter.Start),
-			End:   dateWithUTCTime(filter.End),
-		}
+		encoded.TimeRange = newTimeRange(filter.Start, filter.End)
 	}
 	for _, child := range filter.Comps {
 		encoded.CompFilters = append(encoded.CompFilters, *encodeCompFilter(&child))
@@ -228,10 +225,7 @@ func encodePropFilter(filter *PropFilter) *propFilter {
 		return &encoded
 	}
 	if !filter.Start.IsZero() || !filter.End.IsZero() {
-		encoded.TimeRange = &timeRange{
-			Start: dateWithUTCTime(filter.Start),
-			End:   dateWithUTCTime(filter.End),
-		}
+		encoded.TimeRange = newTimeRange(filter.Start, filter.End)
 	}
 	encoded.TextMatch = encodeTextMatch(filter.TextMatch)
 	for _, pf := range filter.ParamFilter {

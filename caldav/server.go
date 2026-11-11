@@ -10,7 +10,6 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/emersion/go-ical"
 	"github.com/emersion/go-webdav"
@@ -135,8 +134,7 @@ func decodePropFilter(el *propFilter) (*PropFilter, error) {
 		pf.TextMatch = decodeTextMatch(el.TextMatch)
 	}
 	if el.TimeRange != nil {
-		pf.Start = time.Time(el.TimeRange.Start)
-		pf.End = time.Time(el.TimeRange.End)
+		pf.Start, pf.End = el.TimeRange.bounds()
 	}
 	for _, paramEl := range el.ParamFilter {
 		paramFi, err := decodeParamFilter(&paramEl)
@@ -157,8 +155,7 @@ func decodeCompFilter(el *compFilter) (*CompFilter, error) {
 		cf.IsNotDefined = true
 	}
 	if el.TimeRange != nil {
-		cf.Start = time.Time(el.TimeRange.Start)
-		cf.End = time.Time(el.TimeRange.End)
+		cf.Start, cf.End = el.TimeRange.bounds()
 	}
 	for _, pfEl := range el.PropFilters {
 		pf, err := decodePropFilter(&pfEl)
