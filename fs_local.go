@@ -249,14 +249,16 @@ func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *Co
 		return false, err
 	}
 
-	// TODO: "Note that an infinite-depth COPY of /A/ into /A/B/ could lead to
-	// infinite recursion if not handled correctly"
-
 	srcInfo, err := os.Stat(srcPath)
 	if err != nil {
 		return false, errFromOS(err)
 	}
-	srcPerm := srcInfo.Mode() & os.ModePerm
+
+	// "Note that an infinite-depth COPY of /A/ into /A/B/ could lead to
+	// infinite recursion if not handled correctly" (RFC 4918 section 9.8.3)
+	if srcInfo.IsDir() && !options.NoRecursive && strings.HasPrefix(dstPath, srcPath+string(filepath.Separator)) {
+		return false, NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: cannot copy a collection into itself"))
+	}
 
 	if _, err := os.Stat(dstPath); err != nil {
 		if !os.IsNotExist(err) {
@@ -277,12 +279,19 @@ func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *Co
 			return err
 		}
 
+		rel, err := filepath.Rel(srcPath, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dstPath, rel)
+		perm := fi.Mode() & os.ModePerm
+
 		if fi.IsDir() {
-			if err := os.Mkdir(dstPath, srcPerm); err != nil {
+			if err := os.Mkdir(target, perm); err != nil {
 				return errFromOS(err)
 			}
 		} else {
-			if err := copyRegularFile(srcPath, dstPath, srcPerm); err != nil {
+			if err := copyRegularFile(p, target, perm); err != nil {
 				return err
 			}
 		}
