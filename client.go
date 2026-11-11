@@ -2,6 +2,7 @@ package webdav
 
 import (
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -323,6 +324,128 @@ func (c *Client) Copy(ctx context.Context, name, dest string, options *CopyOptio
 	req.Header.Set("Depth", depth.String())
 
 	return c.ic.DoAndCheckMultiStatus(req.WithContext(ctx))
+}
+
+// DeadProperties fetches the dead properties of a file named names. Those the
+// file doesn't have are left out.
+//
+// If the server fails to return some of them, the others are returned along
+// with an error listing each failed property.
+func (c *Client) DeadProperties(ctx context.Context, name string, names ...xml.Name) ([]DeadProperty, error) {
+	if len(names) == 0 {
+		return nil, fmt.Errorf("webdav: no dead property names")
+	}
+
+	resp, err := c.ic.PropFindFlat(ctx, name, internal.NewPropNamePropFind(names...))
+	if err != nil {
+		return nil, err
+	}
+	if err := resp.Err(); err != nil {
+		return nil, err
+	}
+
+	var props []DeadProperty
+	var errs []error
+	for _, propstat := range resp.PropStats {
+		code := propstat.Status.Code
+		for i := range propstat.Prop.Raw {
+			raw := &propstat.Prop.Raw[i]
+			switch {
+			case code == http.StatusOK:
+				var prop DeadProperty
+				if err := raw.Decode(&prop); err != nil {
+					errs = append(errs, err)
+				} else {
+					props = append(props, prop)
+				}
+			case code != http.StatusNotFound:
+				errs = append(errs, propStatError(raw, &propstat))
+			}
+		}
+	}
+	return props, errors.Join(errs...)
+}
+
+// PatchDeadProperties sets and removes dead properties of a file with a
+// PROPPATCH request, which the server applies in full or not at all. The
+// instructions are applied in order: a later instruction for a property
+// overrides an earlier one.
+//
+// If the server refuses the request, the returned error lists each property
+// with its status: first those which failed, then those which got 424 Failed
+// Dependency because of them, so that errors.As finds the HTTPError of a
+// property which failed. Properties in the DAV: namespace are live
+// properties, which servers generally refuse to modify.
+func (c *Client) PatchDeadProperties(ctx context.Context, name string, patch []DeadPropertyPatch) error {
+	if len(patch) == 0 {
+		return nil
+	}
+
+	var update internal.PropertyUpdate
+	for _, p := range patch {
+		var raw *internal.RawXMLValue
+		if p.Remove {
+			raw = internal.NewRawXMLElement(p.Property.XMLName, nil, nil)
+		} else {
+			var err error
+			if raw, err = p.Property.rawXMLValue(); err != nil {
+				return err
+			}
+		}
+		// Group consecutive instructions of the same kind
+		if n := len(update.Instructions); n > 0 && update.Instructions[n-1].Remove == p.Remove {
+			update.Instructions[n-1].Prop.Raw = append(update.Instructions[n-1].Prop.Raw, *raw)
+		} else {
+			update.Instructions = append(update.Instructions, internal.PropertyUpdateInstruction{
+				Remove: p.Remove,
+				Prop:   internal.Prop{Raw: []internal.RawXMLValue{*raw}},
+			})
+		}
+	}
+
+	req, err := c.ic.NewXMLRequest("PROPPATCH", name, &update)
+	if err != nil {
+		return err
+	}
+	ms, err := c.ic.DoMultiStatus(req.WithContext(ctx))
+	if err != nil {
+		return err
+	}
+
+	var errs, failedDeps []error
+	for i := range ms.Responses {
+		resp := &ms.Responses[i]
+		if err := resp.Err(); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for j := range resp.PropStats {
+			propstat := &resp.PropStats[j]
+			if propstat.Status.Code/100 == 2 {
+				continue
+			}
+			for k := range propstat.Prop.Raw {
+				err := propStatError(&propstat.Prop.Raw[k], propstat)
+				if propstat.Status.Code == http.StatusFailedDependency {
+					failedDeps = append(failedDeps, err)
+				} else {
+					errs = append(errs, err)
+				}
+			}
+		}
+	}
+	return errors.Join(append(errs, failedDeps...)...)
+}
+
+// propStatError returns the error of a property of a propstat element with a
+// failure status.
+func propStatError(raw *internal.RawXMLValue, propstat *internal.PropStat) error {
+	err := &internal.HTTPError{Code: propstat.Status.Code}
+	if propstat.Error != nil {
+		err.Err = propstat.Error
+	}
+	name, _ := raw.XMLName()
+	return fmt.Errorf("webdav: property <%v %v>: %w", name.Space, name.Local, err)
 }
 
 // Move moves a file.
