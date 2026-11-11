@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 )
 
@@ -266,6 +267,12 @@ func (h *Handler) handleCopyMove(w http.ResponseWriter, r *http.Request) error {
 	dest, err := parseDestination(r.Header)
 	if err != nil {
 		return err
+	}
+	// The destination path is the one the backend acts upon, whatever its
+	// host. Copying or moving a resource onto itself would first delete it to
+	// overwrite it (RFC 4918 sections 9.8.5 and 9.9.4).
+	if path.Clean(dest.Path) == path.Clean(r.URL.Path) {
+		return HTTPErrorf(http.StatusForbidden, "webdav: source and destination are the same resource")
 	}
 
 	overwrite := true
