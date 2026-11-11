@@ -575,3 +575,170 @@ func TestMatchPropTimeRangeBoundary(t *testing.T) {
 		})
 	}
 }
+
+// Whether a recurring event matches a range open at the start depends on its
+// first occurrence only, and a range that an early occurrence overlaps needs no
+// later ones. Neither may visit every occurrence up to the end of the range.
+func TestMatchRecurringTimeRangeCost(t *testing.T) {
+	// An occurrence every second, with no COUNT or UNTIL: a day has 86400.
+	cal, err := ical.NewDecoder(strings.NewReader("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example Corp.//CalDAV Client//EN\r\n" +
+		"BEGIN:VEVENT\r\nDTSTAMP:20060206T001102Z\r\nUID:secondly\r\nSUMMARY:Secondly\r\n" +
+		"DTSTART:20060101T000000Z\r\nDTEND:20060101T000001Z\r\nRRULE:FREQ=SECONDLY\r\n" +
+		"END:VEVENT\r\nEND:VCALENDAR\r\n")).Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	co := CalendarObject{Data: cal}
+
+	for _, tc := range []struct {
+		name       string
+		start, end string
+		want       bool
+	}{
+		{"range without start", "", "20060102T000000Z", true},
+		{"range without start, before the first occurrence", "", "20060101T000000Z", false},
+		{"first occurrence overlaps", "20060101T000000Z", "20060102T000000Z", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filter := CompFilter{Name: "VEVENT"}
+			if tc.start != "" {
+				filter.Start = toDate(t, tc.start)
+			}
+			if tc.end != "" {
+				filter.End = toDate(t, tc.end)
+			}
+			query := &CalendarQuery{CompFilter: CompFilter{Name: "VCALENDAR", Comps: []CompFilter{filter}}}
+
+			var got []CalendarObject
+			var err error
+			allocs := testing.AllocsPerRun(1, func() {
+				got, err = Filter(query, []CalendarObject{co})
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if matched := len(got) == 1; matched != tc.want {
+				t.Fatalf("matched=%v, want %v", matched, tc.want)
+			}
+			if allocs > 1000 {
+				t.Fatalf("%v allocations, want at most 1000", allocs)
+			}
+		})
+	}
+}
+
+// https://datatracker.ietf.org/doc/html/rfc4791#section-9.9 defines when a
+// VTODO overlaps a time range from its DTSTART, DURATION, DUE, COMPLETED and
+// CREATED properties.
+func TestMatchTodoTimeRange(t *testing.T) {
+	newCO := func(props string) CalendarObject {
+		s := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example Corp.//CalDAV Client//EN\r\n" +
+			"BEGIN:VTODO\r\nDTSTAMP:20060205T235335Z\r\nUID:todo\r\nSUMMARY:Task\r\n" +
+			props + "END:VTODO\r\nEND:VCALENDAR\r\n"
+		cal, err := ical.NewDecoder(strings.NewReader(s)).Decode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return CalendarObject{Data: cal}
+	}
+
+	const (
+		startDue      = "DTSTART:20060101T000000Z\r\nDUE:20060104T000000Z\r\n"
+		startDuration = "DTSTART:20060101T000000Z\r\nDURATION:P3D\r\n"
+		startOnly     = "DTSTART:20060101T000000Z\r\n"
+		dueOnly       = "DUE:20060104T000000Z\r\n"
+		dueDate       = "DUE;VALUE=DATE:20060104\r\n"
+		completedOnly = "COMPLETED:20060105T000000Z\r\n"
+		createdOnly   = "CREATED:20060101T000000Z\r\n"
+		completed     = "CREATED:20060101T000000Z\r\nCOMPLETED:20060105T000000Z\r\n"
+		recurring     = "DTSTART:20060101T090000Z\r\nDUE:20060101T110000Z\r\nRRULE:FREQ=DAILY;COUNT=3\r\n"
+	)
+
+	for _, tc := range []struct {
+		name       string
+		props      string
+		start, end string
+		want       bool
+	}{
+		{"DTSTART and DUE, range without start", startDue, "", "20060201T000000Z", true},
+		{"DTSTART and DUE, range without start, ends at DTSTART", startDue, "", "20060101T000000Z", false},
+		{"DTSTART and DUE, range without end", startDue, "20060103T000000Z", "", true},
+		{"DTSTART and DUE, range before DUE", startDue, "20060103T000000Z", "20060105T000000Z", true},
+		{"DTSTART and DUE, range starts at DUE", startDue, "20060104T000000Z", "20060105T000000Z", false},
+		{"DTSTART and DURATION, range starts at the end", startDuration, "20060104T000000Z", "20060105T000000Z", true},
+		{"DTSTART and DURATION, range after the end", startDuration, "20060104T000001Z", "20060105T000000Z", false},
+		{"DTSTART and DURATION, range without start", startDuration, "", "20060101T000001Z", true},
+		{"DTSTART only, range starts at DTSTART", startOnly, "20060101T000000Z", "20060102T000000Z", true},
+		{"DTSTART only, range ends at DTSTART", startOnly, "20051231T000000Z", "20060101T000000Z", false},
+		{"DUE only, range ends at DUE", dueOnly, "20060103T000000Z", "20060104T000000Z", true},
+		{"DUE only, range starts at DUE", dueOnly, "20060104T000000Z", "20060105T000000Z", false},
+		{"DUE date only, range without start", dueDate, "", "20060104T000000Z", true},
+		{"COMPLETED and CREATED, range in between", completed, "20060102T000000Z", "20060103T000000Z", true},
+		{"COMPLETED and CREATED, range after COMPLETED", completed, "20060106T000000Z", "20060107T000000Z", false},
+		{"COMPLETED only, range ends at COMPLETED", completedOnly, "20060104T000000Z", "20060105T000000Z", true},
+		{"COMPLETED only, range after COMPLETED", completedOnly, "20060105T000001Z", "20060106T000000Z", false},
+		{"CREATED only, range ends at CREATED", createdOnly, "20051201T000000Z", "20060101T000000Z", false},
+		{"CREATED only, range without end", createdOnly, "20070101T000000Z", "", true},
+		{"no dates", "", "20060101T000000Z", "20060102T000000Z", true},
+		{"recurring, an occurrence overlaps", recurring, "20060103T100000Z", "20060103T103000Z", true},
+		{"recurring, range after the last occurrence", recurring, "20060104T100000Z", "20060104T103000Z", false},
+		{"recurring, range without start", recurring, "", "20060101T090001Z", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filter := CompFilter{Name: "VTODO"}
+			if tc.start != "" {
+				filter.Start = toDate(t, tc.start)
+			}
+			if tc.end != "" {
+				filter.End = toDate(t, tc.end)
+			}
+			query := &CalendarQuery{CompFilter: CompFilter{Name: "VCALENDAR", Comps: []CompFilter{filter}}}
+
+			got, err := Filter(query, []CalendarObject{newCO(tc.props)})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if matched := len(got) == 1; matched != tc.want {
+				t.Fatalf("matched=%v, want %v", matched, tc.want)
+			}
+		})
+	}
+}
+
+// Time ranges are not evaluated for VJOURNAL, VFREEBUSY and VALARM yet. A range
+// with only an end used to be ignored for them, so they must still match it.
+func TestMatchOtherCompTimeRangeWithoutStart(t *testing.T) {
+	cal, err := ical.NewDecoder(strings.NewReader("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example Corp.//CalDAV Client//EN\r\n" +
+		"BEGIN:VEVENT\r\nDTSTAMP:20060206T001102Z\r\nUID:alarm\r\nSUMMARY:Alarm\r\n" +
+		"DTSTART:20060102T100000Z\r\nDURATION:PT1H\r\n" +
+		"BEGIN:VALARM\r\nACTION:AUDIO\r\nTRIGGER:-PT10M\r\nEND:VALARM\r\n" +
+		"END:VEVENT\r\n" +
+		"BEGIN:VJOURNAL\r\nDTSTAMP:20060206T001102Z\r\nUID:journal\r\nSUMMARY:Journal\r\n" +
+		"DTSTART;VALUE=DATE:20060102\r\n" +
+		"END:VJOURNAL\r\n" +
+		"END:VCALENDAR\r\n")).Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	co := CalendarObject{Data: cal}
+	end := toDate(t, "20060201T000000Z")
+
+	for _, tc := range []struct {
+		name   string
+		filter CompFilter
+	}{
+		{"VALARM", CompFilter{Name: "VEVENT", Comps: []CompFilter{{Name: "VALARM", End: end}}}},
+		{"VJOURNAL", CompFilter{Name: "VJOURNAL", End: end}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			query := &CalendarQuery{CompFilter: CompFilter{Name: "VCALENDAR", Comps: []CompFilter{tc.filter}}}
+			got, err := Filter(query, []CalendarObject{co})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("matched=false, want true")
+			}
+		})
+	}
+}

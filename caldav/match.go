@@ -131,9 +131,11 @@ func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error
 		return false, err
 	}
 
-	// The length of the component, or of each of its occurrences
-	var duration time.Duration
-	if comp.Name == ical.CompEvent {
+	// overlaps reports whether the occurrence starting at occStart overlaps
+	// the range
+	var overlaps func(occStart time.Time) bool
+	switch comp.Name {
+	case ical.CompEvent:
 		event := ical.Event{Component: comp}
 		eventStart, err := event.DateTimeStart(time.UTC)
 		if err != nil {
@@ -146,30 +148,127 @@ func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error
 		if rset == nil {
 			return overlapsTimeRange(start, end, eventStart, eventEnd), nil
 		}
-		duration = eventEnd.Sub(eventStart)
-	} else if rset == nil {
-		// TODO handle more than just events
-		return false, nil
+		duration := eventEnd.Sub(eventStart)
+		overlaps = func(occStart time.Time) bool {
+			return overlapsTimeRange(start, end, occStart, occStart.Add(duration))
+		}
+	case ical.CompToDo:
+		todo, err := newTodoTimes(comp)
+		if err != nil {
+			return false, err
+		}
+		if rset == nil || todo.dtstart.IsZero() {
+			return todo.overlapsTimeRange(start, end), nil
+		}
+		overlaps = func(occStart time.Time) bool {
+			return todo.at(occStart).overlapsTimeRange(start, end)
+		}
+	default:
+		// TODO handle more than just events and to-dos. A range with only an
+		// end used to be ignored, so keep matching it here.
+		if start.IsZero() {
+			return true, nil
+		}
+		if rset == nil {
+			return false, nil
+		}
+		overlaps = func(occStart time.Time) bool {
+			return overlapsTimeRange(start, end, occStart, occStart)
+		}
 	}
 
-	// An occurrence starting at or before start-duration ends before the range
-	// starts, so only later ones can overlap it.
-	after := start.Add(-duration)
-	if end.IsZero() {
-		var next time.Time
-		if duration > 0 {
-			next = rset.After(after, false)
-		} else {
-			next = rset.After(start, true)
+	// Occurrences come in order, and none starting after the end of the range
+	// can overlap it. Stop at the first one that does: a rule may have no end,
+	// and with an open start the first occurrence decides.
+	next := rset.Iterator()
+	for occStart, ok := next(); ok; occStart, ok = next() {
+		if !end.IsZero() && occStart.After(end) {
+			break
 		}
-		return !next.IsZero(), nil
-	}
-	for _, occStart := range rset.Between(after, end, true) {
-		if overlapsTimeRange(start, end, occStart, occStart.Add(duration)) {
+		if overlaps(occStart) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// todoTimes holds the properties of a VTODO which decide whether it overlaps a
+// time range. Absent properties are zero.
+type todoTimes struct {
+	dtstart, due, completed, created time.Time
+	duration                         time.Duration
+	hasDuration                      bool
+}
+
+func newTodoTimes(comp *ical.Component) (todoTimes, error) {
+	var todo todoTimes
+	for _, p := range []struct {
+		name string
+		dst  *time.Time
+	}{
+		{ical.PropDateTimeStart, &todo.dtstart},
+		{ical.PropDue, &todo.due},
+		{ical.PropCompleted, &todo.completed},
+		{ical.PropCreated, &todo.created},
+	} {
+		t, err := comp.Props.DateTime(p.name, time.UTC)
+		if err != nil {
+			return todoTimes{}, err
+		}
+		*p.dst = t
+	}
+	if prop := comp.Props.Get(ical.PropDuration); prop != nil {
+		duration, err := prop.Duration()
+		if err != nil {
+			return todoTimes{}, err
+		}
+		todo.duration = duration
+		todo.hasDuration = true
+	}
+	return todo, nil
+}
+
+// at returns the times of the occurrence of a recurring VTODO starting at
+// occStart.
+func (todo todoTimes) at(occStart time.Time) todoTimes {
+	occ := todo
+	occ.dtstart = occStart
+	if !todo.due.IsZero() {
+		occ.due = occStart.Add(todo.due.Sub(todo.dtstart))
+	}
+	return occ
+}
+
+// overlapsTimeRange reports whether the VTODO overlaps the time range
+// [start, end), as defined by the table in RFC 4791 section 9.9. A zero start
+// or end leaves the range open on that side.
+func (todo todoTimes) overlapsTimeRange(start, end time.Time) bool {
+	startLT := func(t time.Time) bool { return start.IsZero() || start.Before(t) }
+	startLE := func(t time.Time) bool { return start.IsZero() || !start.After(t) }
+	endGT := func(t time.Time) bool { return end.IsZero() || end.After(t) }
+	endGE := func(t time.Time) bool { return end.IsZero() || !end.Before(t) }
+
+	switch {
+	case !todo.dtstart.IsZero() && !todo.due.IsZero():
+		return (startLT(todo.due) || startLE(todo.dtstart)) &&
+			(endGT(todo.dtstart) || endGE(todo.due))
+	case !todo.dtstart.IsZero() && todo.hasDuration:
+		dtend := todo.dtstart.Add(todo.duration)
+		return startLE(dtend) && (endGT(todo.dtstart) || endGE(dtend))
+	case !todo.dtstart.IsZero():
+		return startLE(todo.dtstart) && endGT(todo.dtstart)
+	case !todo.due.IsZero():
+		return startLT(todo.due) && endGE(todo.due)
+	case !todo.completed.IsZero() && !todo.created.IsZero():
+		return (startLE(todo.created) || startLE(todo.completed)) &&
+			(endGE(todo.created) || endGE(todo.completed))
+	case !todo.completed.IsZero():
+		return startLE(todo.completed) && endGE(todo.completed)
+	case !todo.created.IsZero():
+		return endGT(todo.created)
+	default:
+		return true
+	}
 }
 
 // overlapsTimeRange reports whether [compStart, compEnd) overlaps the time range
