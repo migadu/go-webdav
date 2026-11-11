@@ -671,7 +671,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 			if err != nil {
 				return nil, err
 			}
-			resp, err := b.propFindInbox(propfind, inbox.Path)
+			resp, err := b.propFindInbox(propfind, inbox)
 			if err != nil {
 				return nil, err
 			}
@@ -838,27 +838,41 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 	return internal.NewPropFindResponse(cal.Path, propfind, props)
 }
 
-func (b *backend) propFindInbox(propfind *internal.PropFind, path string) (*internal.Response, error) {
+func (b *backend) propFindInbox(propfind *internal.PropFind, inbox *Inbox) (*internal.Response, error) {
 	props := map[xml.Name]internal.PropFindFunc{
 		internal.ResourceTypeName:            internal.PropFindValue(internal.NewResourceType(internal.CollectionName, scheduleInboxName)),
-		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(newInboxPrivilegeSet()),
+		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(newInboxPrivilegeSet(inbox.ReadOnly)),
 	}
-	return internal.NewPropFindResponse(path, propfind, props)
+	return internal.NewPropFindResponse(inbox.Path, propfind, props)
 }
 
 // newInboxPrivilegeSet returns the DAV:current-user-privilege-set of the
-// scheduling Inbox of the current user. CALDAV:schedule-deliver is an
-// aggregate privilege (RFC 6638 section 6.3), and RFC 3744 section 5.4 asks
-// for the privileges an aggregate contains to be listed along with it. Each
-// DAV:privilege element holds a single privilege.
-func newInboxPrivilegeSet() *internal.CurrentUserPrivilegeSet {
+// scheduling Inbox of the current user, who owns it: DAV:read, plus
+// DAV:write-content and DAV:unbind unless readOnly is set, so that the
+// scheduling messages can be updated and removed once handled. DAV:write
+// isn't granted: it aggregates DAV:write-properties and DAV:bind, but the
+// Inbox properties can't be modified and only the server delivers messages.
+//
+// CALDAV:schedule-deliver is an aggregate privilege (RFC 6638 section 6.3),
+// and RFC 3744 section 5.4 asks for the privileges an aggregate contains to
+// be listed along with it. Each DAV:privilege element holds a single
+// privilege.
+func newInboxPrivilegeSet(readOnly bool) *internal.CurrentUserPrivilegeSet {
 	granted := &struct{}{}
-	return &internal.CurrentUserPrivilegeSet{Privilege: []internal.Privilege{
-		{ScheduleDeliver: granted},
-		{ScheduleDeliverInvite: granted},
-		{ScheduleDeliverReply: granted},
-		{ScheduleQueryFreeBusy: granted},
-	}}
+	privs := []internal.Privilege{{Read: granted}}
+	if !readOnly {
+		privs = append(privs,
+			internal.Privilege{WriteContent: granted},
+			internal.Privilege{Unbind: granted},
+		)
+	}
+	privs = append(privs,
+		internal.Privilege{ScheduleDeliver: granted},
+		internal.Privilege{ScheduleDeliverInvite: granted},
+		internal.Privilege{ScheduleDeliverReply: granted},
+		internal.Privilege{ScheduleQueryFreeBusy: granted},
+	)
+	return &internal.CurrentUserPrivilegeSet{Privilege: privs}
 }
 
 func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.PropFind, recurse bool) ([]internal.Response, error) {
@@ -888,7 +902,7 @@ func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.P
 		if err != nil {
 			return nil, err
 		}
-		resp, err := b.propFindInbox(propfind, inbox.Path)
+		resp, err := b.propFindInbox(propfind, inbox)
 		if err != nil {
 			return nil, err
 		}

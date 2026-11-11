@@ -617,9 +617,11 @@ type CurrentUserPrivilegeSet struct {
 
 // https://tools.ietf.org/html/rfc3744#section-5.4
 type Privilege struct {
-	XMLName xml.Name  `xml:"DAV: privilege"`
-	Read    *struct{} `xml:"DAV: read,omitempty"`
-	Write   *struct{} `xml:"DAV: write,omitempty"`
+	XMLName      xml.Name  `xml:"DAV: privilege"`
+	Read         *struct{} `xml:"DAV: read,omitempty"`
+	Write        *struct{} `xml:"DAV: write,omitempty"`
+	WriteContent *struct{} `xml:"DAV: write-content,omitempty"`
+	Unbind       *struct{} `xml:"DAV: unbind,omitempty"`
 
 	// The privileges of CalDAV scheduling Inbox collections, see RFC 6638
 	// section 6.1. ScheduleDeliver aggregates the three others.

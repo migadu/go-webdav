@@ -155,3 +155,44 @@ func TestInboxScheduleDeliverPrivilege(t *testing.T) {
 		t.Errorf("privileges %v contain DAV: schedule-deliver, which doesn't exist", names)
 	}
 }
+
+// RFC 6638 section 2.2 and RFC 3744: the Inbox belongs to the current user,
+// who can read the scheduling messages in it and, unless the Inbox is
+// read-only, update and remove them. The Inbox properties can't be modified
+// and clients can't add messages, so DAV:write, which aggregates
+// write-properties and bind, isn't granted.
+func TestInboxOwnerPrivileges(t *testing.T) {
+	b := newSchedulingBackend(&Inbox{Path: schedulingInboxPath})
+	names := inboxPrivileges(t, &Handler{Backend: b}, schedulingInboxPath)
+
+	want := []string{
+		"DAV: read",
+		"DAV: unbind",
+		"DAV: write-content",
+		namespace + " schedule-deliver",
+		namespace + " schedule-deliver-invite",
+		namespace + " schedule-deliver-reply",
+		namespace + " schedule-query-freebusy",
+	}
+	sort.Strings(want)
+	if strings.Join(names, ", ") != strings.Join(want, ", ") {
+		t.Errorf("privileges = %v, want %v", names, want)
+	}
+}
+
+func TestInboxReadOnlyPrivileges(t *testing.T) {
+	b := newSchedulingBackend(&Inbox{Path: schedulingInboxPath, ReadOnly: true})
+	names := inboxPrivileges(t, &Handler{Backend: b}, schedulingInboxPath)
+
+	want := []string{
+		"DAV: read",
+		namespace + " schedule-deliver",
+		namespace + " schedule-deliver-invite",
+		namespace + " schedule-deliver-reply",
+		namespace + " schedule-query-freebusy",
+	}
+	sort.Strings(want)
+	if strings.Join(names, ", ") != strings.Join(want, ", ") {
+		t.Errorf("privileges = %v, want %v", names, want)
+	}
+}

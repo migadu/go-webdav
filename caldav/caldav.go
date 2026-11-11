@@ -183,4 +183,8 @@ type SyncResponse struct {
 type Inbox struct {
 	Path           string
 	UserAddressSet []string
+	// ReadOnly reports that the current user may only read the scheduling
+	// messages in the Inbox, not update or remove them. It controls the
+	// DAV:current-user-privilege-set reported by the server.
+	ReadOnly bool
 }
