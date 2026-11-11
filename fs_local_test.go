@@ -514,7 +514,7 @@ func TestLocalFileSystem(t *testing.T) {
 			t.Fatalf("ReadDir() = %v", err)
 		}
 		got := paths(l)
-		for _, s := range []string{"/dir dir=true", "/dir-link dir=false", "/file.txt dir=false", "/link.txt dir=false"} {
+		for _, s := range []string{"/ dir=true", "/dir dir=true", "/dir-link dir=false", "/file.txt dir=false", "/link.txt dir=false"} {
 			if !slices.Contains(got, s) {
 				t.Errorf("ReadDir(%q) = %v, missing %q", "/", got, s)
 			}
@@ -567,7 +567,7 @@ func TestLocalFileSystem(t *testing.T) {
 		checkTestFile(t, filepath.Join(dir, "dir", "c.txt"), "c")
 
 		_, _, err = fs.Create(ctx, "/missing/new.txt", body("new"), &webdav.CreateOptions{})
-		checkHTTPErrorCode(t, err, http.StatusNotFound)
+		checkHTTPErrorCode(t, err, http.StatusConflict)
 	})
 
 	t.Run("Mkdir", func(t *testing.T) {
@@ -578,7 +578,7 @@ func TestLocalFileSystem(t *testing.T) {
 			t.Errorf("Mkdir() didn't create a directory: %v", err)
 		}
 		checkHTTPErrorCode(t, fs.Mkdir(ctx, "/newdir"), http.StatusMethodNotAllowed)
-		checkHTTPErrorCode(t, fs.Mkdir(ctx, "/missing/newdir"), http.StatusNotFound)
+		checkHTTPErrorCode(t, fs.Mkdir(ctx, "/missing/newdir"), http.StatusConflict)
 	})
 
 	t.Run("CopyMove", func(t *testing.T) {

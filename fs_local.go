@@ -2,6 +2,7 @@ package webdav
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -173,7 +174,11 @@ func (fs LocalFileSystem) ReadDir(ctx context.Context, name string, recursive bo
 			return err
 		}
 
-		l = append(l, *fileInfoFromOS("/"+p, fi))
+		entryPath := "/" + p
+		if p == "." {
+			entryPath = "/"
+		}
+		l = append(l, *fileInfoFromOS(entryPath, fi))
 
 		if !recursive && fi.IsDir() && p != dir {
 			return iofs.SkipDir
@@ -208,10 +213,53 @@ func checkConditionalMatches(fi *FileInfo, ifMatch, ifNoneMatch ConditionalMatch
 	return nil
 }
 
+// checkParentDir checks that the parent collection of p exists and is a
+// directory, returning 409 Conflict when it does not (RFC 4918 sections 9.3.1,
+// 9.7.1, 9.8.5 and 9.9.4).
+func checkParentDir(root *os.Root, p string) error {
+	parent := path.Dir(p)
+	if parent == "." {
+		return nil
+	}
+	fi, err := root.Stat(parent)
+	if err != nil {
+		if errors.Is(err, iofs.ErrNotExist) {
+			return NewHTTPError(http.StatusConflict, err)
+		}
+		return errFromOS(err)
+	}
+	if !fi.IsDir() {
+		return NewHTTPError(http.StatusConflict, fmt.Errorf("webdav: parent is not a collection"))
+	}
+	return nil
+}
+
+func createTempInRoot(root *os.Root, dir string, perm os.FileMode) (*os.File, string, error) {
+	for i := 0; i < 16; i++ {
+		tmpName := ".webdav-tmp-" + rand.Text()
+		tmpPath := tmpName
+		if dir != "." {
+			tmpPath = path.Join(dir, tmpName)
+		}
+		f, err := root.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+		if errors.Is(err, iofs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return nil, "", errFromOS(err)
+		}
+		return f, tmpPath, nil
+	}
+	return nil, "", fmt.Errorf("webdav: failed to allocate temporary file")
+}
+
 func (fs LocalFileSystem) Create(ctx context.Context, name string, body io.ReadCloser, opts *CreateOptions) (fi *FileInfo, created bool, err error) {
 	p, err := fs.relPath(name)
 	if err != nil {
 		return nil, false, err
+	}
+	if p == "." {
+		return nil, false, NewHTTPError(http.StatusMethodNotAllowed, fmt.Errorf("webdav: cannot overwrite root collection with a file"))
 	}
 	root, err := fs.openRoot()
 	if err != nil {
@@ -219,26 +267,49 @@ func (fs LocalFileSystem) Create(ctx context.Context, name string, body io.ReadC
 	}
 	defer root.Close()
 
-	fi, _ = statRoot(root, p, name)
+	if err := checkParentDir(root, p); err != nil {
+		return nil, false, err
+	}
+
+	origStat, err := root.Stat(p)
+	if err != nil {
+		if !errors.Is(err, iofs.ErrNotExist) {
+			return nil, false, errFromOS(err)
+		}
+	} else {
+		if origStat.IsDir() {
+			return nil, false, NewHTTPError(http.StatusMethodNotAllowed, fmt.Errorf("webdav: cannot overwrite collection with a file"))
+		}
+		fi = fileInfoFromOS(name, origStat)
+	}
 	created = fi == nil
 
 	if err := checkConditionalMatches(fi, opts.IfMatch, opts.IfNoneMatch); err != nil {
 		return nil, false, err
 	}
 
-	wc, err := root.Create(p)
+	perm := os.FileMode(0666)
+	if origStat != nil {
+		perm = origStat.Mode() & os.ModePerm
+	}
+	wc, tmpPath, err := createTempInRoot(root, path.Dir(p), perm)
 	if err != nil {
-		return nil, false, errFromOS(err)
+		return nil, false, err
 	}
 	defer wc.Close()
 
 	if _, err := io.Copy(wc, body); err != nil {
-		root.Remove(p)
+		wc.Close()
+		root.Remove(tmpPath)
 		return nil, false, err
 	}
 	if err := wc.Close(); err != nil {
-		root.Remove(p)
+		root.Remove(tmpPath)
 		return nil, false, err
+	}
+	if err := root.Rename(tmpPath, p); err != nil {
+		root.Remove(tmpPath)
+		return nil, false, errFromOS(err)
 	}
 
 	fi, err = statRoot(root, p, name)
@@ -293,6 +364,10 @@ func (fs LocalFileSystem) Mkdir(ctx context.Context, name string) error {
 		return err
 	}
 	defer root.Close()
+
+	if err := checkParentDir(root, p); err != nil {
+		return err
+	}
 
 	if err := root.Mkdir(p, 0755); os.IsExist(err) {
 		return NewHTTPError(http.StatusMethodNotAllowed, err)
@@ -358,6 +433,40 @@ func isSubPath(dir, p string) bool {
 	return strings.HasPrefix(p, dir+"/")
 }
 
+// isSameDirEntry reports whether srcPath and dstPath refer to the same
+// directory entry (for example, a case-only rename on a case-insensitive file
+// system), rather than two distinct hard links to the same inode.
+func isSameDirEntry(root *os.Root, srcPath, dstPath string, srcInfo os.FileInfo) bool {
+	srcDir, dstDir := path.Dir(srcPath), path.Dir(dstPath)
+	srcDirInfo, err := root.Stat(srcDir)
+	if err != nil {
+		return false
+	}
+	dstDirInfo, err := root.Stat(dstDir)
+	if err != nil || !os.SameFile(srcDirInfo, dstDirInfo) {
+		return false
+	}
+	entries, err := iofs.ReadDir(root.FS(), srcDir)
+	if err != nil {
+		return false
+	}
+	matches := 0
+	for _, e := range entries {
+		entryPath := e.Name()
+		if srcDir != "." {
+			entryPath = path.Join(srcDir, entryPath)
+		}
+		info, err := root.Lstat(entryPath)
+		if err == nil && os.SameFile(srcInfo, info) {
+			matches++
+			if matches > 1 {
+				return false
+			}
+		}
+	}
+	return matches == 1
+}
+
 func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *CopyOptions) (created bool, err error) {
 	srcPath, err := fs.relPath(src)
 	if err != nil {
@@ -384,12 +493,28 @@ func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *Co
 		return false, NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: cannot copy a collection into itself"))
 	}
 
-	if _, err := root.Stat(dstPath); err != nil {
+	if err := checkParentDir(root, dstPath); err != nil {
+		return false, err
+	}
+
+	if dstInfo, err := root.Stat(dstPath); err != nil {
 		if !os.IsNotExist(err) {
 			return false, errFromOS(err)
 		}
-		created = true
+		if _, lerr := root.Lstat(dstPath); lerr == nil {
+			if options.NoOverwrite {
+				return false, NewHTTPError(http.StatusPreconditionFailed, os.ErrExist)
+			}
+			if err := removeAll(root, dstPath); err != nil {
+				return false, err
+			}
+		} else {
+			created = true
+		}
 	} else {
+		if os.SameFile(srcInfo, dstInfo) {
+			return false, NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: cannot copy a resource onto itself"))
+		}
 		if options.NoOverwrite {
 			return false, NewHTTPError(http.StatusPreconditionFailed, os.ErrExist)
 		}
@@ -475,17 +600,45 @@ func (fs LocalFileSystem) Move(ctx context.Context, src, dst string, options *Mo
 	}
 	defer root.Close()
 
+	if _, err := root.Stat(srcPath); err != nil && isPathEscapesError(err) {
+		return false, errFromOS(err)
+	}
+	srcInfo, err := root.Lstat(srcPath)
+	if err != nil {
+		return false, errFromOS(err)
+	}
+
+	if srcInfo.IsDir() && isSubPath(srcPath, dstPath) {
+		return false, NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: cannot move a collection into itself"))
+	}
+
+	if err := checkParentDir(root, dstPath); err != nil {
+		return false, err
+	}
+
 	if _, err := root.Stat(dstPath); err != nil {
 		if !os.IsNotExist(err) {
 			return false, errFromOS(err)
 		}
-		created = true
+		if _, lerr := root.Lstat(dstPath); lerr == nil {
+			if options.NoOverwrite {
+				return false, NewHTTPError(http.StatusPreconditionFailed, os.ErrExist)
+			}
+			if err := removeAll(root, dstPath); err != nil {
+				return false, err
+			}
+		} else {
+			created = true
+		}
 	} else {
 		if options.NoOverwrite {
 			return false, NewHTTPError(http.StatusPreconditionFailed, os.ErrExist)
 		}
-		if err := removeAll(root, dstPath); err != nil {
-			return false, err
+		dstLstat, lerr := root.Lstat(dstPath)
+		if lerr != nil || !os.SameFile(srcInfo, dstLstat) || !isSameDirEntry(root, srcPath, dstPath, srcInfo) {
+			if err := removeAll(root, dstPath); err != nil {
+				return false, err
+			}
 		}
 	}
 
