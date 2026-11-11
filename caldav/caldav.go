@@ -104,10 +104,14 @@ type Calendar struct {
 }
 
 // CalendarUpdate holds the changes a PROPPATCH request makes to a calendar.
-// A nil field is left as is; removing a property sets it to the empty string.
+// A nil field is left as is; removing a string property sets it to the empty
+// string, and removing the calendar timezone sets RemoveTimezone to true.
 type CalendarUpdate struct {
-	Name        *string
-	Description *string
+	Name           *string
+	Description    *string
+	Color          *string
+	Timezone       *ical.Calendar
+	RemoveTimezone bool
 }
 
 type CalendarCompRequest struct {
