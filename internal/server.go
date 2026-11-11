@@ -264,10 +264,16 @@ func ServeXML(w http.ResponseWriter) *xml.Encoder {
 	return xml.NewEncoder(w)
 }
 
+// ServeMultiStatus serves a 207 Multi-Status response holding ms. Responses
+// built one after the other are better served with StreamMultiStatus.
 func ServeMultiStatus(w http.ResponseWriter, ms *MultiStatus) error {
-	// TODO: streaming
-	w.WriteHeader(http.StatusMultiStatus)
-	return ServeXML(w).Encode(ms)
+	mw := NewMultiStatusWriter(w)
+	mw.ResponseDescription = ms.ResponseDescription
+	mw.SyncToken = ms.SyncToken
+	if err := mw.WriteResponses(ms.Responses); err != nil {
+		return err
+	}
+	return mw.Close()
 }
 
 // HrefErrorResponses splits err, an error a backend returned along with
@@ -370,10 +376,14 @@ func containsPath(paths []string, p string) bool {
 // Delete, Copy and Move can report the members of the target collection that
 // failed while the others succeeded with *HrefErrors (see
 // HrefErrorResponses): Handler then replies with a 207 Multi-Status response.
+//
+// PropFind writes the responses to mw as it builds them. An error it returns
+// once it has written a response aborts the response (see
+// StreamMultiStatus).
 type Backend interface {
 	Options(r *http.Request) (caps []string, allow []string, err error)
 	HeadGet(w http.ResponseWriter, r *http.Request) error
-	PropFind(r *http.Request, pf *PropFind, depth Depth) (*MultiStatus, error)
+	PropFind(r *http.Request, pf *PropFind, depth Depth, mw *MultiStatusWriter) error
 	PropPatch(r *http.Request, pu *PropertyUpdate) (*Response, error)
 	Put(w http.ResponseWriter, r *http.Request) error
 	Delete(r *http.Request) error
@@ -503,12 +513,9 @@ func (h *Handler) handlePropfind(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 
-	ms, err := h.Backend.PropFind(r, &propfind, depth)
-	if err != nil {
-		return err
-	}
-
-	return ServeMultiStatus(w, ms)
+	return StreamMultiStatus(w, r, func(mw *MultiStatusWriter) error {
+		return h.Backend.PropFind(r, &propfind, depth, mw)
+	})
 }
 
 type PropFindFunc func(raw *RawXMLValue) (interface{}, error)
@@ -550,6 +557,16 @@ func isAllProp(name xml.Name, include *Include) bool {
 		}
 	}
 	return false
+}
+
+// CheckPropFind returns the error NewPropFindResponse fails with for a request
+// which doesn't ask for any properties: one with neither a propname, an
+// allprop nor a prop element.
+func CheckPropFind(propfind *PropFind) error {
+	if propfind.PropName == nil && propfind.AllProp == nil && propfind.Prop == nil {
+		return HTTPErrorf(http.StatusBadRequest, "webdav: request missing propname, allprop or prop element")
+	}
+	return nil
 }
 
 func NewPropFindResponse(path string, propfind *PropFind, props map[xml.Name]PropFindFunc) (*Response, error) {
@@ -632,7 +649,7 @@ func NewPropFindResponseWithDeadProps(path string, propfind *PropFind, props, de
 			}
 		}
 	} else {
-		return nil, HTTPErrorf(http.StatusBadRequest, "webdav: request missing propname, allprop or prop element")
+		return nil, CheckPropFind(propfind)
 	}
 
 	return resp, nil

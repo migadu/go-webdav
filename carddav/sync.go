@@ -86,20 +86,18 @@ func (h *Handler) handleSyncCollection(r *http.Request, w http.ResponseWriter, s
 	}
 
 	propfind := internal.PropFind{Prop: sc.Prop}
-	resps := make([]internal.Response, 0, len(res.Updated))
-	for i := range res.Updated {
-		resp, err := b.propFindAddressObject(r.Context(), &propfind, true, &res.Updated[i])
-		if err != nil {
-			return err
+	return internal.ServeSyncCollection(w, r, res.SyncToken, res.Deleted, res.Truncated, func(mw *internal.MultiStatusWriter) error {
+		for i := range res.Updated {
+			resp, err := b.propFindAddressObject(r.Context(), &propfind, true, &res.Updated[i])
+			if err != nil {
+				return err
+			}
+			if err := mw.WriteResponse(resp); err != nil {
+				return err
+			}
 		}
-		resps = append(resps, *resp)
-	}
-
-	ms, err := internal.NewSyncCollectionMultiStatus(r.URL.Path, res.SyncToken, resps, res.Deleted, res.Truncated)
-	if err != nil {
-		return err
-	}
-	return internal.ServeMultiStatus(w, ms)
+		return nil
+	})
 }
 
 // supportedReportSet returns the DAV:supported-report-set of address books.

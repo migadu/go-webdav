@@ -35,6 +35,14 @@ type PutAddressObjectOptions struct {
 // with a 207 Multi-Status response listing each failed resource with its own
 // status, instead of failing the whole request. Any other error fails the
 // whole request.
+//
+// The responses to PROPFIND and REPORT requests are streamed: each resource
+// is written to the client as soon as it's built. An error failing the whole
+// request once some resources have been written, such as ListAddressObjects
+// failing for an address book of a Depth: infinity PROPFIND after the
+// previous address books were listed, can't change the status of the
+// response anymore: the response is aborted instead, so that the client sees
+// it's incomplete.
 type Backend interface {
 	AddressBookHomeSetPath(ctx context.Context) (string, error)
 	ListAddressBooks(ctx context.Context) ([]AddressBook, error)
@@ -166,7 +174,7 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
 	if report.Query != nil {
 		return h.handleQuery(r, w, report.Query)
 	} else if report.Multiget != nil {
-		return h.handleMultiget(r.Context(), w, report.Multiget)
+		return h.handleMultiget(r, w, report.Multiget)
 	} else if report.SyncCollection != nil {
 		return h.handleSyncCollection(r, w, report.SyncCollection)
 	}
@@ -262,32 +270,33 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *add
 		return err
 	}
 
-	resps := make([]internal.Response, 0, len(aos)+len(errResps))
-	for _, ao := range aos {
-		b := backend{
-			Backend: h.Backend,
-			Prefix:  strings.TrimSuffix(h.Prefix, "/"),
-		}
-		propfind := internal.PropFind{
-			Prop:     query.Prop,
-			AllProp:  query.AllProp,
-			PropName: query.PropName,
-		}
-		resp, err := b.propFindAddressObject(r.Context(), &propfind, true, &ao)
-		if err != nil {
-			return err
-		}
-		resps = append(resps, *resp)
+	b := backend{
+		Backend: h.Backend,
+		Prefix:  strings.TrimSuffix(h.Prefix, "/"),
 	}
-	resps = append(resps, errResps...)
-
-	ms := internal.NewMultiStatus(resps...)
-	return internal.ServeMultiStatus(w, ms)
+	propfind := internal.PropFind{
+		Prop:     query.Prop,
+		AllProp:  query.AllProp,
+		PropName: query.PropName,
+	}
+	return internal.StreamMultiStatus(w, r, func(mw *internal.MultiStatusWriter) error {
+		for i := range aos {
+			resp, err := b.propFindAddressObject(r.Context(), &propfind, true, &aos[i])
+			if err != nil {
+				return err
+			}
+			if err := mw.WriteResponse(resp); err != nil {
+				return err
+			}
+		}
+		return mw.WriteResponses(errResps)
+	})
 }
 
 // AddressObjectsBackend is an optional interface a Backend can implement to
 // fetch the address objects of a addressbook-multiget REPORT in a single call,
-// rather than calling GetAddressObject for each of them.
+// rather than calling GetAddressObject for each of them, in which case the
+// response for each object is sent before the next one is fetched.
 type AddressObjectsBackend interface {
 	// GetAddressObjects returns the address objects found at paths, in any order.
 	// The Path of each must be the path it was requested by: paths without
@@ -296,7 +305,21 @@ type AddressObjectsBackend interface {
 	GetAddressObjects(ctx context.Context, paths []string, req *AddressDataRequest) ([]AddressObject, error)
 }
 
-func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, multiget *addressbookMultiget) error {
+// handleMultiget serves an addressbook-multiget REPORT. Without
+// AddressObjectsBackend, the response for each address object is written as
+// soon as the object is fetched, before the next one is.
+func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multiget *addressbookMultiget) error {
+	ctx := r.Context()
+	propfind := internal.PropFind{
+		Prop:     multiget.Prop,
+		AllProp:  multiget.AllProp,
+		PropName: multiget.PropName,
+	}
+	// Check it before the responses for missing objects are written
+	if err := internal.CheckPropFind(&propfind); err != nil {
+		return err
+	}
+
 	var dataReq AddressDataRequest
 	if multiget.Prop != nil {
 		var addressData addressDataReq
@@ -326,41 +349,34 @@ func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, mul
 		}
 	}
 
-	var resps []internal.Response
-	for _, href := range multiget.Hrefs {
-		var ao *AddressObject
-		var err error
-		if objects != nil {
-			if ao = objects[href.Path]; ao == nil {
-				err = internal.HTTPErrorf(http.StatusNotFound, "carddav: address object not found")
-			}
-		} else {
-			ao, err = h.Backend.GetAddressObject(ctx, href.Path, &dataReq)
-		}
-		if err != nil {
-			resp := internal.NewErrorResponse(href.Path, err)
-			resps = append(resps, *resp)
-			continue
-		}
-
-		b := backend{
-			Backend: h.Backend,
-			Prefix:  strings.TrimSuffix(h.Prefix, "/"),
-		}
-		propfind := internal.PropFind{
-			Prop:     multiget.Prop,
-			AllProp:  multiget.AllProp,
-			PropName: multiget.PropName,
-		}
-		resp, err := b.propFindAddressObject(ctx, &propfind, true, ao)
-		if err != nil {
-			return err
-		}
-		resps = append(resps, *resp)
+	b := backend{
+		Backend: h.Backend,
+		Prefix:  strings.TrimSuffix(h.Prefix, "/"),
 	}
+	return internal.StreamMultiStatus(w, r, func(mw *internal.MultiStatusWriter) error {
+		for _, href := range multiget.Hrefs {
+			var ao *AddressObject
+			var err error
+			if objects != nil {
+				if ao = objects[href.Path]; ao == nil {
+					err = internal.HTTPErrorf(http.StatusNotFound, "carddav: address object not found")
+				}
+			} else {
+				ao, err = h.Backend.GetAddressObject(ctx, href.Path, &dataReq)
+			}
 
-	ms := internal.NewMultiStatus(resps...)
-	return internal.ServeMultiStatus(w, ms)
+			var resp *internal.Response
+			if err != nil {
+				resp = internal.NewErrorResponse(href.Path, err)
+			} else if resp, err = b.propFindAddressObject(ctx, &propfind, true, ao); err != nil {
+				return err
+			}
+			if err := mw.WriteResponse(resp); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 type backend struct {
@@ -460,96 +476,91 @@ func (b *backend) HeadGet(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth internal.Depth) (*internal.MultiStatus, error) {
+// PropFind writes the responses to a PROPFIND request to mw. The members of a
+// collection are listed before the response for the collection is written:
+// for a Depth: 0 or 1 request, any error listing resources is served as the
+// status of the request (see internal.StreamMultiStatus).
+func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth internal.Depth, mw *internal.MultiStatusWriter) error {
+	ctx := r.Context()
 	resType := b.resourceTypeAtPath(r.URL.Path)
 
 	var dataReq AddressDataRequest
-	var resps []internal.Response
 
 	switch resType {
 	case resourceTypeRoot:
-		resp, err := b.propFindRoot(r.Context(), propfind)
+		resp, err := b.propFindRoot(ctx, propfind)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		resps = append(resps, *resp)
+		return mw.WriteResponse(resp)
 	case resourceTypeUserPrincipal:
-		principalPath, err := b.Backend.CurrentUserPrincipal(r.Context())
+		principalPath, err := b.Backend.CurrentUserPrincipal(ctx)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		if r.URL.Path == principalPath {
-			resp, err := b.propFindUserPrincipal(r.Context(), propfind)
-			if err != nil {
-				return nil, err
-			}
-			resps = append(resps, *resp)
-			if depth != internal.DepthZero {
-				resp, err := b.propFindHomeSet(r.Context(), propfind)
-				if err != nil {
-					return nil, err
-				}
-				resps = append(resps, *resp)
-				if depth == internal.DepthInfinity {
-					resps_, err := b.propFindAllAddressBooks(r.Context(), propfind, true)
-					if err != nil {
-						return nil, err
-					}
-					resps = append(resps, resps_...)
-				}
-			}
+		if r.URL.Path != principalPath {
+			return nil
 		}
+		resp, err := b.propFindUserPrincipal(ctx, propfind)
+		if err != nil {
+			return err
+		}
+		if depth == internal.DepthZero {
+			return mw.WriteResponse(resp)
+		}
+		homeSetResp, err := b.propFindHomeSet(ctx, propfind)
+		if err != nil {
+			return err
+		}
+		if depth != internal.DepthInfinity {
+			if err := mw.WriteResponse(resp); err != nil {
+				return err
+			}
+			return mw.WriteResponse(homeSetResp)
+		}
+		return b.propFindAllAddressBooks(ctx, mw, propfind, true, resp, homeSetResp)
 	case resourceTypeAddressBookHomeSet:
-		homeSetPath, err := b.Backend.AddressBookHomeSetPath(r.Context())
+		homeSetPath, err := b.Backend.AddressBookHomeSetPath(ctx)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		if r.URL.Path == homeSetPath {
-			resp, err := b.propFindHomeSet(r.Context(), propfind)
-			if err != nil {
-				return nil, err
-			}
-			resps = append(resps, *resp)
-			if depth != internal.DepthZero {
-				recurse := depth == internal.DepthInfinity
-				resps_, err := b.propFindAllAddressBooks(r.Context(), propfind, recurse)
-				if err != nil {
-					return nil, err
-				}
-				resps = append(resps, resps_...)
-			}
+		if r.URL.Path != homeSetPath {
+			return nil
 		}
+		resp, err := b.propFindHomeSet(ctx, propfind)
+		if err != nil {
+			return err
+		}
+		if depth == internal.DepthZero {
+			return mw.WriteResponse(resp)
+		}
+		recurse := depth == internal.DepthInfinity
+		return b.propFindAllAddressBooks(ctx, mw, propfind, recurse, resp)
 	case resourceTypeAddressBook:
-		ab, err := b.Backend.GetAddressBook(r.Context(), r.URL.Path)
+		ab, err := b.Backend.GetAddressBook(ctx, r.URL.Path)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		resp, err := b.propFindAddressBook(r.Context(), propfind, ab)
+		resp, err := b.propFindAddressBook(ctx, propfind, ab)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		resps = append(resps, *resp)
-		if depth != internal.DepthZero {
-			resps_, err := b.propFindAllAddressObjects(r.Context(), propfind, ab)
-			if err != nil {
-				return nil, err
-			}
-			resps = append(resps, resps_...)
+		if depth == internal.DepthZero {
+			return mw.WriteResponse(resp)
 		}
+		return b.propFindAllAddressObjects(ctx, mw, propfind, ab, resp)
 	case resourceTypeAddressObject:
-		ao, err := b.Backend.GetAddressObject(r.Context(), r.URL.Path, &dataReq)
+		ao, err := b.Backend.GetAddressObject(ctx, r.URL.Path, &dataReq)
 		if err != nil {
-			return nil, err
+			return err
 		}
-
-		resp, err := b.propFindAddressObject(r.Context(), propfind, false, ao)
+		resp, err := b.propFindAddressObject(ctx, propfind, false, ao)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		resps = append(resps, *resp)
+		return mw.WriteResponse(resp)
 	}
-
-	return internal.NewMultiStatus(resps...), nil
+	return nil
 }
 
 func (b *backend) propFindRoot(ctx context.Context, propfind *internal.PropFind) (*internal.Response, error) {
@@ -660,29 +671,37 @@ func (b *backend) propFindAddressBook(ctx context.Context, propfind *internal.Pr
 	return internal.NewPropFindResponse(ab.Path, propfind, props)
 }
 
-func (b *backend) propFindAllAddressBooks(ctx context.Context, propfind *internal.PropFind, recurse bool) ([]internal.Response, error) {
+// propFindAllAddressBooks writes resps, which end with the response for the
+// address book home set, followed by the responses for the address books,
+// along with their address objects if recurse is set. The address books are
+// listed before resps are written.
+func (b *backend) propFindAllAddressBooks(ctx context.Context, mw *internal.MultiStatusWriter, propfind *internal.PropFind, recurse bool, resps ...*internal.Response) error {
 	abs, err := b.Backend.ListAddressBooks(ctx)
 	errResps, err := internal.HrefErrorResponses(err)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	var resps []internal.Response
-	for _, ab := range abs {
-		resp, err := b.propFindAddressBook(ctx, propfind, &ab)
-		if err != nil {
-			return nil, err
-		}
-		resps = append(resps, *resp)
-		if recurse {
-			resps_, err := b.propFindAllAddressObjects(ctx, propfind, &ab)
-			if err != nil {
-				return nil, err
-			}
-			resps = append(resps, resps_...)
+	for _, resp := range resps {
+		if err := mw.WriteResponse(resp); err != nil {
+			return err
 		}
 	}
-	return append(resps, errResps...), nil
+	for i := range abs {
+		resp, err := b.propFindAddressBook(ctx, propfind, &abs[i])
+		if err != nil {
+			return err
+		}
+		if recurse {
+			err = b.propFindAllAddressObjects(ctx, mw, propfind, &abs[i], resp)
+		} else {
+			err = mw.WriteResponse(resp)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return mw.WriteResponses(errResps)
 }
 
 func (b *backend) propFindAddressObject(ctx context.Context, propfind *internal.PropFind, report bool, ao *AddressObject) (*internal.Response, error) {
@@ -733,23 +752,30 @@ func (b *backend) propFindAddressObject(ctx context.Context, propfind *internal.
 	return internal.NewPropFindResponse(ao.Path, propfind, props)
 }
 
-func (b *backend) propFindAllAddressObjects(ctx context.Context, propfind *internal.PropFind, ab *AddressBook) ([]internal.Response, error) {
+// propFindAllAddressObjects writes resp, the response for the address book
+// ab, followed by the responses for its address objects. The address objects
+// are listed before resp is written.
+func (b *backend) propFindAllAddressObjects(ctx context.Context, mw *internal.MultiStatusWriter, propfind *internal.PropFind, ab *AddressBook, resp *internal.Response) error {
 	var dataReq AddressDataRequest
 	aos, err := b.Backend.ListAddressObjects(ctx, ab.Path, &dataReq)
 	errResps, err := internal.HrefErrorResponses(err)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	resps := make([]internal.Response, 0, len(aos)+len(errResps))
-	for _, ao := range aos {
-		resp, err := b.propFindAddressObject(ctx, propfind, false, &ao)
-		if err != nil {
-			return nil, err
-		}
-		resps = append(resps, *resp)
+	if err := mw.WriteResponse(resp); err != nil {
+		return err
 	}
-	return append(resps, errResps...), nil
+	for i := range aos {
+		resp, err := b.propFindAddressObject(ctx, propfind, false, &aos[i])
+		if err != nil {
+			return err
+		}
+		if err := mw.WriteResponse(resp); err != nil {
+			return err
+		}
+	}
+	return mw.WriteResponses(errResps)
 }
 
 func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*internal.Response, error) {

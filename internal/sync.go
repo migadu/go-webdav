@@ -83,31 +83,43 @@ func CheckSyncCollection(q *SyncCollectionQuery) (syncToken string, err error) {
 	return strings.TrimSpace(q.SyncToken), nil
 }
 
-// NewSyncCollectionMultiStatus builds the response to a sync-collection REPORT
-// on the collection at path (RFC 6578 section 3.2): resps describe the updated
-// members, and each path in deleted is reported as 404 Not Found. If truncated
-// is set, the collection itself is reported as 507 Insufficient Storage with
-// the DAV:number-of-matches-within-limits postcondition (section 3.6).
-func NewSyncCollectionMultiStatus(path, syncToken string, resps []Response, deleted []string, truncated bool) (*MultiStatus, error) {
+// ServeSyncCollection serves the response to a sync-collection REPORT on the
+// collection at r.URL.Path (RFC 6578 section 3.2), with the new sync token
+// syncToken. writeUpdated writes the responses for the updated members to mw,
+// as StreamMultiStatus describes, and then each path in deleted is reported
+// as 404 Not Found. If truncated is set, the collection itself is reported as
+// 507 Insufficient Storage with the DAV:number-of-matches-within-limits
+// postcondition (section 3.6).
+func ServeSyncCollection(w http.ResponseWriter, r *http.Request, syncToken string, deleted []string, truncated bool, writeUpdated func(mw *MultiStatusWriter) error) error {
 	if syncToken == "" {
-		return nil, fmt.Errorf("webdav: missing sync-token in sync-collection response")
+		return fmt.Errorf("webdav: missing sync-token in sync-collection response")
 	}
-	for _, p := range deleted {
-		resps = append(resps, Response{
-			Hrefs:  []Href{{Path: p}},
-			Status: &Status{Code: http.StatusNotFound},
-		})
-	}
-	if truncated {
-		resps = append(resps, Response{
-			Hrefs:  []Href{{Path: path}},
-			Status: &Status{Code: http.StatusInsufficientStorage},
-			Error: &Error{Raw: []RawXMLValue{
-				*NewRawXMLElement(NumberOfMatchesWithinLimitsName, nil, nil),
-			}},
-		})
-	}
-	ms := NewMultiStatus(resps...)
-	ms.SyncToken = syncToken
-	return ms, nil
+	return StreamMultiStatus(w, r, func(mw *MultiStatusWriter) error {
+		if err := writeUpdated(mw); err != nil {
+			return err
+		}
+		for _, p := range deleted {
+			resp := Response{
+				Hrefs:  []Href{{Path: p}},
+				Status: &Status{Code: http.StatusNotFound},
+			}
+			if err := mw.WriteResponse(&resp); err != nil {
+				return err
+			}
+		}
+		if truncated {
+			resp := Response{
+				Hrefs:  []Href{{Path: r.URL.Path}},
+				Status: &Status{Code: http.StatusInsufficientStorage},
+				Error: &Error{Raw: []RawXMLValue{
+					*NewRawXMLElement(NumberOfMatchesWithinLimitsName, nil, nil),
+				}},
+			}
+			if err := mw.WriteResponse(&resp); err != nil {
+				return err
+			}
+		}
+		mw.SyncToken = syncToken
+		return nil
+	})
 }
