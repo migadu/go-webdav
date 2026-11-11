@@ -199,6 +199,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "MKCALENDAR":
 		err = h.handleMkcalendar(w, r)
 	default:
+		if pb, ok := h.Backend.(PushBackend); ok {
+			var handled bool
+			if handled, err = h.servePush(w, r, pb); handled {
+				break
+			}
+		}
 		b := backend{
 			Backend: h.Backend,
 			Prefix:  strings.TrimSuffix(h.Prefix, "/"),
@@ -593,7 +599,16 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 	}
 
 	if b.resourceTypeAtPath(r.Context(), r.URL.Path) != resourceTypeCalendarObject {
-		return caps, []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "MKCOL", "MKCALENDAR"}, nil
+		allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "MKCOL", "MKCALENDAR"}
+		// Advertise WebDAV-Push for the collections supporting it
+		// (draft-bitfire-webdav-push section 2)
+		if info, err := b.pushInfo(r.Context(), r.URL.Path); err != nil {
+			return nil, nil, err
+		} else if info != nil {
+			caps = append(caps, string(webdav.CapabilityPush))
+			allow = append(allow, http.MethodPost)
+		}
+		return caps, allow, nil
 	}
 
 	var dataReq CalendarCompRequest
@@ -742,7 +757,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 			return nil, err
 		}
 		if inbox != nil {
-			resp, err := b.propFindInbox(propfind, inbox)
+			resp, err := b.propFindInbox(r.Context(), propfind, inbox)
 			if err != nil {
 				return nil, err
 			}
@@ -807,6 +822,7 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 		})
 	}
 	internal.AddPrincipalProps(props, principalPath, "")
+	b.addPushProps(ctx, propfind, principalPath, props)
 	return internal.NewPropFindResponse(principalPath, propfind, props)
 }
 
@@ -827,6 +843,7 @@ func (b *backend) propFindHomeSet(ctx context.Context, propfind *internal.PropFi
 		}),
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName)),
 	}
+	b.addPushProps(ctx, propfind, homeSetPath, props)
 	return internal.NewPropFindResponse(homeSetPath, propfind, props)
 }
 
@@ -907,10 +924,11 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 
 	// TODO: CALDAV:min-date-time, CALDAV:max-date-time, CALDAV:max-instances, CALDAV:max-attendees-per-instance
 
+	b.addPushProps(ctx, propfind, cal.Path, props)
 	return internal.NewPropFindResponse(cal.Path, propfind, props)
 }
 
-func (b *backend) propFindInbox(propfind *internal.PropFind, inbox *Inbox) (*internal.Response, error) {
+func (b *backend) propFindInbox(ctx context.Context, propfind *internal.PropFind, inbox *Inbox) (*internal.Response, error) {
 	props := map[xml.Name]internal.PropFindFunc{
 		internal.ResourceTypeName:            internal.PropFindValue(internal.NewResourceType(internal.CollectionName, scheduleInboxName)),
 		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(newInboxPrivilegeSet(inbox.ReadOnly)),
@@ -918,6 +936,7 @@ func (b *backend) propFindInbox(propfind *internal.PropFind, inbox *Inbox) (*int
 		// sync-collection REPORTs are only served for calendars
 		internal.SupportedReportSetName: internal.PropFindValue(internal.NewSupportedReportSet(calendarQueryName, calendarMultigetName)),
 	}
+	b.addPushProps(ctx, propfind, inbox.Path, props)
 	return internal.NewPropFindResponse(inbox.Path, propfind, props)
 }
 
@@ -981,7 +1000,7 @@ func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.P
 	// A Depth: 1 PROPFIND only returns the internal members of a collection
 	// (RFC 4918 section 9.1)
 	if inbox != nil && path.Dir(path.Clean(inbox.Path)) == path.Clean(homeSetPath) {
-		resp, err := b.propFindInbox(propfind, inbox)
+		resp, err := b.propFindInbox(ctx, propfind, inbox)
 		if err != nil {
 			return nil, err
 		}
