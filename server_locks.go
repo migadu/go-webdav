@@ -226,9 +226,10 @@ func parentTarget(p string) lockTarget {
 //
 // A resource locked by several shared locks can be modified with the token
 // of any of them, so their roots are only returned if none was submitted.
+// Each root is returned once, even if several locks share it.
 func (b *backend) missingLocks(r *http.Request, targets ...lockTarget) ([]string, error) {
 	var missing []string
-	seen := make(map[string]bool)
+	seen := make(map[string]bool) // roots
 	for _, t := range targets {
 		locks, err := b.locks.Locks(r.Context(), t.path, t.members)
 		if err != nil {
@@ -259,10 +260,10 @@ func (b *backend) missingLocks(r *http.Request, targets ...lockTarget) ([]string
 				continue
 			}
 			for _, lock := range needed {
-				if seen[lock.Token] {
+				if seen[lock.Root] {
 					continue
 				}
-				seen[lock.Token] = true
+				seen[lock.Root] = true
 				href := lock.Root
 				if t.parent || isPathBelow(t.path, lock.Root) || (t.collection && lock.Root == t.path) {
 					href = collectionHref(lock.Root)
@@ -473,17 +474,20 @@ func (pl *propFindLocks) discovery(fi *FileInfo) (*internal.LockDiscovery, error
 // with existing locks (RFC 4918 section 9.10.6). If some of these locks are
 // rooted at members of the Request-URI, it lists them, failing the
 // Request-URI with 424 Failed Dependency, to be served in a multi-status
-// response (section 9.10.9).
+// response (section 9.10.9). Each root is listed once, even if several shared
+// locks share it: an href can't appear in two responses (section 14.24).
 func (b *backend) lockConflictError(r *http.Request, lock *Lock) error {
 	locks, err := b.locks.Locks(r.Context(), lock.Root, lock.Recursive)
 	if err != nil {
 		return err
 	}
 	var hrefs, members []string
+	seen := make(map[string]bool) // roots
 	for i := range locks {
-		if !lock.conflicts(&locks[i]) {
+		if !lock.conflicts(&locks[i]) || seen[locks[i].Root] {
 			continue
 		}
+		seen[locks[i].Root] = true
 		switch root := locks[i].Root; {
 		case isPathBelow(lock.Root, root):
 			hrefs = append(hrefs, collectionHref(root))
