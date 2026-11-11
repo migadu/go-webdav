@@ -520,6 +520,64 @@ func isSameDirEntry(root *os.Root, srcPath, dstPath string, srcInfo os.FileInfo)
 	return matches == 1
 }
 
+// isSeparateLink reports whether dstPath, which resolves to the same file as
+// srcPath, is a directory entry of its own, which can be removed without
+// removing srcPath: a symbolic link, or another hard link to a regular file.
+// It returns false if it can't tell, such as if srcPath is a symbolic link,
+// which may resolve through dstPath, or if both paths may name the same
+// entry: aliases on a case-insensitive file system, or paths through a
+// symbolic link to their directory.
+func isSeparateLink(root *os.Root, srcPath, dstPath string) bool {
+	srcInfo, err := root.Lstat(srcPath)
+	if err != nil || srcInfo.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	dstInfo, err := root.Lstat(dstPath)
+	if err != nil {
+		return false
+	}
+	if dstInfo.Mode()&os.ModeSymlink != 0 {
+		// Removing a symbolic link leaves what it points to alone
+		return true
+	}
+	if !srcInfo.Mode().IsRegular() || !os.SameFile(srcInfo, dstInfo) {
+		return false
+	}
+
+	srcDir, dstDir := path.Dir(srcPath), path.Dir(dstPath)
+	srcDirInfo, err := root.Stat(srcDir)
+	if err != nil {
+		return false
+	}
+	dstDirInfo, err := root.Stat(dstDir)
+	if err != nil {
+		return false
+	}
+	if !os.SameFile(srcDirInfo, dstDirInfo) {
+		// Each entry belongs to a single directory
+		return true
+	}
+	// In the same directory, the names are two entries only if both are
+	// listed: otherwise one is an alias of the other, the file system
+	// ignoring case for instance. Unlike isSameDirEntry, this doesn't count
+	// the entries for the file, which may have other hard links.
+	srcName, dstName := path.Base(srcPath), path.Base(dstPath)
+	if srcName == dstName {
+		return false
+	}
+	entries, err := iofs.ReadDir(root.FS(), srcDir)
+	if err != nil {
+		return false
+	}
+	found := 0
+	for _, e := range entries {
+		if e.Name() == srcName || e.Name() == dstName {
+			found++
+		}
+	}
+	return found == 2
+}
+
 func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *CopyOptions) (created bool, err error) {
 	srcPath, err := fs.relPath(src)
 	if err != nil {
@@ -571,7 +629,10 @@ func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *Co
 			created = true
 		}
 	} else {
-		if os.SameFile(srcInfo, dstInfo) {
+		// A destination which is another link to the source file is
+		// removed like any other (RFC 4918 section 9.8.4), leaving the
+		// source alone: overwriting it in place would truncate the source
+		if os.SameFile(srcInfo, dstInfo) && !isSeparateLink(root, srcPath, dstPath) {
 			return false, NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: cannot copy a resource onto itself"))
 		}
 		if options.NoOverwrite {

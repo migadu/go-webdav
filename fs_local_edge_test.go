@@ -90,11 +90,18 @@ func TestLocalFileSystemEdgeCases(t *testing.T) {
 		}
 		fs := webdav.LocalFileSystem(dir)
 
-		// Copy onto hardlink of same file must be refused with 403 without losing data.
-		_, err := fs.Copy(ctx, "/orig.txt", "/hard.txt", &webdav.CopyOptions{})
-		checkHTTPErrorCode(t, err, http.StatusForbidden)
+		// Copy onto hardlink of same file replaces it with a copy without losing data.
+		if _, err := fs.Copy(ctx, "/orig.txt", "/hard.txt", &webdav.CopyOptions{}); err != nil {
+			t.Fatalf("Copy(/orig.txt, /hard.txt): %v", err)
+		}
 		checkTestFile(t, origPath, "precious")
 		checkTestFile(t, hardPath, "precious")
+		if err := os.Remove(hardPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(origPath, hardPath); err != nil {
+			t.Fatalf("os.Link: %v", err)
+		}
 
 		// Move onto hardlink of same file must succeed and remove orig.txt while keeping hard.txt.
 		created, err := fs.Move(ctx, "/orig.txt", "/hard.txt", &webdav.MoveOptions{})
