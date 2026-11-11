@@ -1,6 +1,9 @@
 package internal
 
 import (
+	"bufio"
+	"compress/gzip"
+	"compress/zlib"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -40,6 +43,12 @@ func DecodeXMLRequest(r *http.Request, v interface{}) error {
 	}
 
 	if err := xml.NewDecoder(r.Body).Decode(v); err != nil {
+		// Keep the status of errors returned while reading the body, e.g.
+		// HTTP 413 for a decompression bomb
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) {
+			return err
+		}
 		return &HTTPError{http.StatusBadRequest, err}
 	}
 	return nil
@@ -48,6 +57,199 @@ func DecodeXMLRequest(r *http.Request, v interface{}) error {
 func IsRequestBodyEmpty(r *http.Request) bool {
 	_, err := r.Body.Read(nil)
 	return err == io.EOF
+}
+
+// acceptedContentCodings lists the request content codings supported by
+// DecodeRequestBody, besides "identity".
+const acceptedContentCodings = "gzip, deflate"
+
+const (
+	// maxContentCodings is the maximum number of content codings, besides
+	// "identity", applied to a request body. Each one adds a decoder to the
+	// chain reading the body, so a header listing thousands of them would
+	// exhaust memory and the stack.
+	maxContentCodings = 4
+	// minDecodedBodyLimit is the decoded request body size which is always
+	// allowed, regardless of its compression ratio.
+	minDecodedBodyLimit = 1 << 20 // 1 MiB
+	// maxDecodedBodyRatio is the maximum ratio between the size of a decoded
+	// request body and the number of encoded bytes read to produce it.
+	maxDecodedBodyRatio = 100
+)
+
+// DecodeRequestBody undoes the content codings listed in the Content-Encoding
+// header of a request (RFC 9110 section 8.4), so that the request body can be
+// read as-is.
+//
+// The returned request is a shallow copy of r without the Content-Encoding
+// header. If the body needs to be decoded, the Content-Length header is
+// dropped as well, since it refers to the encoded body. If r has no
+// Content-Encoding header, r itself is returned.
+//
+// If a content coding isn't supported, an HTTP 415 error is returned and an
+// Accept-Encoding header listing the supported content codings is added to w
+// (RFC 7694 section 3). More than 4 content codings besides "identity" are
+// refused with an HTTP 415 error as well.
+//
+// Reading the decoded body fails with an HTTP 400 error if the encoded data is
+// malformed, truncated or fails its checksum. Errors reading the encoded body
+// itself, e.g. from http.MaxBytesReader, are returned as is.
+//
+// To defuse decompression bombs, reading the decoded body fails with an HTTP
+// 413 error once it is larger than both 1 MiB and 100 times the number of
+// bytes read so far from the encoded body. A limit on the size of the encoded
+// body, e.g. set with http.MaxBytesReader, thus also bounds the decoded body.
+func DecodeRequestBody(w http.ResponseWriter, r *http.Request) (*http.Request, error) {
+	values := r.Header.Values("Content-Encoding")
+	if len(values) == 0 {
+		return r, nil
+	}
+
+	var codings []string
+	for _, v := range values {
+		for _, coding := range strings.Split(v, ",") {
+			// Content codings are case-insensitive (RFC 9110 section 8.4.1)
+			coding = strings.ToLower(strings.TrimSpace(coding))
+			switch coding {
+			case "", "identity":
+				// Nothing to decode
+			case "gzip", "x-gzip", "deflate":
+				if len(codings) == maxContentCodings {
+					return r, HTTPErrorf(http.StatusUnsupportedMediaType, "webdav: more than %d content codings in Content-Encoding", maxContentCodings)
+				}
+				codings = append(codings, coding)
+			default:
+				w.Header().Set("Accept-Encoding", acceptedContentCodings)
+				return r, HTTPErrorf(http.StatusUnsupportedMediaType, "webdav: unsupported Content-Encoding %q", coding)
+			}
+		}
+	}
+
+	r2 := new(http.Request)
+	*r2 = *r
+	r2.Header = r.Header.Clone()
+	r2.Header.Del("Content-Encoding")
+	if len(codings) == 0 {
+		return r2, nil
+	}
+
+	src := &countingBody{ReadCloser: r.Body}
+	if src.ReadCloser == nil {
+		src.ReadCloser = http.NoBody
+	}
+	var body io.Reader = src
+	// Codings are listed in the order in which they were applied, so they
+	// have to be undone in reverse order
+	for i := len(codings) - 1; i >= 0; i-- {
+		body = &contentDecoder{coding: codings[i], r: body}
+	}
+	r2.Body = &decodedBody{r: body, src: src}
+	r2.ContentLength = -1
+	r2.Header.Del("Content-Length")
+	return r2, nil
+}
+
+// contentDecoder decodes a content coding. It doesn't read anything until the
+// first Read call, so that handlers can reject a request before consuming its
+// body.
+type contentDecoder struct {
+	coding string
+	r      io.Reader
+	dec    io.Reader
+	err    error
+}
+
+func (d *contentDecoder) Read(p []byte) (int, error) {
+	if d.dec == nil && d.err == nil {
+		d.dec, d.err = newContentDecoder(d.coding, d.r)
+	}
+	if d.err != nil {
+		return 0, d.err
+	}
+	return d.dec.Read(p)
+}
+
+func newContentDecoder(coding string, r io.Reader) (io.Reader, error) {
+	br := bufio.NewReader(r)
+	// Leave an empty body empty, even though it's not valid encoded data, so
+	// that e.g. a PROPFIND request without a body is still accepted
+	if _, err := br.Peek(1); err != nil {
+		return nil, err
+	}
+
+	switch coding {
+	case "gzip", "x-gzip":
+		return gzip.NewReader(br)
+	case "deflate":
+		// "deflate" is the zlib format (RFC 9110 section 8.4.1.2)
+		return zlib.NewReader(br)
+	default:
+		panic(fmt.Sprintf("webdav: unexpected content coding %q", coding))
+	}
+}
+
+// countingBody counts the bytes read from a request body, and records the
+// error reading it failed with, if any.
+type countingBody struct {
+	io.ReadCloser
+	n   int64
+	err error
+}
+
+func (c *countingBody) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	c.n += int64(n)
+	if err != nil && err != io.EOF {
+		c.err = err
+	}
+	return n, err
+}
+
+// decodedBody reads the decoded request body and closes the original one.
+//
+// It fails with an HTTP 413 error once more than minDecodedBodyLimit bytes and
+// more than maxDecodedBodyRatio times the number of bytes read from the
+// original body have been decoded, and with an HTTP 400 error if the encoded
+// data is malformed. Errors reading the original body are returned as is.
+type decodedBody struct {
+	r   io.Reader     // decoded body
+	src *countingBody // original body
+	n   int64         // number of decoded bytes
+	err error
+}
+
+func (b *decodedBody) Read(p []byte) (int, error) {
+	if b.err != nil {
+		return 0, b.err
+	}
+
+	n, err := b.r.Read(p)
+	b.n += int64(n)
+	if err != nil && err != io.EOF {
+		if b.src.err != nil {
+			// Reading the encoded body failed, e.g. because it's larger than
+			// allowed: return that error as is
+			err = b.src.err
+		} else {
+			// The encoded body is malformed, truncated or fails its checksum
+			err = &HTTPError{Code: http.StatusBadRequest, Err: fmt.Errorf("webdav: malformed encoded request body: %w", err)}
+		}
+		b.err = err
+		return n, err
+	}
+	limit := maxDecodedBodyRatio * b.src.n
+	if limit < minDecodedBodyLimit {
+		limit = minDecodedBodyLimit
+	}
+	if b.n > limit {
+		b.err = HTTPErrorf(http.StatusRequestEntityTooLarge, "webdav: decoded request body too large (compression ratio over %d:1)", maxDecodedBodyRatio)
+		return 0, b.err
+	}
+	return n, err
+}
+
+func (b *decodedBody) Close() error {
+	return b.src.Close()
 }
 
 func ServeXML(w http.ResponseWriter) *xml.Encoder {
@@ -179,7 +381,12 @@ type Handler struct {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	var err error
+	r, err := DecodeRequestBody(w, r)
+	if err != nil {
+		ServeError(w, err)
+		return
+	}
+
 	if h.Backend == nil {
 		err = fmt.Errorf("webdav: no backend available")
 	} else {
