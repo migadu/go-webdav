@@ -72,8 +72,15 @@ func (h *Handler) handleSyncCollection(r *http.Request, w http.ResponseWriter, s
 	}
 
 	res, err := syncBackend.SyncCollection(r.Context(), r.URL.Path, &query)
-	if err != nil {
-		return err
+	errResps, plainErr := internal.HrefErrorResponses(err)
+	if plainErr != nil {
+		return plainErr
+	}
+	if res == nil {
+		if err != nil {
+			return err
+		}
+		return internal.HTTPErrorf(http.StatusInternalServerError, "caldav: SyncCollection returned nil response")
 	}
 
 	propfind := internal.PropFind{Prop: sc.Prop}
@@ -87,7 +94,7 @@ func (h *Handler) handleSyncCollection(r *http.Request, w http.ResponseWriter, s
 				return err
 			}
 		}
-		return nil
+		return mw.WriteResponses(errResps)
 	})
 }
 
