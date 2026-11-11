@@ -486,6 +486,13 @@ func isSubPath(dir, p string) bool {
 	return strings.HasPrefix(p, dir+"/")
 }
 
+// errOverwriteSourceParent is the error of a COPY or MOVE request overwriting
+// a collection which contains the source. The destination is removed first
+// (RFC 4918 sections 9.8.4 and 9.9.3), which would remove the source with it.
+func errOverwriteSourceParent() error {
+	return NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: cannot overwrite a collection containing the source"))
+}
+
 // isSameDirEntry reports whether srcPath and dstPath refer to the same
 // directory entry (for example, a case-only rename on a case-insensitive file
 // system), rather than two distinct hard links to the same inode.
@@ -638,6 +645,9 @@ func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *Co
 		if options.NoOverwrite {
 			return false, NewHTTPError(http.StatusPreconditionFailed, os.ErrExist)
 		}
+		if isSubPath(dstPath, srcPath) {
+			return false, errOverwriteSourceParent()
+		}
 		if err := removeAll(root, dstPath); err != nil {
 			return false, err
 		}
@@ -765,6 +775,9 @@ func (fs LocalFileSystem) Move(ctx context.Context, src, dst string, options *Mo
 	} else {
 		if options.NoOverwrite {
 			return false, NewHTTPError(http.StatusPreconditionFailed, os.ErrExist)
+		}
+		if isSubPath(dstPath, srcPath) {
+			return false, errOverwriteSourceParent()
 		}
 		dstLstat, lerr := root.Lstat(dstPath)
 		if lerr != nil || !os.SameFile(srcInfo, dstLstat) || !isSameDirEntry(root, srcPath, dstPath, srcInfo) {
