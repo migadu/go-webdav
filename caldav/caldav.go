@@ -75,9 +75,11 @@ type Calendar struct {
 	Path                  string
 	Name                  string
 	Description           string
+	Color                 string
 	MaxResourceSize       int64
 	SyncToken             string // the current DAV:sync-token, see SyncBackend
 	SupportedComponentSet []string
+	Timezone              *ical.Calendar
 	// ReadOnly reports that the current user may only read this calendar. It
 	// controls the DAV:current-user-privilege-set reported by the server.
 	ReadOnly bool
