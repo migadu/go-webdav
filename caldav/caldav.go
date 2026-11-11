@@ -69,6 +69,9 @@ type Calendar struct {
 	Description           string
 	MaxResourceSize       int64
 	SupportedComponentSet []string
+	// ReadOnly reports that the current user may only read this calendar. It
+	// controls the DAV:current-user-privilege-set reported by the server.
+	ReadOnly bool
 }
 
 type CalendarCompRequest struct {
@@ -130,4 +133,18 @@ type CalendarObject struct {
 	ContentLength int64
 	ETag          string
 	Data          *ical.Calendar
+}
+
+// SyncQuery is the query struct represents a sync-collection request
+type SyncQuery struct {
+	CompRequest CalendarCompRequest
+	SyncToken   string
+	Limit       int // <= 0 means unlimited
+}
+
+// SyncResponse contains the returned sync-token for next time
+type SyncResponse struct {
+	SyncToken string
+	Updated   []CalendarObject
+	Deleted   []string
 }

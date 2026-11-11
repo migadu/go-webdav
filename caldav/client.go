@@ -3,6 +3,8 @@ package caldav
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
+	"errors"
 	"fmt"
 	"mime"
 	"net/http"
@@ -15,6 +17,14 @@ import (
 	"github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/internal"
 )
+
+var calendarProps = []xml.Name{
+	internal.ResourceTypeName,
+	internal.DisplayNameName,
+	calendarDescriptionName,
+	maxResourceSizeName,
+	supportedCalendarComponentSetName,
+}
 
 // DiscoverContextURL performs a DNS-based CardDAV service discovery as
 // described in RFC 6352 section 11. It returns the URL to the CardDAV server.
@@ -41,6 +51,22 @@ func NewClient(c webdav.HTTPClient, endpoint string) (*Client, error) {
 	return &Client{wc, ic}, nil
 }
 
+// Get calendar information without loading all the events once the path of the calendar is known.
+func (c *Client) FindCalendar(ctx context.Context, path string) (*Calendar, error) {
+	propfind := internal.NewPropNamePropFind(calendarProps...)
+	resp, err := c.ic.PropFindFlat(ctx, path, propfind)
+	if err != nil {
+		return nil, err
+	}
+
+	calendar, err := decodeCalendar(path, resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return calendar, nil
+}
+
 func (c *Client) FindCalendarHomeSet(ctx context.Context, principal string) (string, error) {
 	propfind := internal.NewPropNamePropFind(calendarHomeSetName)
 	resp, err := c.ic.PropFindFlat(ctx, principal, propfind)
@@ -57,23 +83,19 @@ func (c *Client) FindCalendarHomeSet(ctx context.Context, principal string) (str
 }
 
 func (c *Client) FindCalendars(ctx context.Context, calendarHomeSet string) ([]Calendar, error) {
-	propfind := internal.NewPropNamePropFind(
-		internal.ResourceTypeName,
-		internal.DisplayNameName,
-		calendarDescriptionName,
-		maxResourceSizeName,
-		supportedCalendarComponentSetName,
-	)
+	propfind := internal.NewPropNamePropFind(calendarProps...)
 	ms, err := c.ic.PropFind(ctx, calendarHomeSet, internal.DepthOne, propfind)
 	if err != nil {
 		return nil, err
 	}
 
 	l := make([]Calendar, 0, len(ms.Responses))
+	errs := make([]error, 0, len(ms.Responses))
 	for _, resp := range ms.Responses {
 		path, err := resp.Path()
 		if err != nil {
-			return nil, err
+			errs = append(errs, err)
+			continue
 		}
 
 		var resType internal.ResourceType
@@ -84,47 +106,60 @@ func (c *Client) FindCalendars(ctx context.Context, calendarHomeSet string) ([]C
 			continue
 		}
 
-		var desc calendarDescription
-		if err := resp.DecodeProp(&desc); err != nil && !internal.IsNotFound(err) {
+		calendar, err := decodeCalendar(path, &resp)
+		if err != nil {
 			return nil, err
 		}
 
-		var dispName internal.DisplayName
-		if err := resp.DecodeProp(&dispName); err != nil && !internal.IsNotFound(err) {
-			return nil, err
-		}
-
-		var maxResSize maxResourceSize
-		if err := resp.DecodeProp(&maxResSize); err != nil && !internal.IsNotFound(err) {
-			return nil, err
-		}
-		if maxResSize.Size < 0 {
-			return nil, fmt.Errorf("carddav: max-resource-size must be a positive integer")
-		}
-
-		var supportedCompSet supportedCalendarComponentSet
-		if err := resp.DecodeProp(&supportedCompSet); err != nil && !internal.IsNotFound(err) {
-			return nil, err
-		}
-
-		compNames := make([]string, 0, len(supportedCompSet.Comp))
-		for _, comp := range supportedCompSet.Comp {
-			compNames = append(compNames, comp.Name)
-		}
-
-		l = append(l, Calendar{
-			Path:                  path,
-			Name:                  dispName.Name,
-			Description:           desc.Description,
-			MaxResourceSize:       maxResSize.Size,
-			SupportedComponentSet: compNames,
-		})
+		l = append(l, *calendar)
 	}
 
-	return l, nil
+	return l, errors.Join(errs...)
+}
+
+func decodeCalendar(path string, resp *internal.Response) (*Calendar, error) {
+	var desc calendarDescription
+	if err := resp.DecodeProp(&desc); err != nil && !internal.IsNotFound(err) {
+		return nil, err
+	}
+
+	var dispName internal.DisplayName
+	if err := resp.DecodeProp(&dispName); err != nil && !internal.IsNotFound(err) {
+		return nil, err
+	}
+
+	var maxResSize maxResourceSize
+	if err := resp.DecodeProp(&maxResSize); err != nil && !internal.IsNotFound(err) {
+		return nil, err
+	}
+	if maxResSize.Size < 0 {
+		return nil, fmt.Errorf("carddav: max-resource-size must be a positive integer")
+	}
+
+	var supportedCompSet supportedCalendarComponentSet
+	if err := resp.DecodeProp(&supportedCompSet); err != nil && !internal.IsNotFound(err) {
+		return nil, err
+	}
+
+	compNames := make([]string, 0, len(supportedCompSet.Comp))
+	for _, comp := range supportedCompSet.Comp {
+		compNames = append(compNames, comp.Name)
+	}
+
+	return &Calendar{
+		Path:                  path,
+		Name:                  dispName.Name,
+		Description:           desc.Description,
+		MaxResourceSize:       maxResSize.Size,
+		SupportedComponentSet: compNames,
+	}, nil
 }
 
 func encodeCalendarCompReq(c *CalendarCompRequest) (*comp, error) {
+	if c == nil || (c.Name == "" && !c.AllProps && !c.AllComps && len(c.Props) == 0 && len(c.Comps) == 0) {
+		return nil, nil
+	}
+
 	encoded := comp{Name: c.Name}
 
 	if c.AllProps {
@@ -228,10 +263,12 @@ func encodeExpandRequest(e *CalendarExpandRequest) *expand {
 
 func decodeCalendarObjectList(ms *internal.MultiStatus) ([]CalendarObject, error) {
 	addrs := make([]CalendarObject, 0, len(ms.Responses))
+	errs := make([]error, 0, len(ms.Responses))
 	for _, resp := range ms.Responses {
 		path, err := resp.Path()
 		if err != nil {
-			return nil, err
+			errs = append(errs, err)
+			continue
 		}
 
 		var calData calendarDataResp
@@ -269,7 +306,7 @@ func decodeCalendarObjectList(ms *internal.MultiStatus) ([]CalendarObject, error
 		})
 	}
 
-	return addrs, nil
+	return addrs, errors.Join(errs...)
 }
 
 func (c *Client) QueryCalendar(ctx context.Context, calendar string, query *CalendarQuery) ([]CalendarObject, error) {
@@ -424,4 +461,79 @@ func (c *Client) PutCalendarObject(ctx context.Context, path string, cal *ical.C
 		return nil, err
 	}
 	return co, nil
+}
+
+// SyncCollection performs a collection synchronization operation on the
+// specified resource, as defined in RFC 6578.
+func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQuery) (*SyncResponse, error) {
+	var limit *internal.Limit
+	if query.Limit > 0 {
+		limit = &internal.Limit{NResults: uint(query.Limit)}
+	}
+
+	compReq, err := encodeCalendarReq(&query.CompRequest)
+	if err != nil {
+		return nil, err
+	}
+
+	ms, err := c.ic.SyncCollection(ctx, path, query.SyncToken, internal.DepthOne, limit, compReq)
+	if err != nil {
+		return nil, err
+	}
+
+	ret := &SyncResponse{SyncToken: ms.SyncToken}
+	var errs []error
+	for _, resp := range ms.Responses {
+		p, err := resp.Path()
+		if err != nil {
+			var httpErr *internal.HTTPError
+			hasStatus := errors.As(err, &httpErr)
+			if !hasStatus || httpErr.Code != http.StatusNotFound {
+				errs = append(errs, err)
+				continue
+			}
+			ret.Deleted = append(ret.Deleted, p)
+			continue
+		}
+
+		if p == path || path == fmt.Sprintf("%s/", p) {
+			continue
+		}
+
+		var getLastMod internal.GetLastModified
+		if err := resp.DecodeProp(&getLastMod); err != nil && !internal.IsNotFound(err) {
+			return nil, err
+		}
+
+		var getETag internal.GetETag
+		if err := resp.DecodeProp(&getETag); err != nil && !internal.IsNotFound(err) {
+			return nil, err
+		}
+
+		o := CalendarObject{
+			Path:    p,
+			ModTime: time.Time(getLastMod.LastModified),
+			ETag:    string(getETag.ETag),
+		}
+
+		// Many servers return the calendar-data inline in the sync-collection
+		// response (the query already requests it via CompRequest); decode it so
+		// the caller need not follow up with a multiget. When the server omits the
+		// data, Data is left nil and the caller fetches it as before.
+		var calData calendarDataResp
+		if err := resp.DecodeProp(&calData); err == nil {
+			cal, err := ical.NewDecoder(bytes.NewReader(calData.Data)).Decode()
+			if err != nil {
+				return nil, err
+			}
+			o.Data = cal
+		} else if !internal.IsNotFound(err) {
+			return nil, err
+		}
+
+		ret.Updated = append(ret.Updated, o)
+	}
+
+	return ret, errors.Join(errs...)
+
 }

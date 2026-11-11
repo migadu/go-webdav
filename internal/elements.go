@@ -159,10 +159,16 @@ func (resp *Response) Err() error {
 		}
 	}
 
-	return &HTTPError{
-		Code: resp.Status.Code,
-		Err:  err,
+	err = &HTTPError{Code: resp.Status.Code, Err: err}
+	if len(resp.Hrefs) == 0 {
+		return err
 	}
+
+	hrefErrs := make([]error, len(resp.Hrefs))
+	for i, href := range resp.Hrefs {
+		hrefErrs[i] = &HrefError{Href: url.URL(href), Err: err}
+	}
+	return errors.Join(hrefErrs...)
 }
 
 func (resp *Response) Path() (string, error) {
@@ -464,4 +470,14 @@ type Privilege struct {
 	XMLName xml.Name  `xml:"DAV: privilege"`
 	Read    *struct{} `xml:"DAV: read,omitempty"`
 	Write   *struct{} `xml:"DAV: write,omitempty"`
+}
+
+// NewCurrentUserPrivilegeSet returns a privilege set granting DAV:read, plus
+// DAV:write unless readOnly is set.
+func NewCurrentUserPrivilegeSet(readOnly bool) *CurrentUserPrivilegeSet {
+	priv := Privilege{Read: &struct{}{}}
+	if !readOnly {
+		priv.Write = &struct{}{}
+	}
+	return &CurrentUserPrivilegeSet{Privilege: []Privilege{priv}}
 }
