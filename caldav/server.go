@@ -73,6 +73,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "REPORT":
 		err = h.handleReport(w, r)
+	case "MKCALENDAR":
+		err = h.handleMkcalendar(w, r)
 	default:
 		b := backend{
 			Backend: h.Backend,
@@ -85,6 +87,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		internal.ServeError(w, err)
 	}
+}
+
+// handleMkcalendar handles MKCALENDAR requests, see RFC 4791 section 5.3.1.
+func (h *Handler) handleMkcalendar(w http.ResponseWriter, r *http.Request) error {
+	b := backend{
+		Backend: h.Backend,
+		Prefix:  strings.TrimSuffix(h.Prefix, "/"),
+	}
+	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendar {
+		return newPreconditionError(http.StatusForbidden, PreconditionCalendarCollectionLocationOk)
+	}
+
+	cal := Calendar{Path: r.URL.Path}
+	if !internal.IsRequestBodyEmpty(r) {
+		var m mkcalendarReq
+		if err := internal.DecodeXMLRequest(r, &m); err != nil {
+			return err
+		}
+		if err := setCalendarProps(&cal, &m.Set.Prop); err != nil {
+			return err
+		}
+	}
+
+	if err := h.Backend.CreateCalendar(r.Context(), &cal); err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusCreated)
+	return nil
 }
 
 func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
@@ -318,7 +348,7 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 	caps = []string{"calendar-access"}
 
 	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendarObject {
-		return caps, []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "MKCOL"}, nil
+		return caps, []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "MKCOL", "MKCALENDAR"}, nil
 	}
 
 	var dataReq CalendarCompRequest
@@ -744,26 +774,38 @@ func (b *backend) Mkcol(r *http.Request) error {
 		if !prop.ResourceType.Is(internal.CollectionName) || !prop.ResourceType.Is(calendarName) {
 			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: unexpected resource type")
 		}
-		cal.Name = prop.DisplayName
-		cal.Description = prop.CalendarDescription
-		cal.Color = strings.TrimSpace(prop.CalendarColor)
-
-		if s := strings.TrimSpace(prop.CalendarTimezone); s != "" {
-			tz, err := decodeCalendarTimezone(s)
-			if err != nil {
-				return err
-			}
-			cal.Timezone = tz
-		}
-
-		// Leave the set nil when the request doesn't set it, so the default
-		// applies
-		for _, v := range prop.SupportedCalendarComponentSet.Comp {
-			cal.SupportedComponentSet = append(cal.SupportedComponentSet, v.Name)
+		if err := setCalendarProps(&cal, &prop); err != nil {
+			return err
 		}
 	}
 
 	return b.Backend.CreateCalendar(r.Context(), &cal)
+}
+
+// setCalendarProps sets the fields of cal from the properties of an extended
+// MKCOL or a MKCALENDAR request. The properties it doesn't support are
+// ignored: clients set many which are only meaningful to them, such as
+// calendar-order, and refusing the request would leave them unable to create
+// calendars.
+func setCalendarProps(cal *Calendar, prop *mkcolProp) error {
+	cal.Name = prop.DisplayName
+	cal.Description = prop.CalendarDescription
+	cal.Color = strings.TrimSpace(prop.CalendarColor)
+
+	if s := strings.TrimSpace(prop.CalendarTimezone); s != "" {
+		tz, err := decodeCalendarTimezone(s)
+		if err != nil {
+			return err
+		}
+		cal.Timezone = tz
+	}
+
+	// Leave the set nil when the request doesn't set it, so the default
+	// applies
+	for _, v := range prop.SupportedCalendarComponentSet.Comp {
+		cal.SupportedComponentSet = append(cal.SupportedComponentSet, v.Name)
+	}
+	return nil
 }
 
 func decodeCalendarTimezone(s string) (*ical.Calendar, error) {
@@ -808,10 +850,14 @@ const (
 )
 
 func NewPreconditionError(err PreconditionType) error {
+	return newPreconditionError(http.StatusConflict, err)
+}
+
+func newPreconditionError(code int, err PreconditionType) error {
 	name := xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: string(err)}
 	elem := internal.NewRawXMLElement(name, nil, nil)
 	return &internal.HTTPError{
-		Code: 409,
+		Code: code,
 		Err: &internal.Error{
 			Raw: []internal.RawXMLValue{*elem},
 		},

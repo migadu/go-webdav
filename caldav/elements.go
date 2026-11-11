@@ -258,6 +258,12 @@ type mkcolReq struct {
 	Set     mkcolSet `xml:"DAV: set"`
 }
 
+// https://tools.ietf.org/html/rfc4791#section-9.3
+type mkcalendarReq struct {
+	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav mkcalendar"`
+	Set     mkcolSet `xml:"DAV: set"`
+}
+
 type mkcolSet struct {
 	Prop mkcolProp `xml:"DAV: prop"`
 }
