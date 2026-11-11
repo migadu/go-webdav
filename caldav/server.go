@@ -36,6 +36,13 @@ type PutCalendarObjectOptions struct {
 // The server then replies with a 207 Multi-Status response listing each
 // failed resource with its own status, instead of failing the whole request.
 // Any other error fails the whole request.
+//
+// The responses to PROPFIND and REPORT requests are streamed: each resource
+// is written to the client as soon as it's built. An error failing the whole
+// request once some resources have been written, such as ListCalendarObjects
+// failing for a calendar of a Depth: infinity PROPFIND after the previous
+// calendars were listed, can't change the status of the response anymore:
+// the response is aborted instead, so that the client sees it's incomplete.
 type Backend interface {
 	CalendarHomeSetPath(ctx context.Context) (string, error)
 
@@ -255,7 +262,7 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
 	if report.Query != nil {
 		return h.handleQuery(r, w, report.Query)
 	} else if report.Multiget != nil {
-		return h.handleMultiget(r.Context(), w, report.Multiget)
+		return h.handleMultiget(r, w, report.Multiget)
 	} else if report.SyncCollection != nil {
 		return h.handleSyncCollection(r, w, report.SyncCollection)
 	}
@@ -420,33 +427,33 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *cal
 		return err
 	}
 
-	resps := make([]internal.Response, 0, len(cos)+len(errResps))
-	for _, co := range cos {
-		b := backend{
-			Backend: h.Backend,
-			Prefix:  strings.TrimSuffix(h.Prefix, "/"),
-		}
-		propfind := internal.PropFind{
-			Prop:     query.Prop,
-			AllProp:  query.AllProp,
-			PropName: query.PropName,
-		}
-		resp, err := b.propFindCalendarObject(r.Context(), &propfind, true, &co)
-		if err != nil {
-			return err
-		}
-		resps = append(resps, *resp)
+	b := backend{
+		Backend: h.Backend,
+		Prefix:  strings.TrimSuffix(h.Prefix, "/"),
 	}
-	resps = append(resps, errResps...)
-
-	ms := internal.NewMultiStatus(resps...)
-
-	return internal.ServeMultiStatus(w, ms)
+	propfind := internal.PropFind{
+		Prop:     query.Prop,
+		AllProp:  query.AllProp,
+		PropName: query.PropName,
+	}
+	return internal.StreamMultiStatus(w, r, func(mw *internal.MultiStatusWriter) error {
+		for i := range cos {
+			resp, err := b.propFindCalendarObject(r.Context(), &propfind, true, &cos[i])
+			if err != nil {
+				return err
+			}
+			if err := mw.WriteResponse(resp); err != nil {
+				return err
+			}
+		}
+		return mw.WriteResponses(errResps)
+	})
 }
 
 // CalendarObjectsBackend is an optional interface a Backend can implement to
 // fetch the calendar objects of a calendar-multiget REPORT in a single call,
-// rather than calling GetCalendarObject for each of them.
+// rather than calling GetCalendarObject for each of them, in which case the
+// response for each object is sent before the next one is fetched.
 type CalendarObjectsBackend interface {
 	// GetCalendarObjects returns the calendar objects found at paths, in any order.
 	// The Path of each must be the path it was requested by: paths without
@@ -455,7 +462,21 @@ type CalendarObjectsBackend interface {
 	GetCalendarObjects(ctx context.Context, paths []string, req *CalendarCompRequest) ([]CalendarObject, error)
 }
 
-func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, multiget *calendarMultiget) error {
+// handleMultiget serves a calendar-multiget REPORT. Without
+// CalendarObjectsBackend, the response for each calendar object is written
+// as soon as the object is fetched, before the next one is.
+func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multiget *calendarMultiget) error {
+	ctx := r.Context()
+	propfind := internal.PropFind{
+		Prop:     multiget.Prop,
+		AllProp:  multiget.AllProp,
+		PropName: multiget.PropName,
+	}
+	// Check it before the responses for missing objects are written
+	if err := internal.CheckPropFind(&propfind); err != nil {
+		return err
+	}
+
 	var dataReq CalendarCompRequest
 	if multiget.Prop != nil {
 		decoded, err := decodeCalendarDataProp(multiget.Prop)
@@ -481,41 +502,34 @@ func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, mul
 		}
 	}
 
-	var resps []internal.Response
-	for _, href := range multiget.Hrefs {
-		var co *CalendarObject
-		var err error
-		if objects != nil {
-			if co = objects[href.Path]; co == nil {
-				err = internal.HTTPErrorf(http.StatusNotFound, "caldav: calendar object not found")
-			}
-		} else {
-			co, err = h.Backend.GetCalendarObject(ctx, href.Path, &dataReq)
-		}
-		if err != nil {
-			resp := internal.NewErrorResponse(href.Path, err)
-			resps = append(resps, *resp)
-			continue
-		}
-
-		b := backend{
-			Backend: h.Backend,
-			Prefix:  strings.TrimSuffix(h.Prefix, "/"),
-		}
-		propfind := internal.PropFind{
-			Prop:     multiget.Prop,
-			AllProp:  multiget.AllProp,
-			PropName: multiget.PropName,
-		}
-		resp, err := b.propFindCalendarObject(ctx, &propfind, true, co)
-		if err != nil {
-			return err
-		}
-		resps = append(resps, *resp)
+	b := backend{
+		Backend: h.Backend,
+		Prefix:  strings.TrimSuffix(h.Prefix, "/"),
 	}
+	return internal.StreamMultiStatus(w, r, func(mw *internal.MultiStatusWriter) error {
+		for _, href := range multiget.Hrefs {
+			var co *CalendarObject
+			var err error
+			if objects != nil {
+				if co = objects[href.Path]; co == nil {
+					err = internal.HTTPErrorf(http.StatusNotFound, "caldav: calendar object not found")
+				}
+			} else {
+				co, err = h.Backend.GetCalendarObject(ctx, href.Path, &dataReq)
+			}
 
-	ms := internal.NewMultiStatus(resps...)
-	return internal.ServeMultiStatus(w, ms)
+			var resp *internal.Response
+			if err != nil {
+				resp = internal.NewErrorResponse(href.Path, err)
+			} else if resp, err = b.propFindCalendarObject(ctx, &propfind, true, co); err != nil {
+				return err
+			}
+			if err := mw.WriteResponse(resp); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // backend serves a single request.
@@ -660,119 +674,111 @@ func (b *backend) HeadGet(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth internal.Depth) (*internal.MultiStatus, error) {
-	resType := b.resourceTypeAtPath(r.Context(), r.URL.Path)
+// PropFind writes the responses to a PROPFIND request to mw. The members of a
+// collection are listed before the response for the collection is written:
+// for a Depth: 0 or 1 request, any error listing resources is served as the
+// status of the request (see internal.StreamMultiStatus).
+func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth internal.Depth, mw *internal.MultiStatusWriter) error {
+	ctx := r.Context()
+	resType := b.resourceTypeAtPath(ctx, r.URL.Path)
 
 	var dataReq CalendarCompRequest
-	var resps []internal.Response
 
 	switch resType {
 	case resourceTypeRoot:
-		resp, err := b.propFindRoot(r.Context(), propfind)
+		resp, err := b.propFindRoot(ctx, propfind)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		resps = append(resps, *resp)
+		return mw.WriteResponse(resp)
 	case resourceTypeUserPrincipal:
-		principalPath, err := b.Backend.CurrentUserPrincipal(r.Context())
+		principalPath, err := b.Backend.CurrentUserPrincipal(ctx)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		if r.URL.Path == principalPath {
-			resp, err := b.propFindUserPrincipal(r.Context(), propfind)
-			if err != nil {
-				return nil, err
-			}
-			resps = append(resps, *resp)
-			if depth != internal.DepthZero {
-				resp, err := b.propFindHomeSet(r.Context(), propfind)
-				if err != nil {
-					return nil, err
-				}
-				resps = append(resps, *resp)
-				if depth == internal.DepthInfinity {
-					homeSetPath, err := b.Backend.CalendarHomeSetPath(r.Context())
-					if err != nil {
-						return nil, err
-					}
-					resps_, err := b.propFindAllCalendars(r.Context(), propfind, homeSetPath, true)
-					if err != nil {
-						return nil, err
-					}
-					resps = append(resps, resps_...)
-				}
-			}
+		if r.URL.Path != principalPath {
+			return nil
 		}
+		resp, err := b.propFindUserPrincipal(ctx, propfind)
+		if err != nil {
+			return err
+		}
+		if depth == internal.DepthZero {
+			return mw.WriteResponse(resp)
+		}
+		homeSetResp, err := b.propFindHomeSet(ctx, propfind)
+		if err != nil {
+			return err
+		}
+		if depth != internal.DepthInfinity {
+			if err := mw.WriteResponse(resp); err != nil {
+				return err
+			}
+			return mw.WriteResponse(homeSetResp)
+		}
+		homeSetPath, err := b.Backend.CalendarHomeSetPath(ctx)
+		if err != nil {
+			return err
+		}
+		return b.propFindAllCalendars(ctx, mw, propfind, homeSetPath, true, resp, homeSetResp)
 	case resourceTypeCalendarHomeSet:
-		homeSetPath, err := b.Backend.CalendarHomeSetPath(r.Context())
+		homeSetPath, err := b.Backend.CalendarHomeSetPath(ctx)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		if r.URL.Path == homeSetPath {
-			resp, err := b.propFindHomeSet(r.Context(), propfind)
-			if err != nil {
-				return nil, err
-			}
-			resps = append(resps, *resp)
-			if depth != internal.DepthZero {
-				recurse := depth == internal.DepthInfinity
-				resps_, err := b.propFindAllCalendars(r.Context(), propfind, homeSetPath, recurse)
-				if err != nil {
-					return nil, err
-				}
-				resps = append(resps, resps_...)
-			}
+		if r.URL.Path != homeSetPath {
+			return nil
 		}
+		resp, err := b.propFindHomeSet(ctx, propfind)
+		if err != nil {
+			return err
+		}
+		if depth == internal.DepthZero {
+			return mw.WriteResponse(resp)
+		}
+		recurse := depth == internal.DepthInfinity
+		return b.propFindAllCalendars(ctx, mw, propfind, homeSetPath, recurse, resp)
 	case resourceTypeCalendar:
-		ab, err := b.Backend.GetCalendar(r.Context(), r.URL.Path)
+		cal, err := b.Backend.GetCalendar(ctx, r.URL.Path)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		resp, err := b.propFindCalendar(r.Context(), propfind, ab)
+		resp, err := b.propFindCalendar(ctx, propfind, cal)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		resps = append(resps, *resp)
-		if depth != internal.DepthZero {
-			resps_, err := b.propFindAllCalendarObjects(r.Context(), propfind, ab.Path)
-			if err != nil {
-				return nil, err
-			}
-			resps = append(resps, resps_...)
+		if depth == internal.DepthZero {
+			return mw.WriteResponse(resp)
 		}
+		return b.propFindAllCalendarObjects(ctx, mw, propfind, cal.Path, resp)
 	case resourceTypeCalendarObject:
-		ao, err := b.Backend.GetCalendarObject(r.Context(), r.URL.Path, &dataReq)
+		co, err := b.Backend.GetCalendarObject(ctx, r.URL.Path, &dataReq)
 		if err != nil {
-			return nil, err
+			return err
 		}
-
-		resp, err := b.propFindCalendarObject(r.Context(), propfind, false, ao)
+		resp, err := b.propFindCalendarObject(ctx, propfind, false, co)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		resps = append(resps, *resp)
+		return mw.WriteResponse(resp)
 	case resourceTypeScheduleInbox:
-		inbox, err := b.scheduleInbox(r.Context())
+		inbox, err := b.scheduleInbox(ctx)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		if inbox != nil {
-			resp, err := b.propFindInbox(r.Context(), propfind, inbox)
-			if err != nil {
-				return nil, err
-			}
-			resps = append(resps, *resp)
-			if depth != internal.DepthZero {
-				resps_, err := b.propFindAllCalendarObjects(r.Context(), propfind, inbox.Path)
-				if err != nil {
-					return nil, err
-				}
-				resps = append(resps, resps_...)
-			}
+		if inbox == nil {
+			return nil
 		}
+		resp, err := b.propFindInbox(ctx, propfind, inbox)
+		if err != nil {
+			return err
+		}
+		if depth == internal.DepthZero {
+			return mw.WriteResponse(resp)
+		}
+		return b.propFindAllCalendarObjects(ctx, mw, propfind, inbox.Path, resp)
 	}
-
-	return internal.NewMultiStatus(resps...), nil
+	return nil
 }
 
 func (b *backend) propFindRoot(ctx context.Context, propfind *internal.PropFind) (*internal.Response, error) {
@@ -969,51 +975,54 @@ func newInboxPrivilegeSet(readOnly bool) *internal.CurrentUserPrivilegeSet {
 	return &internal.CurrentUserPrivilegeSet{Privilege: privs}
 }
 
-// propFindAllCalendars returns the responses for the members of the calendar
-// home set: the calendars, and the scheduling Inbox if it's one of them.
-func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.PropFind, homeSetPath string, recurse bool) ([]internal.Response, error) {
-	abs, err := b.Backend.ListCalendars(ctx)
+// propFindAllCalendars writes resps, which end with the response for the
+// calendar home set at homeSetPath, followed by the responses for the members
+// of the home set: the calendars, and the scheduling Inbox if it's one of
+// them, along with their own members if recurse is set. The members are
+// listed before resps are written.
+func (b *backend) propFindAllCalendars(ctx context.Context, mw *internal.MultiStatusWriter, propfind *internal.PropFind, homeSetPath string, recurse bool, resps ...*internal.Response) error {
+	cals, err := b.Backend.ListCalendars(ctx)
 	errResps, err := internal.HrefErrorResponses(err)
 	if err != nil {
-		return nil, err
-	}
-
-	var resps []internal.Response
-	for _, ab := range abs {
-		resp, err := b.propFindCalendar(ctx, propfind, &ab)
-		if err != nil {
-			return nil, err
-		}
-		resps = append(resps, *resp)
-		if recurse {
-			resps_, err := b.propFindAllCalendarObjects(ctx, propfind, ab.Path)
-			if err != nil {
-				return nil, err
-			}
-			resps = append(resps, resps_...)
-		}
+		return err
 	}
 	inbox, err := b.scheduleInbox(ctx)
 	if err != nil {
-		return nil, err
+		return err
+	}
+
+	for _, resp := range resps {
+		if err := mw.WriteResponse(resp); err != nil {
+			return err
+		}
+	}
+	writeCollection := func(resp *internal.Response, collPath string) error {
+		if recurse {
+			return b.propFindAllCalendarObjects(ctx, mw, propfind, collPath, resp)
+		}
+		return mw.WriteResponse(resp)
+	}
+	for i := range cals {
+		resp, err := b.propFindCalendar(ctx, propfind, &cals[i])
+		if err != nil {
+			return err
+		}
+		if err := writeCollection(resp, cals[i].Path); err != nil {
+			return err
+		}
 	}
 	// A Depth: 1 PROPFIND only returns the internal members of a collection
 	// (RFC 4918 section 9.1)
 	if inbox != nil && path.Dir(path.Clean(inbox.Path)) == path.Clean(homeSetPath) {
 		resp, err := b.propFindInbox(ctx, propfind, inbox)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		resps = append(resps, *resp)
-		if recurse {
-			resps_, err := b.propFindAllCalendarObjects(ctx, propfind, inbox.Path)
-			if err != nil {
-				return nil, err
-			}
-			resps = append(resps, resps_...)
+		if err := writeCollection(resp, inbox.Path); err != nil {
+			return err
 		}
 	}
-	return append(resps, errResps...), nil
+	return mw.WriteResponses(errResps)
 }
 
 func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal.PropFind, report bool, co *CalendarObject) (*internal.Response, error) {
@@ -1064,23 +1073,30 @@ func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal
 	return internal.NewPropFindResponse(co.Path, propfind, props)
 }
 
-func (b *backend) propFindAllCalendarObjects(ctx context.Context, propfind *internal.PropFind, path string) ([]internal.Response, error) {
+// propFindAllCalendarObjects writes resp, the response for the collection at
+// path, followed by the responses for its members, the calendar objects. The
+// members are listed before resp is written.
+func (b *backend) propFindAllCalendarObjects(ctx context.Context, mw *internal.MultiStatusWriter, propfind *internal.PropFind, path string, resp *internal.Response) error {
 	var dataReq CalendarCompRequest
-	aos, err := b.Backend.ListCalendarObjects(ctx, path, &dataReq)
+	cos, err := b.Backend.ListCalendarObjects(ctx, path, &dataReq)
 	errResps, err := internal.HrefErrorResponses(err)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	resps := make([]internal.Response, 0, len(aos)+len(errResps))
-	for _, ao := range aos {
-		resp, err := b.propFindCalendarObject(ctx, propfind, false, &ao)
-		if err != nil {
-			return nil, err
-		}
-		resps = append(resps, *resp)
+	if err := mw.WriteResponse(resp); err != nil {
+		return err
 	}
-	return append(resps, errResps...), nil
+	for i := range cos {
+		resp, err := b.propFindCalendarObject(ctx, propfind, false, &cos[i])
+		if err != nil {
+			return err
+		}
+		if err := mw.WriteResponse(resp); err != nil {
+			return err
+		}
+	}
+	return mw.WriteResponses(errResps)
 }
 
 func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*internal.Response, error) {

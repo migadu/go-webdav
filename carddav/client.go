@@ -212,40 +212,43 @@ func encodeTextMatch(tm *TextMatch) *textMatch {
 	}
 }
 
-func decodeAddressList(ms *internal.MultiStatus) ([]AddressObject, error) {
-	addrs := make([]AddressObject, 0, len(ms.Responses))
-	errs := make([]error, 0, len(ms.Responses))
-	for _, resp := range ms.Responses {
+// doAddressList performs req, an addressbook-query or addressbook-multiget
+// REPORT, and decodes the address object of each response as soon as the
+// response is received.
+func (c *Client) doAddressList(req *http.Request) ([]AddressObject, error) {
+	addrs := []AddressObject{}
+	var errs []error
+	_, err := c.ic.DoMultiStatusFunc(req, func(resp *internal.Response) error {
 		path, err := resp.Path()
 		if err != nil {
 			errs = append(errs, err)
-			continue
+			return nil
 		}
 
 		var addrData addressDataResp
 		if err := resp.DecodeProp(&addrData); err != nil {
-			return nil, err
+			return err
 		}
 
 		var getLastMod internal.GetLastModified
 		if err := resp.DecodeProp(&getLastMod); err != nil && !internal.IsNotFound(err) {
-			return nil, err
+			return err
 		}
 
 		var getETag internal.GetETag
 		if err := resp.DecodeProp(&getETag); err != nil && !internal.IsNotFound(err) {
-			return nil, err
+			return err
 		}
 
 		var getContentLength internal.GetContentLength
 		if err := resp.DecodeProp(&getContentLength); err != nil && !internal.IsNotFound(err) {
-			return nil, err
+			return err
 		}
 
 		r := bytes.NewReader(addrData.Data)
 		card, err := vcard.NewDecoder(r).Decode()
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		addrs = append(addrs, AddressObject{
@@ -255,6 +258,10 @@ func decodeAddressList(ms *internal.MultiStatus) ([]AddressObject, error) {
 			ETag:          string(getETag.ETag),
 			Card:          card,
 		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return addrs, errors.Join(errs...)
@@ -286,12 +293,7 @@ func (c *Client) QueryAddressBook(ctx context.Context, addressBook string, query
 
 	req.Header.Add("Depth", "1")
 
-	ms, err := c.ic.DoMultiStatus(req.WithContext(ctx))
-	if err != nil {
-		return nil, err
-	}
-
-	return decodeAddressList(ms)
+	return c.doAddressList(req.WithContext(ctx))
 }
 
 func (c *Client) MultiGetAddressBook(ctx context.Context, path string, multiGet *AddressBookMultiGet) ([]AddressObject, error) {
@@ -318,12 +320,7 @@ func (c *Client) MultiGetAddressBook(ctx context.Context, path string, multiGet 
 
 	req.Header.Add("Depth", "1")
 
-	ms, err := c.ic.DoMultiStatus(req.WithContext(ctx))
-	if err != nil {
-		return nil, err
-	}
-
-	return decodeAddressList(ms)
+	return c.doAddressList(req.WithContext(ctx))
 }
 
 func (c *Client) populateAddressObject(ao *AddressObject, resp *http.Response) error {
@@ -481,14 +478,9 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 		return nil, err
 	}
 
-	ms, err := c.ic.SyncCollection(ctx, path, query.SyncToken, internal.DepthOne, limit, propReq)
-	if err != nil {
-		return nil, err
-	}
-
-	ret := &SyncResponse{SyncToken: ms.SyncToken}
+	ret := &SyncResponse{}
 	var errs []error
-	for _, resp := range ms.Responses {
+	ms, err := c.ic.SyncCollection(ctx, path, query.SyncToken, internal.DepthOne, limit, propReq, func(resp *internal.Response) error {
 		p, err := resp.Path()
 		if err != nil {
 			// The status error is wrapped in an internal.HrefError.
@@ -505,21 +497,21 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 			default:
 				errs = append(errs, err)
 			}
-			continue
+			return nil
 		}
 
 		if p == path || path == fmt.Sprintf("%s/", p) {
-			continue
+			return nil
 		}
 
 		var getLastMod internal.GetLastModified
 		if err := resp.DecodeProp(&getLastMod); err != nil && !internal.IsNotFound(err) {
-			return nil, err
+			return err
 		}
 
 		var getETag internal.GetETag
 		if err := resp.DecodeProp(&getETag); err != nil && !internal.IsNotFound(err) {
-			return nil, err
+			return err
 		}
 
 		o := AddressObject{
@@ -528,7 +520,12 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 			ETag:    string(getETag.ETag),
 		}
 		ret.Updated = append(ret.Updated, o)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
+	ret.SyncToken = ms.SyncToken
 	return ret, errors.Join(errs...)
 }

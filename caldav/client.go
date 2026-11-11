@@ -298,40 +298,43 @@ func encodeExpandRequest(e *CalendarExpandRequest) *expand {
 	return &encoded
 }
 
-func decodeCalendarObjectList(ms *internal.MultiStatus) ([]CalendarObject, error) {
-	addrs := make([]CalendarObject, 0, len(ms.Responses))
-	errs := make([]error, 0, len(ms.Responses))
-	for _, resp := range ms.Responses {
+// doCalendarObjectList performs req, a calendar-query or calendar-multiget
+// REPORT, and decodes the calendar object of each response as soon as the
+// response is received.
+func (c *Client) doCalendarObjectList(req *http.Request) ([]CalendarObject, error) {
+	addrs := []CalendarObject{}
+	var errs []error
+	_, err := c.ic.DoMultiStatusFunc(req, func(resp *internal.Response) error {
 		path, err := resp.Path()
 		if err != nil {
 			errs = append(errs, err)
-			continue
+			return nil
 		}
 
 		var calData calendarDataResp
 		if err := resp.DecodeProp(&calData); err != nil {
-			return nil, err
+			return err
 		}
 
 		var getLastMod internal.GetLastModified
 		if err := resp.DecodeProp(&getLastMod); err != nil && !internal.IsNotFound(err) {
-			return nil, err
+			return err
 		}
 
 		var getETag internal.GetETag
 		if err := resp.DecodeProp(&getETag); err != nil && !internal.IsNotFound(err) {
-			return nil, err
+			return err
 		}
 
 		var getContentLength internal.GetContentLength
 		if err := resp.DecodeProp(&getContentLength); err != nil && !internal.IsNotFound(err) {
-			return nil, err
+			return err
 		}
 
 		r := bytes.NewReader(calData.Data)
 		data, err := ical.NewDecoder(r).Decode()
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		addrs = append(addrs, CalendarObject{
@@ -341,6 +344,10 @@ func decodeCalendarObjectList(ms *internal.MultiStatus) ([]CalendarObject, error
 			ETag:          string(getETag.ETag),
 			Data:          data,
 		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return addrs, errors.Join(errs...)
@@ -360,12 +367,7 @@ func (c *Client) QueryCalendar(ctx context.Context, calendar string, query *Cale
 	}
 	req.Header.Add("Depth", "1")
 
-	ms, err := c.ic.DoMultiStatus(req.WithContext(ctx))
-	if err != nil {
-		return nil, err
-	}
-
-	return decodeCalendarObjectList(ms)
+	return c.doCalendarObjectList(req.WithContext(ctx))
 }
 
 func (c *Client) MultiGetCalendar(ctx context.Context, path string, multiGet *CalendarMultiGet) ([]CalendarObject, error) {
@@ -391,12 +393,7 @@ func (c *Client) MultiGetCalendar(ctx context.Context, path string, multiGet *Ca
 	}
 	req.Header.Add("Depth", "1")
 
-	ms, err := c.ic.DoMultiStatus(req.WithContext(ctx))
-	if err != nil {
-		return nil, err
-	}
-
-	return decodeCalendarObjectList(ms)
+	return c.doCalendarObjectList(req.WithContext(ctx))
 }
 
 func (c *Client) populateCalendarObject(co *CalendarObject, resp *http.Response) error {
@@ -554,14 +551,9 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 		return nil, err
 	}
 
-	ms, err := c.ic.SyncCollection(ctx, path, query.SyncToken, internal.DepthOne, limit, compReq)
-	if err != nil {
-		return nil, err
-	}
-
-	ret := &SyncResponse{SyncToken: ms.SyncToken}
+	ret := &SyncResponse{}
 	var errs []error
-	for _, resp := range ms.Responses {
+	ms, err := c.ic.SyncCollection(ctx, path, query.SyncToken, internal.DepthOne, limit, compReq, func(resp *internal.Response) error {
 		p, err := resp.Path()
 		if err != nil {
 			var httpErr *internal.HTTPError
@@ -577,21 +569,21 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 			default:
 				errs = append(errs, err)
 			}
-			continue
+			return nil
 		}
 
 		if p == path || path == fmt.Sprintf("%s/", p) {
-			continue
+			return nil
 		}
 
 		var getLastMod internal.GetLastModified
 		if err := resp.DecodeProp(&getLastMod); err != nil && !internal.IsNotFound(err) {
-			return nil, err
+			return err
 		}
 
 		var getETag internal.GetETag
 		if err := resp.DecodeProp(&getETag); err != nil && !internal.IsNotFound(err) {
-			return nil, err
+			return err
 		}
 
 		o := CalendarObject{
@@ -608,16 +600,21 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 		if err := resp.DecodeProp(&calData); err == nil {
 			cal, err := ical.NewDecoder(bytes.NewReader(calData.Data)).Decode()
 			if err != nil {
-				return nil, err
+				return err
 			}
 			o.Data = cal
 		} else if !internal.IsNotFound(err) {
-			return nil, err
+			return err
 		}
 
 		ret.Updated = append(ret.Updated, o)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
+	ret.SyncToken = ms.SyncToken
 	return ret, errors.Join(errs...)
 
 }

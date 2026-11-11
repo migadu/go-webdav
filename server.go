@@ -64,9 +64,12 @@ type DeadPropertyFileSystem interface {
 
 	// DeadProperties returns the dead properties of a file, in any order.
 	// The server calls it when a PROPFIND request may return dead
-	// properties, for each file it lists. Properties in the DAV: namespace
+	// properties, for each file it lists, and sends the response for a file
+	// before calling it for the next one. Properties in the DAV: namespace
 	// other than DAV:displayname are ignored. An error fails the whole
-	// request.
+	// request: once responses have been sent, their status can't change
+	// anymore, and the response is aborted instead, so that the client sees
+	// it's incomplete.
 	DeadProperties(ctx context.Context, name string) ([]DeadProperty, error)
 	// PatchDeadProperties applies all of the instructions of a PROPPATCH
 	// request to the dead properties of a file, or none of them (RFC 4918
@@ -243,10 +246,10 @@ func (b *backend) HeadGet(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth internal.Depth) (*internal.MultiStatus, error) {
+func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth internal.Depth, mw *internal.MultiStatusWriter) error {
 	fi, err := b.FileSystem.Stat(r.Context(), r.URL.Path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	var locks *propFindLocks
@@ -259,33 +262,29 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		}
 	}
 
-	var resps []internal.Response
-	if depth != internal.DepthZero && fi.IsDir {
-		children, err := b.FileSystem.ReadDir(r.Context(), r.URL.Path, depth == internal.DepthInfinity)
-		errResps, err := internal.HrefErrorResponses(err)
-		if err != nil {
-			return nil, err
-		}
-
-		resps = make([]internal.Response, 0, len(children)+len(errResps))
-		for _, child := range children {
-			resp, err := b.propFindFile(r.Context(), propfind, &child, locks)
-			if err != nil {
-				return nil, err
-			}
-			resps = append(resps, *resp)
-		}
-		resps = append(resps, errResps...)
-	} else {
+	if depth == internal.DepthZero || !fi.IsDir {
 		resp, err := b.propFindFile(r.Context(), propfind, fi, locks)
 		if err != nil {
-			return nil, err
+			return err
 		}
-
-		resps = []internal.Response{*resp}
+		return mw.WriteResponse(resp)
 	}
 
-	return internal.NewMultiStatus(resps...), nil
+	children, err := b.FileSystem.ReadDir(r.Context(), r.URL.Path, depth == internal.DepthInfinity)
+	errResps, err := internal.HrefErrorResponses(err)
+	if err != nil {
+		return err
+	}
+	for i := range children {
+		resp, err := b.propFindFile(r.Context(), propfind, &children[i], locks)
+		if err != nil {
+			return err
+		}
+		if err := mw.WriteResponse(resp); err != nil {
+			return err
+		}
+	}
+	return mw.WriteResponses(errResps)
 }
 
 // propFindFile returns the properties of a file. locks is nil if locking is
