@@ -242,3 +242,29 @@ func TestETagMalformed(t *testing.T) {
 		}
 	}
 }
+
+// RFC 7232 section 2.3: entity-tag = [ weak ] opaque-tag, weak = "W/"
+func TestETagWeak(t *testing.T) {
+	var etag ETag
+	if err := etag.UnmarshalText([]byte(`W/"xyzzy"`)); err != nil {
+		t.Fatalf("UnmarshalText() = %v", err)
+	}
+	if !etag.IsWeak() {
+		t.Errorf("ETag %q is not weak", string(etag))
+	}
+	if got, want := etag.String(), `W/"xyzzy"`; got != want {
+		t.Errorf("String() = %s, want %s", got, want)
+	}
+
+	etag = "xyzzy"
+	if etag.IsWeak() {
+		t.Errorf("ETag %q is weak", string(etag))
+	}
+	if got, want := etag.String(), `"xyzzy"`; got != want {
+		t.Errorf("String() = %s, want %s", got, want)
+	}
+
+	if err := etag.UnmarshalText([]byte(`W/"xyzzy`)); err == nil {
+		t.Errorf("UnmarshalText(W/\"xyzzy) = %q, want an error", string(etag))
+	}
+}
