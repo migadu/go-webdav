@@ -2,6 +2,7 @@ package webdav
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -12,8 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/emersion/go-webdav/internal"
 )
@@ -562,7 +561,7 @@ func (b *backend) Lock(r *http.Request, depth internal.Depth, timeout time.Durat
 		}
 	}
 
-	token := "opaquelocktoken:" + uuid.NewString()
+	token := newLockToken()
 	lock = &internal.Lock{Href: token, Root: fi.Path, Timeout: 0 /* infinity */}
 
 	b.locksMu.Lock()
@@ -587,6 +586,17 @@ func (b *backend) Unlock(r *http.Request, tokenHref string) error {
 	delete(b.locks, r.URL.Path)
 
 	return nil
+}
+
+// newLockToken generates a lock token: an opaquelocktoken URI (RFC 4918
+// appendix C) made of a random (version 4) UUID (RFC 9562 section 5.4).
+func newLockToken() string {
+	var b [16]byte
+	// Since Go 1.24, crypto/rand.Read never returns an error
+	rand.Read(b[:])
+	b[6] = b[6]&0x0f | 0x40 // version 4
+	b[8] = b[8]&0x3f | 0x80 // RFC 9562 variant
+	return fmt.Sprintf("opaquelocktoken:%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func (b *backend) resourceLock(path string) *internal.Lock {
