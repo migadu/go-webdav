@@ -107,29 +107,58 @@ type CalendarObjectCopyMover interface {
 	MoveCalendarObject(ctx context.Context, src, dst string, opts *MoveCalendarObjectOptions) (created bool, err error)
 }
 
-// Conforming to `InboxBackend` signals RFC6638 support, which is partial and focused on replying to invitations.
-// https://datatracker.ietf.org/doc/html/rfc6638
+// InboxBackend is an optional interface a Backend can implement to support
+// scheduling (RFC 6638): delivering scheduling messages, such as invitations,
+// to the user's clients, and letting them reply.
 //
-// In practice this does a few things to support scheduling.
-// 1. It adds the `calendar-auto-schedule` capability
-// 2. It returns `schedule-inbox-URL` and `calendar-user-address-set` based on the `GetInbox` result.
-// 3. It adds an inbox-calendar to the `PROPFIND` for all collections.
-// 4. It returns the `CalendarObject`:s using `ListCalendarObjects` when getting a `REPORT` towards the inbox.
+// Implementing InboxBackend asserts that the backend performs implicit
+// scheduling. The server then advertises the "calendar-auto-schedule"
+// capability, which tells clients that the server sends and processes
+// scheduling messages as calendar objects are stored and removed (RFC 6638
+// section 3), so that they mustn't send them themselves, e.g. by email. The
+// server can't do that on its own: when PutCalendarObject and
+// DeleteCalendarObject store or remove a scheduling object resource, a
+// calendar object whose ORGANIZER, or one of whose ATTENDEEs, is one of the
+// user's Inbox.UserAddressSet (section 3.1), the backend must:
 //
-// To properly implement this, you need to.
-// 1. Implement `GetInbox`, and return a list of addresses for the users that can be invited, e.g. on the form: `mailto:test@example.com`.
-// 2. Implement `ListCalendarObjects`, which returns `CalendarObject`:s that have an attendee that matches one of the addresses returned from `GetInbox`. e.g.
-// ```go
-// attendee := ical.NewProp(ical.PropAttendee)
-// attendee.Params.Set(ical.ParamCommonName, name)
-// attendee.Params.Set(ical.ParamParticipationStatus, "NEEDS-ACTION")
-// attendee.SetText("mailto:test@example.com")
-// attendee.SetValueType(ical.ValueCalendarAddress)
-// event.Props.Add(attendee)
-// ```
+//   - for an event the user organizes, send a REQUEST to the attendees when
+//     it's created or modified, and a CANCEL to the attendees it's removed
+//     for, or to all of them when it's deleted (section 3.2.1);
+//   - for an event the user attends, send a REPLY to the organizer when the
+//     user's PARTSTAT changes, and a REPLY declining it when it's deleted
+//     (section 3.2.2);
 //
-// Doing this should make it possible to accept/decline invitations in your client, which would trigger a `PutCalendarObject` towards the invite, with an updateded `ParamParticipationStatus`.
+// unless the SCHEDULE-AGENT parameter is CLIENT or NONE (section 7.1). The
+// messages can be sent to users of other servers as iMIP email (RFC 6047).
+// The backend must also process the scheduling messages the user receives
+// (section 4): add or update the invitations in the user's calendars, apply
+// the replies of attendees to the events the user organizes, and store a copy
+// of the messages in the Inbox, where clients find them.
+//
+// For users GetInbox returns an Inbox for, the server serves the
+// CALDAV:schedule-inbox-URL and CALDAV:calendar-user-address-set properties
+// of the principal, and the Inbox collection at Inbox.Path. The scheduling
+// messages in the Inbox are iTIP messages (RFC 5546), whose METHOD is set:
+// the server lists them with ListCalendarObjects, queries them with
+// QueryCalendarObjects (RFC 6638 section 2.3) and fetches them with
+// GetCalendarObject, or GetCalendarObjects for CalendarObjectsBackend. To
+// reply to a message, clients store the event with the user's PARTSTAT
+// changed with PutCalendarObject, and then remove the message from the Inbox
+// with DeleteCalendarObject.
+//
+// The rest of RFC 6638 isn't supported: there is no scheduling Outbox, so no
+// CALDAV:schedule-outbox-URL and no free-busy requests by POST (sections 2.1
+// and 5); no Schedule-Tag or If-Schedule-Tag-Match headers (sections 3.2.10,
+// 8.2 and 8.3); no CALDAV:schedule-default-calendar-URL or
+// CALDAV:schedule-calendar-transp properties (section 9); and the scheduling
+// preconditions of section 3.2.4 aren't checked. The Schedule-Reply request
+// header (section 8.1), with which clients ask not to send a REPLY when an
+// event is deleted, isn't passed to DeleteCalendarObject: backends can read
+// it in an HTTP middleware.
 type InboxBackend interface {
+	// GetInbox returns the scheduling Inbox of the current user. It returns
+	// nil if the user isn't enabled for scheduling: calendar-auto-schedule
+	// isn't advertised to such users.
 	GetInbox(ctx context.Context) (*Inbox, error)
 }
 
@@ -505,11 +534,8 @@ func (b *backend) resourceTypeAtPath(ctx context.Context, reqPath string) resour
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
 	}
-	if inboxBackend, ok := b.Backend.(InboxBackend); ok {
-		inbox, err := inboxBackend.GetInbox(ctx)
-		if err == nil && inbox.Path == p {
-			return resourceTypeScheduleInbox
-		}
+	if inbox, err := b.scheduleInbox(ctx); err == nil && inbox != nil && inbox.Path == p {
+		return resourceTypeScheduleInbox
 	}
 	if p == "/" {
 		return resourceTypeRoot
@@ -517,11 +543,24 @@ func (b *backend) resourceTypeAtPath(ctx context.Context, reqPath string) resour
 	return resourceType(len(strings.Split(p, "/")) - 1)
 }
 
+// scheduleInbox returns the scheduling Inbox of the current user, or nil if
+// the backend doesn't implement InboxBackend or the user has no Inbox.
+func (b *backend) scheduleInbox(ctx context.Context) (*Inbox, error) {
+	inboxBackend, ok := b.Backend.(InboxBackend)
+	if !ok {
+		return nil, nil
+	}
+	return inboxBackend.GetInbox(ctx)
+}
+
 func (b *backend) Options(r *http.Request) (caps []string, allow []string, err error) {
 	caps = []string{"calendar-access"}
 
-	if _, ok := b.Backend.(InboxBackend); ok {
-		// https://datatracker.ietf.org/doc/html/rfc6638#section-2
+	// The capability asserts that the backend performs implicit scheduling,
+	// see InboxBackend and RFC 6638 section 2
+	if inbox, err := b.scheduleInbox(r.Context()); err != nil {
+		return nil, nil, err
+	} else if inbox != nil {
 		caps = append(caps, "calendar-auto-schedule")
 	}
 
@@ -666,11 +705,11 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		}
 		resps = append(resps, *resp)
 	case resourceTypeScheduleInbox:
-		if inboxBackend, ok := b.Backend.(InboxBackend); ok {
-			inbox, err := inboxBackend.GetInbox(r.Context())
-			if err != nil {
-				return nil, err
-			}
+		inbox, err := b.scheduleInbox(r.Context())
+		if err != nil {
+			return nil, err
+		}
+		if inbox != nil {
 			resp, err := b.propFindInbox(propfind, inbox)
 			if err != nil {
 				return nil, err
@@ -723,11 +762,11 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 		}),
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, internal.PrincipalName)),
 	}
-	if inboxBackend, ok := b.Backend.(InboxBackend); ok {
-		inbox, err := inboxBackend.GetInbox(ctx)
-		if err != nil {
-			return nil, err
-		}
+	inbox, err := b.scheduleInbox(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if inbox != nil {
 		props[scheduleInboxURLName] = internal.PropFindValue(&scheduleInboxURL{
 			Href: internal.Href{Path: inbox.Path},
 		})
@@ -897,11 +936,11 @@ func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.P
 			resps = append(resps, resps_...)
 		}
 	}
-	if inboxBackend, ok := b.Backend.(InboxBackend); ok {
-		inbox, err := inboxBackend.GetInbox(ctx)
-		if err != nil {
-			return nil, err
-		}
+	inbox, err := b.scheduleInbox(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if inbox != nil {
 		resp, err := b.propFindInbox(propfind, inbox)
 		if err != nil {
 			return nil, err

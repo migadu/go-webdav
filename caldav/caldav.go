@@ -180,8 +180,19 @@ type SyncResponse struct {
 	Truncated bool
 }
 
+// Inbox is the scheduling Inbox collection of a user, where the scheduling
+// messages delivered to the user are stored (RFC 6638 section 2.2). See
+// InboxBackend.
 type Inbox struct {
-	Path           string
+	// Path is the path of the Inbox collection, which mustn't be inside a
+	// calendar. It's served as the CALDAV:schedule-inbox-URL property of the
+	// principal.
+	Path string
+	// UserAddressSet lists the calendar user addresses of the user, such as
+	// "mailto:user@example.com", which identify the user as the ORGANIZER or
+	// an ATTENDEE of events. It's served as the
+	// CALDAV:calendar-user-address-set property of the principal (RFC 6638
+	// section 2.4.1).
 	UserAddressSet []string
 	// ReadOnly reports that the current user may only read the scheduling
 	// messages in the Inbox, not update or remove them. It controls the

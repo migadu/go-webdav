@@ -15,12 +15,27 @@ import (
 // Tests for the scheduling (RFC 6638) support enabled by InboxBackend.
 
 const (
-	schedulingInboxPath  = "/user/calendars/inbox"
-	schedulingInviteHref = schedulingInboxPath + "/invite1.ics"
+	schedulingCalendarPath = "/user/calendars/a/"
+	schedulingEventHref    = schedulingCalendarPath + "invite1.ics"
+	schedulingInboxPath    = "/user/calendars/inbox"
+	schedulingInviteHref   = schedulingInboxPath + "/invite1.ics"
 )
 
-// schedulingBackend is a testBackend with a scheduling Inbox. It records the
-// calls made to it, so tests can check what the server asked of it.
+// newSchedulingTestBackend returns a testBackend with a calendar holding an
+// event, and no scheduling Inbox.
+func newSchedulingTestBackend() testBackend {
+	event := calendarObjectWithInvite(strings.TrimSuffix(schedulingCalendarPath, "/"), "Team Meeting")
+	return testBackend{
+		calendars: []Calendar{{Path: schedulingCalendarPath}},
+		objectMap: map[string][]CalendarObject{
+			schedulingCalendarPath: {event},
+		},
+	}
+}
+
+// schedulingBackend is a testBackend with a scheduling Inbox holding an
+// invitation, unless inbox is nil. It records the calls made to it, so tests
+// can check what the server asked of it.
 type schedulingBackend struct {
 	testBackend
 	inbox *Inbox
@@ -29,16 +44,12 @@ type schedulingBackend struct {
 }
 
 func newSchedulingBackend(inbox *Inbox) *schedulingBackend {
-	invite := calendarObjectWithInvite(inbox.Path, "Team Meeting Invite")
-	return &schedulingBackend{
-		testBackend: testBackend{
-			calendars: []Calendar{{Path: "/user/calendars/a/"}},
-			objectMap: map[string][]CalendarObject{
-				inbox.Path: {invite},
-			},
-		},
-		inbox: inbox,
+	b := &schedulingBackend{testBackend: newSchedulingTestBackend(), inbox: inbox}
+	if inbox != nil {
+		invite := calendarObjectWithInvite(strings.TrimSuffix(inbox.Path, "/"), "Team Meeting Invite")
+		b.objectMap[inbox.Path] = []CalendarObject{invite}
 	}
+	return b
 }
 
 func (b *schedulingBackend) GetInbox(ctx context.Context) (*Inbox, error) {
@@ -195,4 +206,75 @@ func TestInboxReadOnlyPrivileges(t *testing.T) {
 	if strings.Join(names, ", ") != strings.Join(want, ", ") {
 		t.Errorf("privileges = %v, want %v", names, want)
 	}
+}
+
+// "calendar-auto-schedule" tells clients that the server performs implicit
+// scheduling (RFC 6638 sections 2 and 3), so that they don't send scheduling
+// messages themselves: it's only advertised for backends which implement
+// InboxBackend, and only to users who have an Inbox.
+func TestSchedulingCapability(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		backend Backend
+		want    bool
+	}{
+		{"no InboxBackend", newSchedulingTestBackend(), false},
+		{"InboxBackend", newSchedulingBackend(&Inbox{Path: schedulingInboxPath}), true},
+		{"no Inbox for the user", newSchedulingBackend(nil), false},
+	} {
+		for _, target := range []string{"/", "/user/", "/user/calendars/", schedulingCalendarPath, schedulingEventHref} {
+			w := serveCalDAV(tc.backend, http.MethodOptions, target, "", "")
+			if w.Code != http.StatusNoContent {
+				t.Fatalf("%v: OPTIONS %v: got status %v, want 204; body:\n%s", tc.name, target, w.Code, w.Body.String())
+			}
+			dav := w.Header().Get("DAV")
+			if got := strings.Contains(dav, "calendar-auto-schedule"); got != tc.want {
+				t.Errorf("%v: OPTIONS %v: DAV: %v, want calendar-auto-schedule: %v", tc.name, target, dav, tc.want)
+			}
+		}
+	}
+}
+
+const propFindPrincipalScheduling = `<?xml version="1.0" encoding="UTF-8"?>
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <D:resourcetype/>
+    <C:calendar-home-set/>
+    <C:schedule-inbox-URL/>
+    <C:calendar-user-address-set/>
+  </D:prop>
+</D:propfind>`
+
+// propStatus returns the status of the property name in resp.
+func propStatus(t *testing.T, resp *internal.Response, name xml.Name) int {
+	t.Helper()
+	for _, propstat := range resp.PropStats {
+		if propstat.Prop.Get(name) != nil {
+			return propstat.Status.Code
+		}
+	}
+	t.Fatalf("response for %v doesn't mention %v", resp.Hrefs, name)
+	return 0
+}
+
+// GetInbox returns nil for users who aren't enabled for scheduling: the
+// principal then has no Inbox, and the server mustn't fail.
+func TestSchedulingDisabledForUser(t *testing.T) {
+	h := &Handler{Backend: newSchedulingBackend(nil)}
+
+	resp := propFindResponse(t, h, "/user/", "0", propFindPrincipalScheduling, "/user/")
+	if code := propStatus(t, resp, calendarHomeSetName); code != http.StatusOK {
+		t.Errorf("calendar-home-set: got status %v, want 200", code)
+	}
+	for _, name := range []xml.Name{scheduleInboxURLName, calendarUserAddressSetName} {
+		if code := propStatus(t, resp, name); code != http.StatusNotFound {
+			t.Errorf("%v: got status %v, want 404", name.Local, code)
+		}
+	}
+
+	w := serveCalDAV(h.Backend, "PROPFIND", "/user/calendars/", "1", propFindPrivileges)
+	checkStatusCodes(t, multiStatusCodes(t, w), map[string]int{
+		"/user/calendars/":     http.StatusOK,
+		schedulingCalendarPath: http.StatusOK,
+	})
 }
