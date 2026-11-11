@@ -19,7 +19,6 @@ const (
 	schedulingCalendarPath = "/user/calendars/a/"
 	schedulingEventHref    = schedulingCalendarPath + "invite1.ics"
 	schedulingInboxPath    = "/user/calendars/inbox"
-	schedulingInviteHref   = schedulingInboxPath + "/invite1.ics"
 )
 
 // newSchedulingTestBackend returns a testBackend with a calendar holding an

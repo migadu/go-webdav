@@ -198,6 +198,8 @@ type Inbox struct {
 	UserAddressSet []string
 	// ReadOnly reports that the current user may only read the scheduling
 	// messages in the Inbox, not update or remove them. It controls the
-	// DAV:current-user-privilege-set reported by the server.
+	// DAV:current-user-privilege-set reported by the server for the Inbox;
+	// as for calendars, that of the messages is controlled by their
+	// CalendarObject.ReadOnly.
 	ReadOnly bool
 }
