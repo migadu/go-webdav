@@ -259,7 +259,7 @@ func (b *decodedBody) Close() error {
 const xmlContentType = "application/xml; charset=\"utf-8\""
 
 func ServeXML(w http.ResponseWriter) *xml.Encoder {
-	w.Header().Add("Content-Type", xmlContentType)
+	w.Header().Set("Content-Type", xmlContentType)
 	w.Write([]byte(xml.Header))
 	return xml.NewEncoder(w)
 }
