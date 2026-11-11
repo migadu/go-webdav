@@ -335,6 +335,26 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 }
 
 func (c *Client) DoMultiStatus(req *http.Request) (*MultiStatus, error) {
+	var resps []Response
+	ms, err := c.DoMultiStatusFunc(req, func(resp *Response) error {
+		resps = append(resps, *resp)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	ms.Responses = resps
+	return ms, nil
+}
+
+// DoMultiStatusFunc performs a request answered with a 207 Multi-Status
+// response, as DoMultiStatus does, but calls f with each of its responses as
+// soon as it's decoded, rather than once all of them are: a response which
+// isn't kept by f doesn't stay in memory while the next ones are received.
+// The returned multistatus holds the rest of the response, without the
+// responses. An error returned by f stops reading the response, and is
+// returned.
+func (c *Client) DoMultiStatusFunc(req *http.Request, f func(resp *Response) error) (*MultiStatus, error) {
 	resp, err := c.Do(req)
 	if err != nil {
 		return nil, err
@@ -345,31 +365,91 @@ func (c *Client) DoMultiStatus(req *http.Request) (*MultiStatus, error) {
 		return nil, fmt.Errorf("HTTP multi-status request failed: %v", resp.Status)
 	}
 
-	// TODO: the response can be quite large, support streaming Response elements
-	var ms MultiStatus
-	if err := xml.NewDecoder(resp.Body).Decode(&ms); err != nil {
-		return nil, err
-	}
-
-	c.normalizeMultiStatus(&ms, req, resp)
-	return &ms, nil
+	base := responseBase(req, resp)
+	return decodeMultiStatus(resp.Body, func(r *Response) error {
+		c.normalizeResponse(r, base)
+		return f(r)
+	})
 }
 
-// normalizeMultiStatus normalizes the hrefs of ms, received in resp to req,
-// with normalizeHref, and records how to normalize those in its properties.
-func (c *Client) normalizeMultiStatus(ms *MultiStatus, req *http.Request, resp *http.Response) {
-	// Relative hrefs are relative to the URL of the request, after redirects
-	base := req.URL
-	if resp.Request != nil && resp.Request.URL != nil {
-		base = resp.Request.URL
+// decodeMultiStatus decodes a multistatus element from r as xml.Decoder.Decode
+// does, except that it calls f with each response as soon as it's decoded,
+// and returns the multistatus without its responses. An error returned by f
+// stops decoding, and is returned.
+func decodeMultiStatus(r io.Reader, f func(resp *Response) error) (*MultiStatus, error) {
+	d := xml.NewDecoder(r)
+	var start xml.StartElement
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return nil, err
+		}
+		if s, ok := tok.(xml.StartElement); ok {
+			start = s
+			break
+		}
+	}
+	if start.Name != multiStatusName {
+		return nil, fmt.Errorf("webdav: expected element <%v %v>, got <%v %v>", multiStatusName.Space, multiStatusName.Local, start.Name.Space, start.Name.Local)
 	}
 
-	for i := range ms.Responses {
-		r := &ms.Responses[i]
-		for j, href := range r.Hrefs {
-			r.Hrefs[j] = c.normalizeHref(base, href)
+	ms := &MultiStatus{XMLName: start.Name}
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return nil, err
 		}
-		r.client, r.base = c, base
+		switch tok := tok.(type) {
+		case xml.StartElement:
+			// The elements are matched by their local name, as the struct
+			// tags of MultiStatus match them: decoding a response in another
+			// namespace than the DAV: one of Response.XMLName fails
+			switch {
+			case tok.Name.Local == "response":
+				var resp Response
+				if err = d.DecodeElement(&resp, &tok); err == nil {
+					err = f(&resp)
+				}
+			case tok.Name.Local == "responsedescription":
+				err = d.DecodeElement(&ms.ResponseDescription, &tok)
+			case tok.Name.Local == "sync-token":
+				err = d.DecodeElement(&ms.SyncToken, &tok)
+			default:
+				err = d.Skip()
+			}
+			if err != nil {
+				return nil, err
+			}
+		case xml.EndElement:
+			return ms, nil
+		}
+	}
+}
+
+// responseBase returns the URL the relative hrefs of resp, the response to
+// req, are relative to: the URL of the request, after redirects.
+func responseBase(req *http.Request, resp *http.Response) *url.URL {
+	if resp.Request != nil && resp.Request.URL != nil {
+		return resp.Request.URL
+	}
+	return req.URL
+}
+
+// normalizeResponse normalizes the hrefs of r, a response received for base,
+// with normalizeHref, and records how to normalize those in its properties.
+func (c *Client) normalizeResponse(r *Response, base *url.URL) {
+	for j, href := range r.Hrefs {
+		r.Hrefs[j] = c.normalizeHref(base, href)
+	}
+	r.client, r.base = c, base
+}
+
+// normalizeMultiStatus normalizes the responses of ms, received in resp to
+// req, with normalizeResponse.
+func (c *Client) normalizeMultiStatus(ms *MultiStatus, req *http.Request, resp *http.Response) {
+	base := responseBase(req, resp)
+	for i := range ms.Responses {
+		c.normalizeResponse(&ms.Responses[i], base)
 	}
 }
 
@@ -470,8 +550,11 @@ func (c *Client) Options(ctx context.Context, path string) (classes map[string]b
 	return classes, methods, nil
 }
 
-// SyncCollection perform a `sync-collection` REPORT operation on a resource
-func (c *Client) SyncCollection(ctx context.Context, path, syncToken string, level Depth, limit *Limit, prop *Prop) (*MultiStatus, error) {
+// SyncCollection perform a `sync-collection` REPORT operation on a resource,
+// calling f with each response as soon as it's decoded (see
+// DoMultiStatusFunc). The returned multistatus holds the sync token, without
+// the responses.
+func (c *Client) SyncCollection(ctx context.Context, path, syncToken string, level Depth, limit *Limit, prop *Prop, f func(resp *Response) error) (*MultiStatus, error) {
 	q := SyncCollectionQuery{
 		SyncToken: syncToken,
 		SyncLevel: level.String(),
@@ -484,10 +567,5 @@ func (c *Client) SyncCollection(ctx context.Context, path, syncToken string, lev
 		return nil, err
 	}
 
-	ms, err := c.DoMultiStatus(req.WithContext(ctx))
-	if err != nil {
-		return nil, err
-	}
-
-	return ms, nil
+	return c.DoMultiStatusFunc(req.WithContext(ctx), f)
 }
