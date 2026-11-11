@@ -55,7 +55,7 @@ func collectionHref(p string) string {
 // (section 10.4.1).
 func (b *backend) evaluateIf(r *http.Request) error {
 	// An empty If header field has no lists
-	hif := strings.TrimSpace(strings.Join(r.Header.Values("If"), " "))
+	hif := internal.IfHeader(r.Header)
 	if hif == "" {
 		return nil
 	}
@@ -73,9 +73,13 @@ func (b *backend) evaluateIf(r *http.Request) error {
 		}
 	}
 
-	if r.Method == "LOCK" && internal.IsRequestBodyEmpty(r) {
-		// The If header field of a lock refresh names the lock to refresh,
-		// which Lock checks
+	// Lists are either all tagged or all untagged
+	tagged := lists[0][0].Resource != ""
+	if r.Method == "LOCK" && !tagged && internal.IsRequestBodyEmpty(r) {
+		// The untagged If header field of a lock refresh names the lock to
+		// refresh, which Lock checks. A tagged one is evaluated as usual:
+		// the tagged resource must be in the scope of the lock as well
+		// (section 10.4.4), and Lock then checks the Request-URI is.
 		return nil
 	}
 
@@ -110,17 +114,42 @@ func (ev *ifEvaluator) list(l []internal.Condition) (bool, error) {
 	return true, nil
 }
 
+// resourceTagPath returns the path of the resource a Resource-Tag identifies.
+// internal.ParseConditions checked that it's an absolute URI or an absolute
+// path (RFC 4918 section 8.3). As for the Destination header field, the host
+// of an HTTP URL is ignored. ok is false for any other absolute URI, such as
+// a URN: it identifies no resource served here.
+func resourceTagPath(tag string) (p string, ok bool) {
+	u, err := url.Parse(tag)
+	if err != nil {
+		return "", false
+	}
+	switch u.Scheme {
+	case "":
+		return u.Path, true
+	case "http", "https":
+		if u.Opaque != "" {
+			return "", false
+		} else if u.Path == "" {
+			// RFC 9110 section 4.2.3
+			return "/", true
+		}
+		return u.Path, true
+	default:
+		return "", false
+	}
+}
+
 // condition reports whether a condition, ignoring Not, is met.
 func (ev *ifEvaluator) condition(cond *internal.Condition) (bool, error) {
 	p := ev.r.URL.Path
 	if cond.Resource != "" {
-		u, err := url.Parse(cond.Resource)
-		if err != nil {
-			return false, &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
-		}
-		p = u.Path
-		if p == "" {
-			p = "/"
+		var ok bool
+		p, ok = resourceTagPath(cond.Resource)
+		if !ok {
+			// Not a resource served here: as for an unmapped URL, it
+			// doesn't have the state (RFC 4918 section 10.4.4)
+			return false, nil
 		}
 	}
 	p = path.Clean(p)
