@@ -216,6 +216,16 @@ func (resp *Response) Path() (string, error) {
 	return path, err
 }
 
+// Paths returns the paths (or URLs) of all hrefs in the response, in the same
+// form as Path.
+func (resp *Response) Paths() []string {
+	paths := make([]string, len(resp.Hrefs))
+	for i := range resp.Hrefs {
+		paths[i] = resp.Hrefs[i].pathOrURL()
+	}
+	return paths
+}
+
 // HrefPath returns the path of the resource at href, found in one of the
 // response's properties, in the same form as Path.
 func (resp *Response) HrefPath(href *Href) string {
