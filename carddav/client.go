@@ -89,6 +89,10 @@ func decodeSupportedAddressData(supported *supportedAddressData) []AddressDataTy
 	return l
 }
 
+func (c *Client) FindAddressBook(ctx context.Context, path string) (*AddressBook, error) {
+	return nil, fmt.Errorf("carddav: FindAddressBook not implemented")
+}
+
 func (c *Client) FindAddressBooks(ctx context.Context, addressBookHomeSet string) ([]AddressBook, error) {
 	propfind := internal.NewPropNamePropFind(
 		internal.ResourceTypeName,
