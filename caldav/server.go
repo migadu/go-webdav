@@ -518,8 +518,8 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *cal
 type CalendarObjectsBackend interface {
 	// GetCalendarObjects returns the calendar objects found at paths, in any order.
 	// The Path of each must be the path it was requested by: paths without
-	// an object are reported as 404 Not Found. An error fails the whole
-	// request.
+	// an object are reported as 404 Not Found, or with the per-resource error
+	// reported via webdav.NewHrefError. Any other error fails the whole request.
 	GetCalendarObjects(ctx context.Context, paths []string, req *CalendarCompRequest) ([]CalendarObject, error)
 }
 
@@ -548,18 +548,26 @@ func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multige
 	}
 
 	var objects map[string]*CalendarObject
+	var objErrResps map[string]internal.Response
 	if mb, ok := h.Backend.(CalendarObjectsBackend); ok {
 		paths := make([]string, len(multiget.Hrefs))
 		for i, href := range multiget.Hrefs {
 			paths[i] = href.Path
 		}
 		l, err := mb.GetCalendarObjects(ctx, paths, &dataReq)
+		errResps, err := internal.HrefErrorResponses(err)
 		if err != nil {
 			return err
 		}
 		objects = make(map[string]*CalendarObject, len(l))
 		for i := range l {
 			objects[l[i].Path] = &l[i]
+		}
+		objErrResps = make(map[string]internal.Response, len(errResps))
+		for _, resp := range errResps {
+			if len(resp.Hrefs) > 0 {
+				objErrResps[resp.Hrefs[0].Path] = resp
+			}
 		}
 	}
 
@@ -572,6 +580,12 @@ func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multige
 			var co *CalendarObject
 			var err error
 			if objects != nil {
+				if errResp, ok := objErrResps[href.Path]; ok {
+					if err := mw.WriteResponse(&errResp); err != nil {
+						return err
+					}
+					continue
+				}
 				if co = objects[href.Path]; co == nil {
 					err = internal.HTTPErrorf(http.StatusNotFound, "caldav: calendar object not found")
 				}
