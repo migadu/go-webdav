@@ -44,8 +44,7 @@ func match(filter CompFilter, comp *ical.Component) (bool, error) {
 		return filter.IsNotDefined, nil
 	}
 
-	var zeroDate time.Time
-	if filter.Start != zeroDate {
+	if !filter.Start.IsZero() || !filter.End.IsZero() {
 		match, err := matchCompTimeRange(filter.Start, filter.End, comp)
 		if err != nil {
 			return false, err
@@ -105,8 +104,7 @@ func matchPropFilter(filter PropFilter, comp *ical.Component) (bool, error) {
 		}
 	}
 
-	var zeroDate time.Time
-	if filter.Start != zeroDate {
+	if !filter.Start.IsZero() || !filter.End.IsZero() {
 		match, err := matchPropTimeRange(filter.Start, filter.End, field)
 		if err != nil {
 			return false, err
@@ -124,57 +122,76 @@ func matchPropFilter(filter PropFilter, comp *ical.Component) (bool, error) {
 	return true, nil
 }
 
+// matchCompTimeRange reports whether a component overlaps the time range
+// [start, end), as defined in RFC 4791 section 9.9. A zero start or end leaves
+// the range open on that side.
 func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error) {
-	// See https://datatracker.ietf.org/doc/html/rfc4791#section-9.9
-
-	// evaluate recurring components
-	rset, err := comp.RecurrenceSet(start.Location())
-	if err != nil {
-		return false, err
-	}
-	if rset != nil {
-		// TODO we can only set inclusive to true or false, but really the
-		// start time is inclusive while the end time is not :/
-		return len(rset.Between(start, end, true)) > 0, nil
-	}
-
-	// TODO handle more than just events
-	if comp.Name != ical.CompEvent {
-		return false, nil
-	}
-	event := ical.Event{comp}
-
-	eventStart, err := event.DateTimeStart(start.Location())
-	if err != nil {
-		return false, err
-	}
-	eventEnd, err := event.DateTimeEnd(end.Location())
+	rset, err := comp.RecurrenceSet(time.UTC)
 	if err != nil {
 		return false, err
 	}
 
-	// The range is [start, end): an event overlaps it when start < DTEND and end > DTSTART.
-	if eventEnd.Equal(eventStart) {
-		if eventStart.Before(start) {
-			return false, nil
+	// The length of the component, or of each of its occurrences
+	var duration time.Duration
+	if comp.Name == ical.CompEvent {
+		event := ical.Event{Component: comp}
+		eventStart, err := event.DateTimeStart(time.UTC)
+		if err != nil {
+			return false, err
 		}
-	} else if !eventEnd.After(start) {
+		eventEnd, err := event.DateTimeEnd(time.UTC)
+		if err != nil {
+			return false, err
+		}
+		if rset == nil {
+			return overlapsTimeRange(start, end, eventStart, eventEnd), nil
+		}
+		duration = eventEnd.Sub(eventStart)
+	} else if rset == nil {
+		// TODO handle more than just events
 		return false, nil
 	}
-	return end.IsZero() || end.After(eventStart), nil
+
+	// An occurrence starting at or before start-duration ends before the range
+	// starts, so only later ones can overlap it.
+	after := start.Add(-duration)
+	if end.IsZero() {
+		var next time.Time
+		if duration > 0 {
+			next = rset.After(after, false)
+		} else {
+			next = rset.After(start, true)
+		}
+		return !next.IsZero(), nil
+	}
+	for _, occStart := range rset.Between(after, end, true) {
+		if overlapsTimeRange(start, end, occStart, occStart.Add(duration)) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// overlapsTimeRange reports whether [compStart, compEnd) overlaps the time range
+// [start, end). A component with no duration overlaps it when it starts inside
+// it. A zero start or end leaves the range open on that side.
+func overlapsTimeRange(start, end, compStart, compEnd time.Time) bool {
+	if !end.IsZero() && !end.After(compStart) {
+		return false
+	}
+	if compEnd.Equal(compStart) {
+		return !compStart.Before(start)
+	}
+	return compEnd.After(start)
 }
 
 func matchPropTimeRange(start, end time.Time, field *ical.Prop) (bool, error) {
 	// See https://datatracker.ietf.org/doc/html/rfc4791#section-9.9
-
-	ptime, err := field.DateTime(start.Location())
+	ptime, err := field.DateTime(time.UTC)
 	if err != nil {
 		return false, err
 	}
-	if ptime.After(start) && (end.IsZero() || ptime.Before(end)) {
-		return true, nil
-	}
-	return false, nil
+	return !ptime.Before(start) && (end.IsZero() || ptime.Before(end)), nil
 }
 
 func matchParamFilter(filter ParamFilter, field *ical.Prop) bool {
