@@ -17,6 +17,12 @@ import (
 	"github.com/emersion/go-webdav/internal"
 )
 
+// ErrNoServiceRecord is returned by DiscoverContextURL when the domain has no
+// SRV record for the service. RFC 6764 section 6 leaves it to the client to ask
+// the user for the server, or to guess one, e.g. the domain itself with
+// "https://" + domain + "/.well-known/carddav".
+var ErrNoServiceRecord = internal.ErrNoServiceRecord
+
 // DiscoverContextURL performs a DNS-based CardDAV service discovery as
 // described in RFC 6352 section 11. It returns the URL to the CardDAV server.
 func DiscoverContextURL(ctx context.Context, domain string) (string, error) {

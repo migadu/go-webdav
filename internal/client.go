@@ -16,13 +16,24 @@ import (
 	"unicode"
 )
 
+// ErrNoServiceRecord is returned by DiscoverContextURL when the domain has no
+// SRV record for the service, or one saying the service isn't available.
+var ErrNoServiceRecord = errors.New("webdav: domain doesn't have an SRV record")
+
+// dnsResolver performs the DNS lookups of DiscoverContextURL. It's
+// implemented by *net.Resolver, and replaced in tests.
+type dnsResolver interface {
+	LookupSRV(ctx context.Context, service, proto, name string) (cname string, addrs []*net.SRV, err error)
+	LookupTXT(ctx context.Context, name string) ([]string, error)
+}
+
+var resolver dnsResolver = &net.Resolver{}
+
 // DiscoverContextURL performs a DNS-based CardDAV/CalDAV service discovery as
 // described in RFC 6764. It returns the URL to the CardDAV/CalDAV server.
 // Specifically it implements points 2 and 3 from the bootstrapping procedure
 // defined in RFC 6764 section 6.
 func DiscoverContextURL(ctx context.Context, service, domain string) (string, error) {
-	var resolver net.Resolver
-
 	// Only lookup TLS records, plaintext connections are insecure
 	_, addrs, err := resolver.LookupSRV(ctx, service+"s", "tcp", domain)
 	if dnsErr, ok := err.(*net.DNSError); ok {
@@ -34,13 +45,15 @@ func DiscoverContextURL(ctx context.Context, service, domain string) (string, er
 	}
 
 	if len(addrs) == 0 {
-		return "", errors.New("webdav: domain doesn't have an SRV record")
+		return "", ErrNoServiceRecord
 	}
 	addr := addrs[0]
 
 	target := strings.TrimSuffix(addr.Target, ".")
 	if target == "" {
-		return "", errors.New("webdav: empty target in SRV record")
+		// A target of "." means the service is decidedly not available
+		// (RFC 2782)
+		return "", ErrNoServiceRecord
 	}
 
 	txtName := fmt.Sprintf("_%ss._tcp.%s", service, domain)
