@@ -278,15 +278,29 @@ func encodeCalendarReq(c *CalendarCompRequest) (*internal.Prop, error) {
 		return nil, err
 	}
 
+	// The time ranges are checked as the server checks them, a zero time
+	// being a missing attribute
 	calDataReq := calendarDataReq{Comp: compReq}
 	if e := c.Expand; e != nil {
-		calDataReq.Expand = &expand{requiredTimeRange: newRequiredTimeRange(e.Start, e.End)}
+		tr := newRequiredTimeRange(e.Start, e.End)
+		if err := tr.check("expand"); err != nil {
+			return nil, err
+		}
+		calDataReq.Expand = []expand{{requiredTimeRange: tr}}
 	}
 	if l := c.LimitRecurrenceSet; l != nil {
-		calDataReq.LimitRecurrenceSet = &limitRecurrenceSet{requiredTimeRange: newRequiredTimeRange(l.Start, l.End)}
+		tr := newRequiredTimeRange(l.Start, l.End)
+		if err := tr.check("limit-recurrence-set"); err != nil {
+			return nil, err
+		}
+		calDataReq.LimitRecurrenceSet = []limitRecurrenceSet{{requiredTimeRange: tr}}
 	}
 	if l := c.LimitFreeBusySet; l != nil {
-		calDataReq.LimitFreeBusySet = &limitFreeBusySet{requiredTimeRange: newRequiredTimeRange(l.Start, l.End)}
+		tr := newRequiredTimeRange(l.Start, l.End)
+		if err := tr.check("limit-freebusy-set"); err != nil {
+			return nil, err
+		}
+		calDataReq.LimitFreeBusySet = []limitFreeBusySet{{requiredTimeRange: tr}}
 	}
 
 	getLastModReq := internal.NewRawXMLElement(internal.GetLastModifiedName, nil, nil)

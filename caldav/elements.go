@@ -235,12 +235,16 @@ func (t *dateWithUTCTime) MarshalText() ([]byte, error) {
 }
 
 // Request variant of https://tools.ietf.org/html/rfc4791#section-9.6
+//
+// The request holds at most one expand, limit-recurrence-set and
+// limit-freebusy-set element. They're slices to tell a repeated element,
+// which encoding/xml would decode onto the first one, from a single one.
 type calendarDataReq struct {
-	XMLName            xml.Name            `xml:"urn:ietf:params:xml:ns:caldav calendar-data"`
-	Comp               *comp               `xml:"comp,omitempty"`
-	Expand             *expand             `xml:"expand,omitempty"`
-	LimitRecurrenceSet *limitRecurrenceSet `xml:"limit-recurrence-set,omitempty"`
-	LimitFreeBusySet   *limitFreeBusySet   `xml:"limit-freebusy-set,omitempty"`
+	XMLName            xml.Name             `xml:"urn:ietf:params:xml:ns:caldav calendar-data"`
+	Comp               *comp                `xml:"comp,omitempty"`
+	Expand             []expand             `xml:"expand,omitempty"`
+	LimitRecurrenceSet []limitRecurrenceSet `xml:"limit-recurrence-set,omitempty"`
+	LimitFreeBusySet   []limitFreeBusySet   `xml:"limit-freebusy-set,omitempty"`
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.6.1
@@ -263,9 +267,32 @@ type requiredTimeRange struct {
 	End   *dateWithUTCTime `xml:"end,attr,omitempty"`
 }
 
+// newRequiredTimeRange returns the time range from start to end, without the
+// attribute of a zero time.
 func newRequiredTimeRange(start, end time.Time) requiredTimeRange {
-	s, e := dateWithUTCTime(start), dateWithUTCTime(end)
-	return requiredTimeRange{Start: &s, End: &e}
+	var tr requiredTimeRange
+	if !start.IsZero() {
+		s := dateWithUTCTime(start)
+		tr.Start = &s
+	}
+	if !end.IsZero() {
+		e := dateWithUTCTime(end)
+		tr.End = &e
+	}
+	return tr
+}
+
+// check checks tr, the time range of the element called name. RFC 4791
+// sections 9.6.5 to 9.6.7 require a start and an end, the end after the
+// start.
+func (tr *requiredTimeRange) check(name string) error {
+	if tr.Start == nil || tr.End == nil {
+		return fmt.Errorf("caldav: %s requires a start and an end attribute", name)
+	}
+	if !time.Time(*tr.End).After(time.Time(*tr.Start)) {
+		return fmt.Errorf("caldav: the end of %s must be after its start", name)
+	}
+	return nil
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.6.5

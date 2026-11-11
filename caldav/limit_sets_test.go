@@ -88,6 +88,26 @@ func TestReportCalendarDataLimitsBadRequest(t *testing.T) {
 	}, {
 		name:         "limit-freebusy-set with a floating start",
 		calendarData: `<C:calendar-data><C:limit-freebusy-set start="20060102T000000" end="20060103T000000Z"/></C:calendar-data>`,
+	}, {
+		// At most one of each (RFC 4791 section 9.6), rather than the
+		// attributes of the last one overwriting those of the first
+		name: "two expand",
+		calendarData: `<C:calendar-data>
+      <C:expand start="20060103T000000Z" end="20060105T000000Z"/>
+      <C:expand start="20060104T000000Z" end="20060106T000000Z"/>
+    </C:calendar-data>`,
+	}, {
+		name: "two limit-recurrence-set",
+		calendarData: `<C:calendar-data>
+      <C:limit-recurrence-set start="20060103T000000Z" end="20060105T000000Z"/>
+      <C:limit-recurrence-set start="20060104T000000Z" end="20060106T000000Z"/>
+    </C:calendar-data>`,
+	}, {
+		name: "two limit-freebusy-set",
+		calendarData: `<C:calendar-data>
+      <C:limit-freebusy-set start="20060102T000000Z" end="20060103T000000Z"/>
+      <C:limit-freebusy-set end="20060104T000000Z"/>
+    </C:calendar-data>`,
 	}} {
 		for _, report := range calendarDataReports(tc.calendarData) {
 			t.Run(tc.name+"/"+report.name, func(t *testing.T) {
@@ -248,5 +268,51 @@ func TestQueryCalendarExpandAndLimitRecurrenceSet(t *testing.T) {
 	}
 	if sent {
 		t.Errorf("QueryCalendar() sent the request")
+	}
+}
+
+// The client checks the time ranges of expand, limit-recurrence-set and
+// limit-freebusy-set as the server does, a zero time being a missing
+// attribute, rather than sending e.g. 00010101T000000Z (RFC 4791 sections
+// 9.6.5 to 9.6.7).
+func TestQueryCalendarInvalidTimeRange(t *testing.T) {
+	var sent bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sent = true
+		http.Error(w, "unexpected request", http.StatusBadRequest)
+	}))
+	defer ts.Close()
+
+	c, err := NewClient(nil, ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		req  CalendarCompRequest
+	}{
+		{"expand without start and end", CalendarCompRequest{Expand: &CalendarExpandRequest{}}},
+		{"expand without start", CalendarCompRequest{Expand: &CalendarExpandRequest{End: jan2006(5)}}},
+		{"expand without end", CalendarCompRequest{Expand: &CalendarExpandRequest{Start: jan2006(3)}}},
+		{"expand ending before its start", CalendarCompRequest{Expand: &CalendarExpandRequest{Start: jan2006(5), End: jan2006(3)}}},
+		{"limit-recurrence-set without end", CalendarCompRequest{LimitRecurrenceSet: &CalendarLimitRequest{Start: jan2006(3)}}},
+		{"limit-recurrence-set ending at its start", CalendarCompRequest{LimitRecurrenceSet: &CalendarLimitRequest{Start: jan2006(3), End: jan2006(3)}}},
+		{"limit-freebusy-set without start", CalendarCompRequest{LimitFreeBusySet: &CalendarLimitRequest{End: jan2006(3)}}},
+		{"limit-freebusy-set ending before its start", CalendarCompRequest{
+			Expand:           &CalendarExpandRequest{Start: jan2006(3), End: jan2006(5)},
+			LimitFreeBusySet: &CalendarLimitRequest{Start: jan2006(3), End: jan2006(2)},
+		}},
+	} {
+		sent = false
+		_, err := c.QueryCalendar(context.Background(), "/user/calendars/cal/", &CalendarQuery{
+			CompRequest: tc.req,
+			CompFilter:  CompFilter{Name: "VCALENDAR"},
+		})
+		if err == nil {
+			t.Errorf("%v: QueryCalendar() succeeded", tc.name)
+		}
+		if sent {
+			t.Errorf("%v: QueryCalendar() sent the request, and got: %v", tc.name, err)
+		}
 	}
 }
