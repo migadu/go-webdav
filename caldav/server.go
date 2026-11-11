@@ -906,6 +906,9 @@ func (b *backend) propFindInbox(propfind *internal.PropFind, inbox *Inbox) (*int
 	props := map[xml.Name]internal.PropFindFunc{
 		internal.ResourceTypeName:            internal.PropFindValue(internal.NewResourceType(internal.CollectionName, scheduleInboxName)),
 		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(newInboxPrivilegeSet(inbox.ReadOnly)),
+		// RFC 6638 section 2.3 extends these reports to the Inbox, while
+		// sync-collection REPORTs are only served for calendars
+		internal.SupportedReportSetName: internal.PropFindValue(internal.NewSupportedReportSet(calendarQueryName, calendarMultigetName)),
 	}
 	return internal.NewPropFindResponse(inbox.Path, propfind, props)
 }
@@ -1070,10 +1073,11 @@ func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*
 		}
 	}
 
-	// Properties cannot be written yet. Refusing them one by one in a
-	// multistatus, rather than failing the whole request, keeps clients which
-	// PROPPATCH display metadata while adopting a calendar (macOS Calendar
-	// sets displayname, calendar-color and calendar-order) from dropping it.
+	// Properties cannot be written yet, and those of the scheduling Inbox
+	// won't be. Refusing them one by one in a multistatus, rather than
+	// failing the whole request, keeps clients which PROPPATCH display
+	// metadata while adopting a calendar (macOS Calendar sets displayname,
+	// calendar-color and calendar-order) from dropping it.
 	return internal.NewPropPatchResponse(r.URL.Path, update, http.StatusForbidden)
 }
 
@@ -1157,6 +1161,11 @@ func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (b *backend) Delete(r *http.Request) error {
+	// Clients can't delete the Inbox, only the scheduling messages in it (RFC
+	// 6638 section 2)
+	if b.resourceTypeAtPath(r.Context(), r.URL.Path) == resourceTypeScheduleInbox {
+		return internal.HTTPErrorf(http.StatusForbidden, "caldav: the scheduling Inbox can't be deleted")
+	}
 	return b.Backend.DeleteCalendarObject(r.Context(), r.URL.Path)
 }
 

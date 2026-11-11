@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/internal"
 )
 
@@ -63,6 +64,50 @@ func (b *schedulingBackend) GetInbox(ctx context.Context) (*Inbox, error) {
 func (b *schedulingBackend) CreateCalendar(ctx context.Context, cal *Calendar) error {
 	b.created = append(b.created, cal.Path)
 	return nil
+}
+
+// schedulingFullBackend is a schedulingBackend which also implements the
+// optional interfaces of calendars, and records the paths it's called with.
+type schedulingFullBackend struct {
+	*schedulingBackend
+
+	queried, deleted, updated, synced []string
+}
+
+func newSchedulingFullBackend(inbox *Inbox) *schedulingFullBackend {
+	return &schedulingFullBackend{schedulingBackend: newSchedulingBackend(inbox)}
+}
+
+func (b *schedulingFullBackend) QueryCalendarObjects(ctx context.Context, path string, query *CalendarQuery) ([]CalendarObject, error) {
+	b.queried = append(b.queried, path)
+	cos, err := b.ListCalendarObjects(ctx, path, &query.CompRequest)
+	if err != nil {
+		return nil, err
+	}
+	return Filter(query, cos)
+}
+
+func (b *schedulingFullBackend) GetCalendarObject(ctx context.Context, path string, req *CalendarCompRequest) (*CalendarObject, error) {
+	co, err := b.schedulingBackend.GetCalendarObject(ctx, path, req)
+	if err != nil {
+		return nil, webdav.NewHTTPError(http.StatusNotFound, err)
+	}
+	return co, nil
+}
+
+func (b *schedulingFullBackend) DeleteCalendarObject(ctx context.Context, path string) error {
+	b.deleted = append(b.deleted, path)
+	return nil
+}
+
+func (b *schedulingFullBackend) UpdateCalendar(ctx context.Context, path string, update *CalendarUpdate) error {
+	b.updated = append(b.updated, path)
+	return nil
+}
+
+func (b *schedulingFullBackend) SyncCollection(ctx context.Context, path string, query *SyncQuery) (*SyncResponse, error) {
+	b.synced = append(b.synced, path)
+	return &SyncResponse{SyncToken: "token"}, nil
 }
 
 const propFindPrivileges = `<?xml version="1.0" encoding="UTF-8"?>
@@ -417,5 +462,176 @@ func TestMkcalendarAtInbox(t *testing.T) {
 		if len(b.created) > 0 {
 			t.Errorf("%v at the Inbox created %v", method, b.created)
 		}
+	}
+}
+
+const (
+	inboxMemberPath = "/user/calendars/inbox/"
+	inboxMemberHref = inboxMemberPath + "invite1.ics"
+)
+
+const propFindAllPropInclude = `<?xml version="1.0" encoding="UTF-8"?>
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:allprop/>
+  <D:include>
+    <C:schedule-inbox-URL/>
+  </D:include>
+</D:propfind>`
+
+// RFC 6638 sections 2.2.1 and 2.4.1: the scheduling properties aren't
+// returned by allprop, nor is DAV:current-user-privilege-set (RFC 3744
+// section 5.4), unless the request includes them.
+func TestSchedulingAllProp(t *testing.T) {
+	h := &Handler{Backend: newSchedulingBackend(&Inbox{
+		Path:           inboxMemberPath,
+		UserAddressSet: []string{"mailto:user@example.com"},
+	})}
+	notAllProp := []string{
+		"schedule-inbox-URL",
+		"calendar-user-address-set",
+		"current-user-privilege-set",
+		"supported-report-set",
+	}
+
+	for _, target := range []string{"/user/", inboxMemberPath} {
+		for _, body := range []string{"", propFindAllProp} {
+			w := serveCalDAV(h.Backend, "PROPFIND", target, "0", body)
+			if w.Code != http.StatusMultiStatus {
+				t.Fatalf("PROPFIND %v: got status %v, want 207", target, w.Code)
+			}
+			resp := w.Body.String()
+			if !strings.Contains(resp, "<resourcetype") {
+				t.Errorf("allprop PROPFIND %v: no resourcetype:\n%s", target, resp)
+			}
+			for _, name := range notAllProp {
+				if strings.Contains(resp, "<"+name) {
+					t.Errorf("allprop PROPFIND %v returned %v:\n%s", target, name, resp)
+				}
+			}
+		}
+	}
+
+	resp := propFindResponse(t, h, "/user/", "0", propFindAllPropInclude, "/user/")
+	var inboxURL scheduleInboxURL
+	if err := resp.DecodeProp(&inboxURL); err != nil {
+		t.Errorf("allprop PROPFIND with include: schedule-inbox-URL: %v", err)
+	} else if inboxURL.Href.Path != inboxMemberPath {
+		t.Errorf("schedule-inbox-URL = %v, want %v", inboxURL.Href.Path, inboxMemberPath)
+	}
+}
+
+// The properties of the Inbox can't be modified, and it isn't a calendar:
+// CalendarUpdater isn't called for it.
+func TestInboxPropPatch(t *testing.T) {
+	b := newSchedulingFullBackend(&Inbox{Path: inboxMemberPath})
+	w := serveCalDAV(b, "PROPPATCH", inboxMemberPath, "", propPatchCalendarRequest)
+	if w.Code != http.StatusMultiStatus {
+		t.Fatalf("PROPPATCH the Inbox: got status %v, want 207; body:\n%s", w.Code, w.Body.String())
+	}
+	var ms internal.MultiStatus
+	if err := xml.NewDecoder(w.Body).Decode(&ms); err != nil {
+		t.Fatalf("failed to decode multistatus: %v", err)
+	}
+	if len(ms.Responses) != 1 {
+		t.Fatalf("got %d responses, want 1", len(ms.Responses))
+	}
+	for _, propstat := range ms.Responses[0].PropStats {
+		if propstat.Status.Code != http.StatusForbidden {
+			t.Errorf("PROPPATCH the Inbox: got property status %v, want 403", propstat.Status.Code)
+		}
+	}
+	if len(b.updated) > 0 {
+		t.Errorf("PROPPATCH the Inbox called UpdateCalendar for %v", b.updated)
+	}
+}
+
+// RFC 6638 section 2.3 extends calendar-query and calendar-multiget to the
+// Inbox; the Inbox doesn't support sync-collection, which SyncBackend
+// implements for calendars.
+func TestInboxSupportedReportSet(t *testing.T) {
+	h := &Handler{Backend: newSchedulingFullBackend(&Inbox{Path: inboxMemberPath})}
+	resp := propFindResponse(t, h, inboxMemberPath, "0", propFindSyncProps, inboxMemberPath)
+	var reports testSupportedReportSet
+	if err := resp.DecodeProp(&reports); err != nil {
+		t.Fatalf("supported-report-set: %v", err)
+	}
+	want := []string{namespace + " calendar-multiget", namespace + " calendar-query"}
+	if got := reports.names(); strings.Join(got, ", ") != strings.Join(want, ", ") {
+		t.Errorf("supported-report-set = %v, want %v", got, want)
+	}
+}
+
+func TestInboxSyncCollection(t *testing.T) {
+	b := newSchedulingFullBackend(&Inbox{Path: inboxMemberPath})
+	res := serveTestRequest(t, &Handler{Backend: b}, "REPORT", inboxMemberPath, syncCollectionBody("", "1", 0))
+	decodeTestError(t, res, http.StatusForbidden, "supported-report")
+	if len(b.synced) > 0 {
+		t.Errorf("sync-collection on the Inbox called SyncCollection for %v", b.synced)
+	}
+}
+
+const calendarQueryInbox = `<?xml version="1.0" encoding="UTF-8"?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <D:getetag/>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VEVENT"/>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>`
+
+const calendarMultigetInbox = `<?xml version="1.0" encoding="UTF-8"?>
+<C:calendar-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <D:getetag/>
+    <C:calendar-data/>
+  </D:prop>
+  <D:href>` + inboxMemberHref + `</D:href>
+  <D:href>` + inboxMemberPath + `missing.ics</D:href>
+</C:calendar-multiget>`
+
+func TestInboxReports(t *testing.T) {
+	b := newSchedulingFullBackend(&Inbox{Path: inboxMemberPath})
+
+	w := serveCalDAV(b, "REPORT", inboxMemberPath, "1", calendarQueryInbox)
+	checkStatusCodes(t, multiStatusCodes(t, w), map[string]int{inboxMemberHref: http.StatusOK})
+	if strings.Join(b.queried, ", ") != inboxMemberPath {
+		t.Errorf("calendar-query on the Inbox queried %v, want %v", b.queried, inboxMemberPath)
+	}
+
+	w = serveCalDAV(b, "REPORT", inboxMemberPath, "1", calendarMultigetInbox)
+	body := w.Body.String()
+	checkStatusCodes(t, multiStatusCodes(t, w), map[string]int{
+		inboxMemberHref:                 http.StatusOK,
+		inboxMemberPath + "missing.ics": http.StatusNotFound,
+	})
+	if !strings.Contains(body, "SUMMARY:Team Meeting Invite") {
+		t.Errorf("calendar-multiget on the Inbox didn't return the invitation:\n%s", body)
+	}
+}
+
+// RFC 6638 section 2: clients can't delete the Inbox, only the scheduling
+// messages in it.
+func TestInboxDelete(t *testing.T) {
+	b := newSchedulingFullBackend(&Inbox{Path: inboxMemberPath})
+	for _, target := range []string{inboxMemberPath, "/user/calendars/inbox"} {
+		w := serveCalDAV(b, http.MethodDelete, target, "", "")
+		if w.Code != http.StatusForbidden {
+			t.Errorf("DELETE %v: got status %v, want 403", target, w.Code)
+		}
+	}
+	if len(b.deleted) > 0 {
+		t.Errorf("DELETE the Inbox called DeleteCalendarObject for %v", b.deleted)
+	}
+
+	w := serveCalDAV(b, http.MethodDelete, inboxMemberHref, "", "")
+	if w.Code != http.StatusNoContent {
+		t.Errorf("DELETE %v: got status %v, want 204", inboxMemberHref, w.Code)
+	}
+	if strings.Join(b.deleted, ", ") != inboxMemberHref {
+		t.Errorf("DELETE %v deleted %v", inboxMemberHref, b.deleted)
 	}
 }
