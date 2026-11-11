@@ -40,21 +40,31 @@ func isContentXML(h http.Header) bool {
 	return t == "application/xml" || t == "text/xml"
 }
 
+// decodeXMLBody decodes the XML request body into v. A malformed body is an
+// HTTP 400 error, but errors returned while reading the body keep their
+// status, e.g. HTTP 413 for a decompression bomb, and a body larger than
+// allowed by http.MaxBytesReader is an HTTP 413 error.
+func decodeXMLBody(r *http.Request, v interface{}) error {
+	err := xml.NewDecoder(r.Body).Decode(v)
+	if err == nil {
+		return nil
+	}
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		return err
+	}
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return &HTTPError{http.StatusRequestEntityTooLarge, err}
+	}
+	return &HTTPError{http.StatusBadRequest, err}
+}
+
 func DecodeXMLRequest(r *http.Request, v interface{}) error {
 	if !isContentXML(r.Header) {
 		return HTTPErrorf(http.StatusBadRequest, "webdav: expected application/xml request")
 	}
-
-	if err := xml.NewDecoder(r.Body).Decode(v); err != nil {
-		// Keep the status of errors returned while reading the body, e.g.
-		// HTTP 413 for a decompression bomb
-		var httpErr *HTTPError
-		if errors.As(err, &httpErr) {
-			return err
-		}
-		return &HTTPError{http.StatusBadRequest, err}
-	}
-	return nil
+	return decodeXMLBody(r, v)
 }
 
 // IsRequestBodyEmpty reports whether the body of r is empty, or missing.
@@ -919,8 +929,8 @@ func (h *Handler) handleLock(w http.ResponseWriter, r *http.Request, b LockBacke
 			return HTTPErrorf(http.StatusBadRequest, "webdav: expected application/xml request")
 		}
 		var info LockInfo
-		if err := xml.NewDecoder(r.Body).Decode(&info); err != nil {
-			return &HTTPError{http.StatusBadRequest, err}
+		if err := decodeXMLBody(r, &info); err != nil {
+			return err
 		}
 		if (info.LockScope.Exclusive == nil) == (info.LockScope.Shared == nil) {
 			return HTTPErrorf(http.StatusBadRequest, "webdav: the lock scope must be either exclusive or shared")
