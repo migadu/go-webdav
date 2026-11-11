@@ -40,8 +40,11 @@ func Match(query CompFilter, co *CalendarObject) (matched bool, err error) {
 }
 
 func match(filter CompFilter, comp *ical.Component) (bool, error) {
-	if comp.Name != filter.Name {
+	if !strings.EqualFold(comp.Name, filter.Name) {
 		return filter.IsNotDefined, nil
+	}
+	if filter.IsNotDefined {
+		return false, nil
 	}
 
 	if !filter.Start.IsZero() || !filter.End.IsZero() {
@@ -75,29 +78,52 @@ func match(filter CompFilter, comp *ical.Component) (bool, error) {
 }
 
 func matchCompFilter(filter CompFilter, comp *ical.Component) (bool, error) {
-	var matches []*ical.Component
+	if filter.IsNotDefined {
+		for _, child := range comp.Children {
+			if strings.EqualFold(child.Name, filter.Name) {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
 
 	for _, child := range comp.Children {
-		match, err := match(filter, child)
+		if !strings.EqualFold(child.Name, filter.Name) {
+			continue
+		}
+		ok, err := match(filter, child)
 		if err != nil {
 			return false, err
-		} else if match {
-			matches = append(matches, child)
+		}
+		if ok {
+			return true, nil
 		}
 	}
-	if len(matches) == 0 {
-		return filter.IsNotDefined, nil
-	}
-	return true, nil
+	return false, nil
 }
 
 func matchPropFilter(filter PropFilter, comp *ical.Component) (bool, error) {
-	// TODO: this only matches first field, there can be multiple
-	field := comp.Props.Get(filter.Name)
-	if field == nil {
+	fields := comp.Props.Values(filter.Name)
+	if len(fields) == 0 {
 		return filter.IsNotDefined, nil
 	}
+	if filter.IsNotDefined {
+		return false, nil
+	}
 
+	for i := range fields {
+		ok, err := matchProp(filter, &fields[i])
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func matchProp(filter PropFilter, field *ical.Prop) (bool, error) {
 	for _, paramFilter := range filter.ParamFilter {
 		if !matchParamFilter(paramFilter, field) {
 			return false, nil
@@ -105,18 +131,10 @@ func matchPropFilter(filter PropFilter, comp *ical.Component) (bool, error) {
 	}
 
 	if !filter.Start.IsZero() || !filter.End.IsZero() {
-		match, err := matchPropTimeRange(filter.Start, filter.End, field)
-		if err != nil {
-			return false, err
-		}
-		if !match {
-			return false, nil
-		}
-	} else if filter.TextMatch != nil {
-		if !matchTextMatch(*filter.TextMatch, field.Value) {
-			return false, nil
-		}
-		return true, nil
+		return matchPropTimeRange(filter.Start, filter.End, field)
+	}
+	if filter.TextMatch != nil {
+		return matchTextMatch(*filter.TextMatch, field.Value), nil
 	}
 	// empty prop-filter, property exists
 	return true, nil
@@ -294,15 +312,27 @@ func matchPropTimeRange(start, end time.Time, field *ical.Prop) (bool, error) {
 }
 
 func matchParamFilter(filter ParamFilter, field *ical.Prop) bool {
-	// TODO there can be multiple values
-	value := field.Params.Get(filter.Name)
-	if value == "" {
+	values := field.Params.Values(filter.Name)
+	if len(values) == 0 {
 		return filter.IsNotDefined
-	} else if filter.IsNotDefined {
+	}
+	if filter.IsNotDefined {
 		return false
 	}
 	if filter.TextMatch != nil {
-		return matchTextMatch(*filter.TextMatch, value)
+		tm := *filter.TextMatch
+		tm.NegateCondition = false
+		matched := false
+		for _, v := range values {
+			if matchTextMatch(tm, v) {
+				matched = true
+				break
+			}
+		}
+		if filter.TextMatch.NegateCondition {
+			matched = !matched
+		}
+		return matched
 	}
 	return true
 }
