@@ -3,12 +3,14 @@ package internal
 import (
 	"bytes"
 	"compress/gzip"
+	"compress/zlib"
 	"errors"
 	"io"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -130,21 +132,106 @@ func TestDecodeRequestBody_unsupported(t *testing.T) {
 
 func TestDecodeRequestBody_corrupt(t *testing.T) {
 	encoded := gzipData(t, []byte("Hello, world!"))
-	for name, body := range map[string][]byte{
-		"not gzip":  []byte("this is not gzip data"),
-		"truncated": encoded[:len(encoded)-4],
+	badChecksum := append([]byte(nil), encoded...)
+	badChecksum[len(badChecksum)-8] ^= 0xff // CRC-32 of the gzip trailer
+	var zbuf bytes.Buffer
+	zw := zlib.NewWriter(&zbuf)
+	zw.Write([]byte("Hello, world!"))
+	zw.Close()
+	zlibData := zbuf.Bytes()
+
+	for _, tc := range []struct {
+		name, coding string
+		body         []byte
+	}{
+		{"not gzip", "gzip", []byte("this is not gzip data")},
+		{"truncated gzip", "gzip", encoded[:len(encoded)-4]},
+		{"gzip checksum", "gzip", badChecksum},
+		{"not zlib", "deflate", []byte("this is not zlib data")},
+		{"truncated zlib", "deflate", zlibData[:len(zlibData)-6]},
 	} {
-		t.Run(name, func(t *testing.T) {
-			r := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(body))
-			r.Header.Set("Content-Encoding", "gzip")
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(tc.body))
+			r.Header.Set("Content-Encoding", tc.coding)
 			r2, err := DecodeRequestBody(httptest.NewRecorder(), r)
 			if err != nil {
 				t.Fatalf("DecodeRequestBody() = %v", err)
 			}
-			if _, err := io.ReadAll(r2.Body); err == nil {
-				t.Errorf("reading a corrupt body succeeded")
+			_, err = io.ReadAll(r2.Body)
+			// Malformed data from the client is a bad request, not a server
+			// error
+			var httpErr *HTTPError
+			if !errors.As(err, &httpErr) || httpErr.Code != http.StatusBadRequest {
+				t.Errorf("reading a corrupt body = %v, want an HTTP 400 error", err)
 			}
 		})
+	}
+}
+
+// Errors from the encoded body itself, such as the one of a
+// http.MaxBytesReader, are returned as is rather than as a malformed body.
+func TestDecodeRequestBody_sourceErrors(t *testing.T) {
+	encoded := gzipData(t, bytes.Repeat([]byte("Hello, world! "), 1000))
+
+	r := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(encoded))
+	r.Body = http.MaxBytesReader(httptest.NewRecorder(), r.Body, int64(len(encoded)/2))
+	r.Header.Set("Content-Encoding", "gzip")
+	r2, err := DecodeRequestBody(httptest.NewRecorder(), r)
+	if err != nil {
+		t.Fatalf("DecodeRequestBody() = %v", err)
+	}
+	_, err = io.ReadAll(r2.Body)
+	var maxBytesErr *http.MaxBytesError
+	if !errors.As(err, &maxBytesErr) {
+		t.Errorf("reading past the limit = %v, want a *http.MaxBytesError", err)
+	}
+
+	srcErr := HTTPErrorf(http.StatusRequestTimeout, "timeout")
+	r = httptest.NewRequest(http.MethodPut, "/", io.MultiReader(bytes.NewReader(encoded[:20]), errReader{srcErr}))
+	r.Header.Set("Content-Encoding", "gzip")
+	r2, err = DecodeRequestBody(httptest.NewRecorder(), r)
+	if err != nil {
+		t.Fatalf("DecodeRequestBody() = %v", err)
+	}
+	if _, err = io.ReadAll(r2.Body); err != error(srcErr) {
+		t.Errorf("reading a failing body = %v, want %v", err, srcErr)
+	}
+}
+
+type errReader struct{ err error }
+
+func (r errReader) Read([]byte) (int, error) { return 0, r.err }
+
+// Each content coding adds a decoder to the chain: refuse more than a few,
+// rather than letting a header listing thousands of them build as many
+// decoders and overflow the stack on the first read.
+func TestDecodeRequestBody_tooManyCodings(t *testing.T) {
+	content := []byte("Hello, world!")
+	encoded := content
+	for i := 0; i < maxContentCodings; i++ {
+		encoded = gzipData(t, encoded)
+	}
+	codings := strings.TrimSuffix(strings.Repeat("gzip, identity, ", maxContentCodings), ", ")
+
+	r := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(encoded))
+	r.Header.Set("Content-Encoding", codings)
+	r2, err := DecodeRequestBody(httptest.NewRecorder(), r)
+	if err != nil {
+		t.Fatalf("DecodeRequestBody() with %d codings = %v", maxContentCodings, err)
+	}
+	if b, err := io.ReadAll(r2.Body); err != nil || !bytes.Equal(b, content) {
+		t.Errorf("reading the body = %q, %v, want %q", b, err, content)
+	}
+
+	for _, n := range []int{maxContentCodings + 1, 100000} {
+		r := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(gzipData(t, encoded)))
+		r.Header.Set("Content-Encoding", strings.TrimSuffix(strings.Repeat("gzip,", n), ","))
+		w := httptest.NewRecorder()
+		_, err := DecodeRequestBody(w, r)
+		var httpErr *HTTPError
+		if !errors.As(err, &httpErr) || httpErr.Code != http.StatusUnsupportedMediaType {
+			t.Errorf("DecodeRequestBody() with %d codings = %v, want an HTTP 415 error", n, err)
+		}
 	}
 }
 

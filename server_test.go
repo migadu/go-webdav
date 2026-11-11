@@ -215,3 +215,21 @@ func TestServePrincipalCompressedBody(t *testing.T) {
 		t.Errorf("PROPFIND response lacks current-user-principal:\n%s", w.Body)
 	}
 }
+
+// A corrupt compressed body is the client's fault: 400, not 500.
+func TestHandlerPutCorruptCompressedBody(t *testing.T) {
+	h := webdav.Handler{FileSystem: webdav.LocalFileSystem(t.TempDir())}
+	encoded := encodeBody(t, []byte("hello"), "gzip")
+	for name, body := range map[string][]byte{
+		"not gzip":  []byte("this is not gzip data"),
+		"truncated": encoded[:len(encoded)-4],
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/file.txt", bytes.NewReader(body))
+		req.Header.Set("Content-Encoding", "gzip")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: PUT status = %v, want 400", name, w.Code)
+		}
+	}
+}

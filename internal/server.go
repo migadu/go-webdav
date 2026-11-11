@@ -63,6 +63,11 @@ func IsRequestBodyEmpty(r *http.Request) bool {
 const acceptedContentCodings = "gzip, deflate"
 
 const (
+	// maxContentCodings is the maximum number of content codings, besides
+	// "identity", applied to a request body. Each one adds a decoder to the
+	// chain reading the body, so a header listing thousands of them would
+	// exhaust memory and the stack.
+	maxContentCodings = 4
 	// minDecodedBodyLimit is the decoded request body size which is always
 	// allowed, regardless of its compression ratio.
 	minDecodedBodyLimit = 1 << 20 // 1 MiB
@@ -82,7 +87,12 @@ const (
 //
 // If a content coding isn't supported, an HTTP 415 error is returned and an
 // Accept-Encoding header listing the supported content codings is added to w
-// (RFC 7694 section 3).
+// (RFC 7694 section 3). More than 4 content codings besides "identity" are
+// refused with an HTTP 415 error as well.
+//
+// Reading the decoded body fails with an HTTP 400 error if the encoded data is
+// malformed, truncated or fails its checksum. Errors reading the encoded body
+// itself, e.g. from http.MaxBytesReader, are returned as is.
 //
 // To defuse decompression bombs, reading the decoded body fails with an HTTP
 // 413 error once it is larger than both 1 MiB and 100 times the number of
@@ -103,6 +113,9 @@ func DecodeRequestBody(w http.ResponseWriter, r *http.Request) (*http.Request, e
 			case "", "identity":
 				// Nothing to decode
 			case "gzip", "x-gzip", "deflate":
+				if len(codings) == maxContentCodings {
+					return r, HTTPErrorf(http.StatusUnsupportedMediaType, "webdav: more than %d content codings in Content-Encoding", maxContentCodings)
+				}
 				codings = append(codings, coding)
 			default:
 				w.Header().Set("Accept-Encoding", acceptedContentCodings)
@@ -174,15 +187,20 @@ func newContentDecoder(coding string, r io.Reader) (io.Reader, error) {
 	}
 }
 
-// countingBody counts the bytes read from a request body.
+// countingBody counts the bytes read from a request body, and records the
+// error reading it failed with, if any.
 type countingBody struct {
 	io.ReadCloser
-	n int64
+	n   int64
+	err error
 }
 
 func (c *countingBody) Read(p []byte) (int, error) {
 	n, err := c.ReadCloser.Read(p)
 	c.n += int64(n)
+	if err != nil && err != io.EOF {
+		c.err = err
+	}
 	return n, err
 }
 
@@ -190,7 +208,8 @@ func (c *countingBody) Read(p []byte) (int, error) {
 //
 // It fails with an HTTP 413 error once more than minDecodedBodyLimit bytes and
 // more than maxDecodedBodyRatio times the number of bytes read from the
-// original body have been decoded.
+// original body have been decoded, and with an HTTP 400 error if the encoded
+// data is malformed. Errors reading the original body are returned as is.
 type decodedBody struct {
 	r   io.Reader     // decoded body
 	src *countingBody // original body
@@ -205,6 +224,18 @@ func (b *decodedBody) Read(p []byte) (int, error) {
 
 	n, err := b.r.Read(p)
 	b.n += int64(n)
+	if err != nil && err != io.EOF {
+		if b.src.err != nil {
+			// Reading the encoded body failed, e.g. because it's larger than
+			// allowed: return that error as is
+			err = b.src.err
+		} else {
+			// The encoded body is malformed, truncated or fails its checksum
+			err = &HTTPError{Code: http.StatusBadRequest, Err: fmt.Errorf("webdav: malformed encoded request body: %w", err)}
+		}
+		b.err = err
+		return n, err
+	}
 	limit := maxDecodedBodyRatio * b.src.n
 	if limit < minDecodedBodyLimit {
 		limit = minDecodedBodyLimit
