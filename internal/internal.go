@@ -144,11 +144,18 @@ func FormatLockToken(token string) string {
 	return fmt.Sprintf("<%v>", token)
 }
 
+// IfHeader returns the If header field of h. RFC 4918 section 10.4.2 doesn't
+// allow several If header lines, but they're read as a single field holding
+// the lists of all of them. A blank field has no lists: it's returned empty.
+func IfHeader(h http.Header) string {
+	return strings.TrimSpace(strings.Join(h.Values("If"), " "))
+}
+
 // ParseSubmittedToken parses the If header field of a lock refresh request,
 // which must name a single lock token (RFC 4918 section 9.10.2). It returns
 // an empty string if there is no If header field.
 func ParseSubmittedToken(h http.Header) (string, error) {
-	hif := h.Get("If")
+	hif := IfHeader(h)
 	if hif == "" {
 		return "", nil
 	}
@@ -321,6 +328,9 @@ func (p *conditionParser) parse() ([][]Condition, error) {
 			if err != nil {
 				return nil, err
 			}
+			if err := checkSimpleRef(resource); err != nil {
+				return nil, err
+			}
 			tagged = true
 			p.lws()
 		} else if tagged && !strings.HasPrefix(p.s, "(") {
@@ -349,6 +359,21 @@ func (p *conditionParser) parse() ([][]Condition, error) {
 		return nil, fmt.Errorf("webdav: invalid If value: empty list")
 	}
 	return conditions, nil
+}
+
+// checkSimpleRef checks that a Resource-Tag holds a Simple-ref (RFC 4918
+// sections 8.3 and 10.4.2): an absolute URI, or an absolute path with an
+// optional query. Unlike other references, it can't be relative to the
+// Request-URI.
+func checkSimpleRef(s string) error {
+	u, err := url.Parse(s)
+	if err != nil {
+		return fmt.Errorf("webdav: invalid If value: malformed Resource-Tag: %v", err)
+	}
+	if strings.Contains(s, "#") || (u.Scheme == "" && (u.Host != "" || !strings.HasPrefix(u.Path, "/"))) {
+		return fmt.Errorf("webdav: invalid If value: Resource-Tag %q is neither an absolute URI nor an absolute path", s)
+	}
+	return nil
 }
 
 // ParseConditions parses an If header field (RFC 4918 section 10.4). It

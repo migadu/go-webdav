@@ -55,7 +55,7 @@ func collectionHref(p string) string {
 // (section 10.4.1).
 func (b *backend) evaluateIf(r *http.Request) error {
 	// An empty If header field has no lists
-	hif := strings.TrimSpace(strings.Join(r.Header.Values("If"), " "))
+	hif := internal.IfHeader(r.Header)
 	if hif == "" {
 		return nil
 	}
@@ -73,9 +73,13 @@ func (b *backend) evaluateIf(r *http.Request) error {
 		}
 	}
 
-	if r.Method == "LOCK" && internal.IsRequestBodyEmpty(r) {
-		// The If header field of a lock refresh names the lock to refresh,
-		// which Lock checks
+	// Lists are either all tagged or all untagged
+	tagged := lists[0][0].Resource != ""
+	if r.Method == "LOCK" && !tagged && internal.IsRequestBodyEmpty(r) {
+		// The untagged If header field of a lock refresh names the lock to
+		// refresh, which Lock checks. A tagged one is evaluated as usual:
+		// the tagged resource must be in the scope of the lock as well
+		// (section 10.4.4), and Lock then checks the Request-URI is.
 		return nil
 	}
 
@@ -110,17 +114,42 @@ func (ev *ifEvaluator) list(l []internal.Condition) (bool, error) {
 	return true, nil
 }
 
+// resourceTagPath returns the path of the resource a Resource-Tag identifies.
+// internal.ParseConditions checked that it's an absolute URI or an absolute
+// path (RFC 4918 section 8.3). As for the Destination header field, the host
+// of an HTTP URL is ignored. ok is false for any other absolute URI, such as
+// a URN: it identifies no resource served here.
+func resourceTagPath(tag string) (p string, ok bool) {
+	u, err := url.Parse(tag)
+	if err != nil {
+		return "", false
+	}
+	switch u.Scheme {
+	case "":
+		return u.Path, true
+	case "http", "https":
+		if u.Opaque != "" {
+			return "", false
+		} else if u.Path == "" {
+			// RFC 9110 section 4.2.3
+			return "/", true
+		}
+		return u.Path, true
+	default:
+		return "", false
+	}
+}
+
 // condition reports whether a condition, ignoring Not, is met.
 func (ev *ifEvaluator) condition(cond *internal.Condition) (bool, error) {
 	p := ev.r.URL.Path
 	if cond.Resource != "" {
-		u, err := url.Parse(cond.Resource)
-		if err != nil {
-			return false, &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
-		}
-		p = u.Path
-		if p == "" {
-			p = "/"
+		var ok bool
+		p, ok = resourceTagPath(cond.Resource)
+		if !ok {
+			// Not a resource served here: as for an unmapped URL, it
+			// doesn't have the state (RFC 4918 section 10.4.4)
+			return false, nil
 		}
 	}
 	p = path.Clean(p)
@@ -197,9 +226,10 @@ func parentTarget(p string) lockTarget {
 //
 // A resource locked by several shared locks can be modified with the token
 // of any of them, so their roots are only returned if none was submitted.
+// Each root is returned once, even if several locks share it.
 func (b *backend) missingLocks(r *http.Request, targets ...lockTarget) ([]string, error) {
 	var missing []string
-	seen := make(map[string]bool)
+	seen := make(map[string]bool) // roots
 	for _, t := range targets {
 		locks, err := b.locks.Locks(r.Context(), t.path, t.members)
 		if err != nil {
@@ -230,10 +260,10 @@ func (b *backend) missingLocks(r *http.Request, targets ...lockTarget) ([]string
 				continue
 			}
 			for _, lock := range needed {
-				if seen[lock.Token] {
+				if seen[lock.Root] {
 					continue
 				}
-				seen[lock.Token] = true
+				seen[lock.Root] = true
 				href := lock.Root
 				if t.parent || isPathBelow(t.path, lock.Root) || (t.collection && lock.Root == t.path) {
 					href = collectionHref(lock.Root)
@@ -444,17 +474,20 @@ func (pl *propFindLocks) discovery(fi *FileInfo) (*internal.LockDiscovery, error
 // with existing locks (RFC 4918 section 9.10.6). If some of these locks are
 // rooted at members of the Request-URI, it lists them, failing the
 // Request-URI with 424 Failed Dependency, to be served in a multi-status
-// response (section 9.10.9).
+// response (section 9.10.9). Each root is listed once, even if several shared
+// locks share it: an href can't appear in two responses (section 14.24).
 func (b *backend) lockConflictError(r *http.Request, lock *Lock) error {
 	locks, err := b.locks.Locks(r.Context(), lock.Root, lock.Recursive)
 	if err != nil {
 		return err
 	}
 	var hrefs, members []string
+	seen := make(map[string]bool) // roots
 	for i := range locks {
-		if !lock.conflicts(&locks[i]) {
+		if !lock.conflicts(&locks[i]) || seen[locks[i].Root] {
 			continue
 		}
+		seen[locks[i].Root] = true
 		switch root := locks[i].Root; {
 		case isPathBelow(lock.Root, root):
 			hrefs = append(hrefs, collectionHref(root))
