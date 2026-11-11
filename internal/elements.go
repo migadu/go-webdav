@@ -626,13 +626,14 @@ type Limit struct {
 
 // https://tools.ietf.org/html/rfc3744#section-5.4
 type CurrentUserPrivilegeSet struct {
-	XMLName   xml.Name `xml:"DAV: current-user-privilege-set"`
-	Privilege []Privilege
+	XMLName   xml.Name    `xml:"DAV: current-user-privilege-set"`
+	Privilege []Privilege `xml:"DAV: privilege"`
 }
 
 // https://tools.ietf.org/html/rfc3744#section-5.4
 type Privilege struct {
 	XMLName      xml.Name  `xml:"DAV: privilege"`
+	All          *struct{} `xml:"DAV: all,omitempty"`
 	Read         *struct{} `xml:"DAV: read,omitempty"`
 	Write        *struct{} `xml:"DAV: write,omitempty"`
 	WriteContent *struct{} `xml:"DAV: write-content,omitempty"`
@@ -644,6 +645,16 @@ type Privilege struct {
 	ScheduleDeliverInvite *struct{} `xml:"urn:ietf:params:xml:ns:caldav schedule-deliver-invite,omitempty"`
 	ScheduleDeliverReply  *struct{} `xml:"urn:ietf:params:xml:ns:caldav schedule-deliver-reply,omitempty"`
 	ScheduleQueryFreeBusy *struct{} `xml:"urn:ietf:params:xml:ns:caldav schedule-query-freebusy,omitempty"`
+}
+
+// HasWrite reports whether the privilege set grants write access.
+func (s *CurrentUserPrivilegeSet) HasWrite() bool {
+	for _, priv := range s.Privilege {
+		if priv.Write != nil || priv.WriteContent != nil || priv.All != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // NewCurrentUserPrivilegeSet returns a privilege set granting DAV:read, plus

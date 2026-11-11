@@ -3,6 +3,7 @@ package carddav
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -89,14 +90,42 @@ func decodeSupportedAddressData(supported *supportedAddressData) []AddressDataTy
 	return l
 }
 
+var addressBookProps = []xml.Name{
+	internal.ResourceTypeName,
+	internal.DisplayNameName,
+	addressBookDescriptionName,
+	maxResourceSizeName,
+	supportedAddressDataName,
+	internal.SyncTokenName,
+	internal.GetCTagName,
+	internal.CurrentUserPrivilegeSetName,
+}
+
+// FindAddressBook fetches address book metadata without listing its members.
+func (c *Client) FindAddressBook(ctx context.Context, path string) (*AddressBook, error) {
+	propfind := internal.NewPropNamePropFind(addressBookProps...)
+	resp, err := c.ic.PropFindFlat(ctx, path, propfind)
+	if err != nil {
+		return nil, err
+	}
+	p, err := resp.Path()
+	if err != nil {
+		return nil, err
+	}
+
+	var resType internal.ResourceType
+	if err := resp.DecodeProp(&resType); err != nil {
+		return nil, err
+	}
+	if !resType.Is(addressBookName) {
+		return nil, fmt.Errorf("carddav: resource at %q is not an address book", p)
+	}
+
+	return decodeAddressBook(p, resp)
+}
+
 func (c *Client) FindAddressBooks(ctx context.Context, addressBookHomeSet string) ([]AddressBook, error) {
-	propfind := internal.NewPropNamePropFind(
-		internal.ResourceTypeName,
-		internal.DisplayNameName,
-		addressBookDescriptionName,
-		maxResourceSizeName,
-		supportedAddressDataName,
-	)
+	propfind := internal.NewPropNamePropFind(addressBookProps...)
 	ms, err := c.ic.PropFind(ctx, addressBookHomeSet, internal.DepthOne, propfind)
 	if err != nil {
 		return nil, err
@@ -119,39 +148,68 @@ func (c *Client) FindAddressBooks(ctx context.Context, addressBookHomeSet string
 			continue
 		}
 
-		var desc addressbookDescription
-		if err := resp.DecodeProp(&desc); err != nil && !internal.IsNotFound(err) {
+		ab, err := decodeAddressBook(path, &resp)
+		if err != nil {
 			return nil, err
 		}
-
-		var dispName internal.DisplayName
-		if err := resp.DecodeProp(&dispName); err != nil && !internal.IsNotFound(err) {
-			return nil, err
-		}
-
-		var maxResSize maxResourceSize
-		if err := resp.DecodeProp(&maxResSize); err != nil && !internal.IsNotFound(err) {
-			return nil, err
-		}
-		if maxResSize.Size < 0 {
-			return nil, fmt.Errorf("carddav: max-resource-size must be a positive integer")
-		}
-
-		var supported supportedAddressData
-		if err := resp.DecodeProp(&supported); err != nil && !internal.IsNotFound(err) {
-			return nil, err
-		}
-
-		l = append(l, AddressBook{
-			Path:                 path,
-			Name:                 dispName.Name,
-			Description:          desc.Description,
-			MaxResourceSize:      maxResSize.Size,
-			SupportedAddressData: decodeSupportedAddressData(&supported),
-		})
+		l = append(l, *ab)
 	}
 
 	return l, errors.Join(errs...)
+}
+
+func decodeAddressBook(path string, resp *internal.Response) (*AddressBook, error) {
+	var desc addressbookDescription
+	if err := resp.DecodeProp(&desc); err != nil && !internal.IsNotFound(err) {
+		return nil, err
+	}
+
+	var dispName internal.DisplayName
+	if err := resp.DecodeProp(&dispName); err != nil && !internal.IsNotFound(err) {
+		return nil, err
+	}
+
+	var maxResSize maxResourceSize
+	if err := resp.DecodeProp(&maxResSize); err != nil && !internal.IsNotFound(err) {
+		return nil, err
+	}
+	if maxResSize.Size < 0 {
+		return nil, fmt.Errorf("carddav: max-resource-size must be a positive integer")
+	}
+
+	var supported supportedAddressData
+	if err := resp.DecodeProp(&supported); err != nil && !internal.IsNotFound(err) {
+		return nil, err
+	}
+
+	var syncToken internal.SyncToken
+	if err := resp.DecodeProp(&syncToken); err != nil && !internal.IsNotFound(err) {
+		return nil, err
+	}
+
+	var ctag internal.GetCTag
+	if err := resp.DecodeProp(&ctag); err != nil && !internal.IsNotFound(err) {
+		return nil, err
+	}
+
+	var readOnly bool
+	var privSet internal.CurrentUserPrivilegeSet
+	if err := resp.DecodeProp(&privSet); err == nil {
+		readOnly = !privSet.HasWrite()
+	} else if !internal.IsNotFound(err) {
+		return nil, err
+	}
+
+	return &AddressBook{
+		Path:                 path,
+		Name:                 dispName.Name,
+		Description:          desc.Description,
+		MaxResourceSize:      maxResSize.Size,
+		SyncToken:            syncToken.Token,
+		SupportedAddressData: decodeSupportedAddressData(&supported),
+		ReadOnly:             readOnly,
+		CTag:                 ctag.CTag,
+	}, nil
 }
 
 func encodeAddressPropReq(req *AddressDataRequest) (*internal.Prop, error) {
