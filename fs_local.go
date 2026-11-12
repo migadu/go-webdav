@@ -493,6 +493,29 @@ func errOverwriteSourceParent() error {
 	return NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: cannot overwrite a collection containing the source"))
 }
 
+// containsSource reports whether removing dstPath, an existing destination,
+// would remove srcPath with it: whether dstPath is an ancestor of srcPath, or
+// the same directory as one under another name, through a symbolic link to
+// it or an alias on a case-insensitive file system. A destination which is a
+// symbolic link to such a directory is a link of its own (see
+// isSeparateLink), removed without the source.
+func containsSource(root *os.Root, srcPath, dstPath string) bool {
+	if isSubPath(dstPath, srcPath) {
+		return true
+	}
+	dstInfo, err := root.Stat(dstPath)
+	if err != nil || !dstInfo.IsDir() {
+		return false
+	}
+	for dir := path.Dir(srcPath); dir != "."; dir = path.Dir(dir) {
+		fi, err := root.Stat(dir)
+		if err == nil && os.SameFile(fi, dstInfo) && !isSeparateLink(root, dir, dstPath) {
+			return true
+		}
+	}
+	return false
+}
+
 // isSameFile reports whether srcPath and dstPath resolve to the same file,
 // following symbolic links, or name the same symbolic link, which may not
 // resolve.
@@ -672,7 +695,7 @@ func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *Co
 		if options.NoOverwrite {
 			return false, NewHTTPError(http.StatusPreconditionFailed, os.ErrExist)
 		}
-		if isSubPath(dstPath, srcPath) {
+		if containsSource(root, srcPath, dstPath) {
 			return false, errOverwriteSourceParent()
 		}
 		if err := removeAll(root, dstPath); err != nil {
@@ -817,7 +840,7 @@ func (fs LocalFileSystem) Move(ctx context.Context, src, dst string, options *Mo
 		if options.NoOverwrite {
 			return false, NewHTTPError(http.StatusPreconditionFailed, os.ErrExist)
 		}
-		if isSubPath(dstPath, srcPath) {
+		if containsSource(root, srcPath, dstPath) {
 			return false, errOverwriteSourceParent()
 		}
 		if !inPlace {
