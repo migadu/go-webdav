@@ -75,10 +75,10 @@ type Client struct {
 // whose href has a query, which a path can't carry. The methods taking a path
 // also take such a URL, and send the requests for it to its host: join it with
 // url.JoinPath rather than path.Join, which would mangle its "//". Credentials
-// in the endpoint URL are only sent to the endpoint's scheme and host, and
-// those of HTTPClientWithBasicAuth to its origin: to send them to another
-// host, create a Client with an endpoint on it. Another HTTPClient adding
-// credentials to its requests adds them for any host.
+// in the endpoint URL, and those of HTTPClientWithBasicAuth, are only sent to
+// the endpoint's origin: to send them to another host, create a Client with an
+// endpoint on it. Another HTTPClient adding credentials to its requests adds
+// them for any host.
 //
 // http.Client follows a 301 Moved Permanently or 302 Found redirect with a GET
 // request, which RFC 9110 only allows for a POST request. A request of the

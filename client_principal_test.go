@@ -31,6 +31,9 @@ func TestClientFindCurrentUserPrincipalHref(t *testing.T) {
 	}{
 		{"href", `<D:current-user-principal><D:href>/principals/me/</D:href></D:current-user-principal>`, "/principals/me/", ""},
 		{"empty href", `<D:current-user-principal><D:href></D:href></D:current-user-principal>`, endpoint, ""},
+		// An empty path with a host is "/" (RFC 3986 section 6.2.3)
+		{"origin URL", `<D:current-user-principal><D:href>http://{host}</D:href></D:current-user-principal>`, "/", ""},
+		{"network-path reference without a path", `<D:current-user-principal><D:href>//{host}</D:href></D:current-user-principal>`, "/", ""},
 		{"no href", `<D:current-user-principal/>`, "", malformed},
 		{"no href, other element", `<D:current-user-principal><D:foo/></D:current-user-principal>`, "", malformed},
 		{"unauthenticated", `<D:current-user-principal><D:unauthenticated/></D:current-user-principal>`, "", unauthenticated},
@@ -48,7 +51,7 @@ func TestClientFindCurrentUserPrincipalHref(t *testing.T) {
 <D:multistatus xmlns:D="DAV:">
   <D:response>
     <D:href>`+endpoint+`</D:href>
-    <D:propstat><D:prop>`+tc.prop+`</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+    <D:propstat><D:prop>`+strings.ReplaceAll(tc.prop, "{host}", r.Host)+`</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
   </D:response>
 </D:multistatus>`)
 			}))
