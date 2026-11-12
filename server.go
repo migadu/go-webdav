@@ -518,7 +518,11 @@ func (b *backend) Delete(r *http.Request) error {
 }
 
 func (b *backend) Mkcol(r *http.Request) error {
-	if r.Header.Get("Content-Type") != "" {
+	// FileSystem.Mkdir creates an empty collection: any request body is one
+	// the server doesn't understand (RFC 4918 section 9.3). Whether there's
+	// one doesn't depend on the Content-Type header, which a client may send
+	// without a body, or omit along with one.
+	if !internal.IsRequestBodyEmpty(r) {
 		return internal.HTTPErrorf(http.StatusUnsupportedMediaType, "webdav: request body not supported in MKCOL request")
 	}
 	if b.locks != nil {

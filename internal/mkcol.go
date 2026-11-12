@@ -7,7 +7,12 @@ import (
 	"slices"
 )
 
-// Mkcol is the body of an extended MKCOL request (RFC 5689 section 5.1).
+// mkcolName is the name of the root element of an extended MKCOL request.
+var mkcolName = xml.Name{Namespace, "mkcol"}
+
+// Mkcol is the body of an extended MKCOL request (RFC 5689 section 5.1). It
+// also holds the DAV:set element of other requests creating a collection, see
+// DecodeCreateCollectionRequest.
 type Mkcol struct {
 	XMLName xml.Name `xml:"DAV: mkcol"`
 	Set     []Set    `xml:"DAV: set"`
@@ -35,16 +40,36 @@ func (resp *MkcolResponse) Error() string {
 // requires for a body the server doesn't support. Errors decoding the body
 // keep their status, as with DecodeXMLRequest.
 func DecodeMkcolRequest(r *http.Request) (*Mkcol, error) {
+	return DecodeCreateCollectionRequest(r, mkcolName)
+}
+
+// DecodeCreateCollectionRequest decodes the body of a request creating a
+// collection and setting its properties all at once, whose root element is
+// root and holds DAV:set elements: DAV:mkcol for an extended MKCOL request
+// (see DecodeMkcolRequest), CALDAV:mkcalendar for a MKCALENDAR request (RFC
+// 4791 section 5.3.1). The body is optional: an empty Mkcol is returned for a
+// request without one. A body which isn't XML is an HTTP 415 error, as both
+// RFCs have it, and one with another root element an HTTP 400 error.
+func DecodeCreateCollectionRequest(r *http.Request, root xml.Name) (*Mkcol, error) {
 	var m Mkcol
 	if IsRequestBodyEmpty(r) {
 		return &m, nil
 	}
 	if !isContentXML(r.Header) {
-		return nil, HTTPErrorf(http.StatusUnsupportedMediaType, "webdav: expected an XML MKCOL request body")
+		return nil, HTTPErrorf(http.StatusUnsupportedMediaType, "webdav: expected an XML %v request body", r.Method)
 	}
-	if err := decodeXMLBody(r, &m); err != nil {
+	var body struct {
+		XMLName xml.Name
+		Set     []Set `xml:"DAV: set"`
+	}
+	if err := decodeXMLBody(r, &body); err != nil {
 		return nil, err
 	}
+	if body.XMLName != root {
+		return nil, HTTPErrorf(http.StatusBadRequest, "webdav: expected <%v %v> element in %v request body, got <%v %v>",
+			root.Space, root.Local, r.Method, body.XMLName.Space, body.XMLName.Local)
+	}
+	m.Set = body.Set
 	return &m, nil
 }
 
@@ -108,14 +133,31 @@ func newValidResourceTypeError() error {
 // wraps one reporting that status for the property, along with the DAV:error
 // element err wraps if any, and 424 Failed Dependency for the others.
 func (m *Mkcol) PropError(name xml.Name, err error) error {
-	code := HTTPErrorFromError(err).Code
+	resp := &MkcolResponse{PropStats: m.propStats(name, err)}
+	return &HTTPError{Code: HTTPErrorFromError(err).Code, Err: resp}
+}
+
+// PropMultiStatus is PropError for a MKCALENDAR request for href, which
+// reports the properties in a 207 Multi-Status response instead (RFC 4791
+// section 5.3.1.1): it returns its body, with the same propstat elements in
+// the response element for href.
+func (m *Mkcol) PropMultiStatus(href string, name xml.Name, err error) *MultiStatus {
+	return NewMultiStatus(Response{
+		Hrefs:     []Href{{Path: href}},
+		PropStats: m.propStats(name, err),
+	})
+}
+
+// propStats returns the status of each property m sets when the property name
+// can't be set, as err says (see PropError).
+func (m *Mkcol) propStats(name xml.Name, err error) []PropStat {
 	var errElt *Error
 	errors.As(err, &errElt)
-	resp := &MkcolResponse{PropStats: []PropStat{{
+	propStats := []PropStat{{
 		Prop:   Prop{Raw: xmlNamesToRaw([]xml.Name{name})},
-		Status: Status{Code: code},
+		Status: Status{Code: HTTPErrorFromError(err).Code},
 		Error:  errElt,
-	}}}
+	}}
 
 	var others []xml.Name
 	for _, raw := range m.props() {
@@ -124,10 +166,10 @@ func (m *Mkcol) PropError(name xml.Name, err error) error {
 		}
 	}
 	if len(others) > 0 {
-		resp.PropStats = append(resp.PropStats, PropStat{
+		propStats = append(propStats, PropStat{
 			Prop:   Prop{Raw: xmlNamesToRaw(others)},
 			Status: Status{Code: http.StatusFailedDependency},
 		})
 	}
-	return &HTTPError{Code: code, Err: resp}
+	return propStats
 }

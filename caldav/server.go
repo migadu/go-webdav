@@ -281,15 +281,19 @@ func (h *Handler) handleMkcalendar(w http.ResponseWriter, r *http.Request) error
 		return newPreconditionError(http.StatusForbidden, PreconditionCalendarCollectionLocationOk)
 	}
 
+	m, err := internal.DecodeCreateCollectionRequest(r, mkcalendarName)
+	if err != nil {
+		return err
+	}
+	var prop mkcolProp
+	if err := m.DecodeProp(&prop); err != nil {
+		return err
+	}
 	cal := Calendar{Path: r.URL.Path}
-	if !internal.IsRequestBodyEmpty(r) {
-		var m mkcalendarReq
-		if err := internal.DecodeXMLRequest(r, &m); err != nil {
-			return err
-		}
-		if err := setCalendarProps(&cal, &m.Set.Prop); err != nil {
-			return err
-		}
+	if err := setCalendarProps(&cal, &prop); err != nil {
+		// Unlike an extended MKCOL request, the property is reported in a
+		// 207 Multi-Status response (RFC 4791 section 5.3.1.1)
+		return internal.ServeMultiStatus(w, m.PropMultiStatus(r.URL.Path, calendarTimezoneName, err))
 	}
 
 	if err := h.Backend.CreateCalendar(r.Context(), &cal); err != nil {

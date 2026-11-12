@@ -94,6 +94,94 @@ func TestMkcalendarEmptyBody(t *testing.T) {
 	}
 }
 
+// mkcalendarBody returns the body of a MKCALENDAR request (RFC 4791 section
+// 5.3.1) setting props.
+func mkcalendarBody(props string) string {
+	return `<?xml version="1.0" encoding="utf-8"?>
+<C:mkcalendar xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:A="http://apple.com/ns/ical/">
+  <D:set><D:prop>` + props + `</D:prop></D:set>
+</C:mkcalendar>`
+}
+
+// The errors of a MKCALENDAR request are those of RFC 4791 section 5.3.1.1.
+func TestMkcalendarErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		contentType string
+		body        string
+		// maxBytes, if set, limits the size of the request body
+		maxBytes int64
+		wantCode int
+		wantBody string
+	}{
+		{
+			// "415 (Unsupported Media Type) - The server does not support
+			// the request type of the body"
+			name:        "body which isn't XML",
+			contentType: "text/plain",
+			body:        "work",
+			wantCode:    http.StatusUnsupportedMediaType,
+		},
+		{
+			name:     "body larger than allowed",
+			body:     mkcalendarBody(`<D:displayname>Work</D:displayname>`),
+			maxBytes: 64,
+			wantCode: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name:     "malformed body",
+			body:     `<C:mkcalendar xmlns:C="urn:ietf:params:xml:ns:caldav"><D:set>`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "body of an extended MKCOL",
+			body:     mkcolBody(mkcolCalendarType),
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			// "207 (Multi-Status) - The calendar collection resource was
+			// not created since one or more DAV:set instructions specified
+			// in the request body could not be processed successfully",
+			// with 424 for the properties which would have been set
+			name: "invalid timezone",
+			body: mkcalendarBody(`<D:displayname>Work</D:displayname>
+<C:calendar-timezone>Europe/Berlin</C:calendar-timezone>
+<A:calendar-order>2</A:calendar-order>`),
+			wantCode: http.StatusMultiStatus,
+			wantBody: "multistatus /user/calendars/work/ 409 {urn:ietf:params:xml:ns:caldav}calendar-timezone error {urn:ietf:params:xml:ns:caldav}valid-calendar-data; 424 {DAV:}displayname,{http://apple.com/ns/ical/}calendar-order",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := &createBackend{}
+			handler := Handler{Backend: backend}
+
+			req := httptest.NewRequest("MKCALENDAR", "/user/calendars/work/", strings.NewReader(tc.body))
+			if tc.contentType != "" {
+				req.Header.Set("Content-Type", tc.contentType)
+			} else {
+				req.Header.Set("Content-Type", "application/xml")
+			}
+			w := httptest.NewRecorder()
+			if tc.maxBytes > 0 {
+				req.Body = http.MaxBytesReader(w, req.Body, tc.maxBytes)
+			}
+			handler.ServeHTTP(w, req)
+
+			if w.Code != tc.wantCode {
+				t.Errorf("MKCALENDAR returned %v, want %v: %s", w.Code, tc.wantCode, w.Body.String())
+			}
+			if tc.wantBody != "" {
+				if body := mkcolErrorBody(t, w); body != tc.wantBody {
+					t.Errorf("MKCALENDAR body is %q, want %q\n%s", body, tc.wantBody, w.Body.String())
+				}
+			}
+			if len(backend.created) > 0 {
+				t.Errorf("MKCALENDAR created %+v", backend.created)
+			}
+		})
+	}
+}
+
 // RFC 4791 section 5.3.1.1: calendar collections can't be created anywhere.
 func TestMkcalendarLocation(t *testing.T) {
 	backend := &createBackend{}

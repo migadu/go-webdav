@@ -29,6 +29,7 @@ var (
 
 	calendarQueryName    = xml.Name{namespace, "calendar-query"}
 	calendarMultigetName = xml.Name{namespace, "calendar-multiget"}
+	mkcalendarName       = xml.Name{namespace, "mkcalendar"}
 
 	calendarName      = xml.Name{namespace, "calendar"}
 	scheduleInboxName = xml.Name{namespace, "schedule-inbox"}
@@ -392,22 +393,12 @@ func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	return d.DecodeElement(v, &start)
 }
 
-// https://tools.ietf.org/html/rfc4791#section-9.3
-type mkcalendarReq struct {
-	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav mkcalendar"`
-	Set     mkcolSet `xml:"DAV: set"`
-}
-
-// mkcalendarSetReq is the body of a MKCALENDAR request sent by a Client
-// (RFC 4791 section 9.3). Unlike mkcalendarReq, which the server decodes, it
-// holds only the properties which are set.
+// mkcalendarSetReq is the body of a MKCALENDAR request sent by a Client (RFC
+// 4791 section 9.2). The server decodes it with
+// internal.DecodeCreateCollectionRequest.
 type mkcalendarSetReq struct {
 	XMLName xml.Name     `xml:"urn:ietf:params:xml:ns:caldav mkcalendar"`
 	Set     internal.Set `xml:"DAV: set"`
-}
-
-type mkcolSet struct {
-	Prop mkcolProp `xml:"DAV: prop"`
 }
 
 // mkcolProp holds the properties of an extended MKCOL or a MKCALENDAR request

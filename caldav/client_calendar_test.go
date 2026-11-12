@@ -315,6 +315,31 @@ func TestClientCreateCalendarErrors(t *testing.T) {
 	if _, ok := backend.calendars["/user/calendars/tz/"]; ok {
 		t.Errorf("calendar with two timezones was created")
 	}
+
+	// The server reports the timezone in a 207 Multi-Status response, and
+	// the other properties with 424 Failed Dependency (RFC 4791 section
+	// 5.3.1.1)
+	err = c.CreateCalendar(ctx, &Calendar{
+		Path:        "/user/calendars/tz/",
+		Name:        "Paris",
+		Description: "Two timezones",
+		Timezone:    decodeICal(t, twoTimezones),
+	})
+	if !errors.As(err, &httpErr) || httpErr.Code != http.StatusConflict {
+		t.Errorf("CreateCalendar() with a name and two timezones = %v, want a 409 HTTPError first", err)
+	}
+	for _, want := range []string{
+		"<urn:ietf:params:xml:ns:caldav calendar-timezone>: 409 Conflict",
+		"<DAV: displayname>: 424 Failed Dependency",
+		"<urn:ietf:params:xml:ns:caldav calendar-description>: 424 Failed Dependency",
+	} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("CreateCalendar() with a name and two timezones = %v, want %q", err, want)
+		}
+	}
+	if _, ok := backend.calendars["/user/calendars/tz/"]; ok {
+		t.Errorf("calendar with a name and two timezones was created")
+	}
 }
 
 func TestClientUpdateCalendarErrors(t *testing.T) {

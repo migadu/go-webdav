@@ -193,14 +193,15 @@ func TestLocalFileSystemParentThroughFile(t *testing.T) {
 
 	h := &webdav.Handler{FileSystem: fs}
 	for _, tc := range []struct {
-		method, path, dest string
+		method, path, dest, body string
 	}{
-		{method: http.MethodPut, path: "/file.txt/sub/new.txt"},
+		{method: http.MethodPut, path: "/file.txt/sub/new.txt", body: "x"},
+		// A MKCOL body would be refused with 415
 		{method: "MKCOL", path: "/file.txt/sub/new"},
 		{method: "COPY", path: "/src.txt", dest: "/file.txt/sub/copy.txt"},
 		{method: "MOVE", path: "/src.txt", dest: "/file.txt/sub/moved.txt"},
 	} {
-		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("x"))
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
 		if tc.dest != "" {
 			req.Header.Set("Destination", tc.dest)
 		}
