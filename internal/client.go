@@ -263,37 +263,45 @@ func isHTTPURL(s string) bool {
 // p can also be an absolute http or https URL, which clients return for the
 // resources on another host than the endpoint's (see HrefPath). It's used
 // as is: requests for it are sent to its host. The credentials of the endpoint
-// URL are only added to a URL with the same scheme and host, and
-// webdav.HTTPClientWithBasicAuth only adds its own to the endpoint's origin
-// (see CredentialsAllowed); another HTTPClient adding credentials to its
-// requests adds them for any host.
+// URL are only added to a URL on the endpoint's origin, and
+// webdav.HTTPClientWithBasicAuth only adds its own to the requests for it (see
+// CredentialsAllowed); another HTTPClient adding credentials to its requests
+// adds them for any host.
 func (c *Client) ResolveHref(p string) (*url.URL, error) {
 	if isHTTPURL(p) {
 		u, err := url.Parse(p)
 		if err != nil {
 			return nil, err
 		}
-		if u.User == nil && u.Scheme == c.endpoint.Scheme && strings.EqualFold(u.Host, c.endpoint.Host) {
+		if u.User == nil && sameOrigin(u, c.endpoint) {
 			u.User = c.endpoint.User
 		}
 		return u, nil
 	}
 
-	hasTrailingSlash := strings.HasSuffix(p, "/") || (p == "" && strings.HasSuffix(c.endpoint.Path, "/"))
-
+	var rawPath string
 	if !strings.HasPrefix(p, "/") {
-		p = path.Join(c.endpoint.Path, p)
-	}
+		hasTrailingSlash := strings.HasSuffix(p, "/") || (p == "" && strings.HasSuffix(c.endpoint.Path, "/"))
 
-	if hasTrailingSlash && !strings.HasSuffix(p, "/") {
-		p += "/"
+		// Joined in their escaped form: an escaped "/" in the endpoint's
+		// path, "%2F", is part of a segment rather than a separator, and
+		// stays escaped
+		rawPath = path.Join(c.endpoint.EscapedPath(), (&url.URL{Path: p}).EscapedPath())
+		if hasTrailingSlash && !strings.HasSuffix(rawPath, "/") {
+			rawPath += "/"
+		}
+		var err error
+		if p, err = url.PathUnescape(rawPath); err != nil {
+			return nil, err
+		}
 	}
 
 	return &url.URL{
-		Scheme: c.endpoint.Scheme,
-		User:   c.endpoint.User,
-		Host:   c.endpoint.Host,
-		Path:   p,
+		Scheme:  c.endpoint.Scheme,
+		User:    c.endpoint.User,
+		Host:    c.endpoint.Host,
+		Path:    p,
+		RawPath: rawPath,
 	}, nil
 }
 
@@ -348,12 +356,19 @@ func (c *Client) normalizeHref(base *url.URL, href Href) Href {
 		// Not a URL requests can be sent to
 		return Href{Path: u.Path, RawPath: u.RawPath}
 	}
+	if u.Path == "" && u.Host != "" {
+		// "https://host" is "https://host/" (RFC 3986 section 6.2.3): an
+		// empty path would be taken for the endpoint (see ResolveHref)
+		u.Path, u.RawPath = "/", ""
+	}
 	if c.onEndpointHost(&u) {
 		if u.RawQuery == "" {
 			return Href{Path: u.Path, RawPath: u.RawPath}
 		}
 		u.Scheme, u.Host = c.endpoint.Scheme, c.endpoint.Host
-	} else if port := u.Port(); port == defaultPort(u.Scheme) {
+	} else if port := u.Port(); port == "" || port == defaultPort(u.Scheme) {
+		// An empty or default port is the same as none (RFC 3986 section
+		// 6.2.3)
 		u.Host = strings.TrimSuffix(u.Host, ":"+port)
 	}
 	u.User = nil
@@ -373,8 +388,8 @@ func (c *Client) HrefPath(base, href *url.URL) string {
 
 // RequestHrefs returns hrefs to the resources at paths, which are as accepted
 // by ResolveHref, for the body of a request for target. A path is used as is,
-// a URL on the host of target is reduced to its path, and any other URL is
-// kept whole.
+// a URL on the origin of target, its scheme, host and port, is reduced to its
+// path, and any other URL is kept whole.
 func (c *Client) RequestHrefs(target string, paths []string) ([]Href, error) {
 	targetURL, err := c.ResolveHref(target)
 	if err != nil {
@@ -391,9 +406,13 @@ func (c *Client) RequestHrefs(target string, paths []string) ([]Href, error) {
 		if err != nil {
 			return nil, err
 		}
-		if u.Scheme == targetURL.Scheme && strings.EqualFold(u.Host, targetURL.Host) {
-			// More servers understand a path than a URL
+		if sameOrigin(u, targetURL) {
+			// More servers understand a path than a URL. An empty one is
+			// "/" (RFC 3986 section 6.2.3), not the request URL.
 			hrefs[i] = Href{Path: u.Path, RawPath: u.RawPath, RawQuery: u.RawQuery}
+			if u.Path == "" {
+				hrefs[i].Path = "/"
+			}
 		} else {
 			u.User = nil
 			hrefs[i] = Href(*u)

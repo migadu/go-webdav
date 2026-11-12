@@ -49,6 +49,12 @@ func TestClientHrefPath(t *testing.T) {
 		// and takes the scheme of the request URL
 		{other, "//contacts.icloud.com/1234567/principal/", "/1234567/principal/"},
 		{endpoint, "//Contacts.iCloud.com:443/a%20b", "/a b"},
+		// An empty path with a host is "/" (RFC 3986 section 6.2.3), not an
+		// empty reference
+		{endpoint, "https://contacts.icloud.com", "/"},
+		{endpoint, "https://contacts.icloud.com:443", "/"},
+		{other, "//contacts.icloud.com", "/"},
+		{endpoint, "https://contacts.icloud.com?x=1", "https://contacts.icloud.com/?x=1"},
 
 		// On another host
 		{endpoint, "https://p37-contacts.icloud.com:443/1234567/carddavhome/", other},
@@ -61,6 +67,9 @@ func TestClientHrefPath(t *testing.T) {
 		{endpoint, "//p37-contacts.icloud.com/1234567/carddavhome/", other},
 		{endpoint, "//user:pass@p37-contacts.icloud.com:443/a#frag", "https://p37-contacts.icloud.com/a"},
 		{"http://contacts.icloud.com/", "//p37-contacts.icloud.com/a", "http://p37-contacts.icloud.com/a"},
+		{endpoint, "https://p37-contacts.icloud.com", "https://p37-contacts.icloud.com/"},
+		{endpoint, "//p37-contacts.icloud.com:443", "https://p37-contacts.icloud.com/"},
+		{endpoint, "https://p37-contacts.icloud.com:/a", "https://p37-contacts.icloud.com/a"},
 
 		// With a query
 		{endpoint, "/a?x=1", "https://contacts.icloud.com/a?x=1"},
@@ -79,6 +88,8 @@ func TestClientHrefPath(t *testing.T) {
 	}{
 		{"card/", "card/"},
 		{"//p37-contacts.icloud.com/1234567/carddavhome/", other},
+		{"https://contacts.icloud.com", "/"},
+		{"//contacts.icloud.com", "/"},
 	} {
 		if got := c.HrefPath(nil, mustParseURL(t, tc.href)); got != tc.want {
 			t.Errorf("HrefPath(nil, %q) = %q, want %q", tc.href, got, tc.want)
@@ -99,6 +110,8 @@ func TestClientResolveHref(t *testing.T) {
 		{"/a b", "https://user:pass@dav.example.org/a%20b"},
 		{"a?b", "https://user:pass@dav.example.org/dav/a%3Fb"},
 		{"https://dav.example.org/a?x=1", "https://user:pass@dav.example.org/a?x=1"},
+		{"https://dav.example.org:443/a", "https://user:pass@dav.example.org:443/a"},
+		{"https://dav.example.org:8443/a", "https://dav.example.org:8443/a"},
 		{"HTTPS://dav.example.org/a", "https://user:pass@dav.example.org/a"},
 		{"https://other.example.org/a?x=1", "https://other.example.org/a?x=1"},
 		{"http://dav.example.org/a", "http://dav.example.org/a"},
@@ -115,6 +128,33 @@ func TestClientResolveHref(t *testing.T) {
 	if _, err := c.ResolveHref("https://other.example.org/%zz"); err == nil {
 		t.Errorf("ResolveHref() of an invalid URL succeeded")
 	}
+
+	// An escaped "/" in the endpoint's path, as a DNS TXT record may give
+	// (RFC 6764 section 4), is part of a segment: it stays escaped, and a
+	// relative path is resolved against it as such
+	for _, endpoint := range []string{"https://dav.example.org/dav/a%2Fb/", "https://dav.example.org/dav/a%2Fb"} {
+		c, err := NewClient(nil, endpoint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct {
+			href, want string
+		}{
+			{"", endpoint},
+			{"c.vcf", "https://dav.example.org/dav/a%2Fb/c.vcf"},
+			{"c d/", "https://dav.example.org/dav/a%2Fb/c%20d/"},
+			{"c?d", "https://dav.example.org/dav/a%2Fb/c%3Fd"},
+			{"../c", "https://dav.example.org/dav/c"},
+			{"/c", "https://dav.example.org/c"},
+		} {
+			u, err := c.ResolveHref(tc.href)
+			if err != nil {
+				t.Errorf("%v: ResolveHref(%q) = %v", endpoint, tc.href, err)
+			} else if got := u.String(); got != tc.want {
+				t.Errorf("%v: ResolveHref(%q) = %q, want %q", endpoint, tc.href, got, tc.want)
+			}
+		}
+	}
 }
 
 func TestClientRequestHrefs(t *testing.T) {
@@ -124,28 +164,69 @@ func TestClientRequestHrefs(t *testing.T) {
 	}
 
 	const book = "https://p37-contacts.icloud.com/1234567/carddavhome/card/"
-	hrefs, err := c.RequestHrefs(book, []string{
-		"/a.vcf",
-		book + "b.vcf?x=1",
-		"https://contacts.icloud.com/c.vcf",
-		"https://user:pass@p38-contacts.icloud.com/d.vcf",
-	})
+	for _, tc := range []struct {
+		target      string
+		paths, want []string
+	}{{
+		target: book,
+		paths: []string{
+			"/a.vcf",
+			book + "b.vcf?x=1",
+			"https://contacts.icloud.com/c.vcf",
+			"https://user:pass@p38-contacts.icloud.com/d.vcf",
+			// The default port of the scheme is the same host (RFC 3986
+			// section 6.2.3)
+			"https://p37-contacts.icloud.com:443/1234567/carddavhome/card/e.vcf",
+			"http://p37-contacts.icloud.com:443/f.vcf",
+		},
+		want: []string{
+			"/a.vcf",
+			"/1234567/carddavhome/card/b.vcf?x=1",
+			"https://contacts.icloud.com/c.vcf",
+			"https://p38-contacts.icloud.com/d.vcf",
+			"/1234567/carddavhome/card/e.vcf",
+			"http://p37-contacts.icloud.com:443/f.vcf",
+		},
+	}, {
+		target: "/card/",
+		paths: []string{
+			"https://contacts.icloud.com:443/card/a.vcf",
+			"https://contacts.icloud.com:/card/b.vcf",
+			"https://contacts.icloud.com",
+			"https://contacts.icloud.com:8443/card/c.vcf",
+		},
+		want: []string{
+			"/card/a.vcf",
+			"/card/b.vcf",
+			"/",
+			"https://contacts.icloud.com:8443/card/c.vcf",
+		},
+	}} {
+		hrefs, err := c.RequestHrefs(tc.target, tc.paths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(hrefs) != len(tc.want) {
+			t.Fatalf("RequestHrefs(%q) = %v, want %q", tc.target, hrefs, tc.want)
+		}
+		for i := range hrefs {
+			if got := hrefs[i].String(); got != tc.want[i] {
+				t.Errorf("RequestHrefs(%q, %q) = %q, want %q", tc.target, tc.paths[i], got, tc.want[i])
+			}
+		}
+	}
+
+	// The endpoint's port can be the explicit default one too
+	c, err = NewClient(nil, "https://dav.example.org:443/")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{
-		"/a.vcf",
-		"/1234567/carddavhome/card/b.vcf?x=1",
-		"https://contacts.icloud.com/c.vcf",
-		"https://p38-contacts.icloud.com/d.vcf",
+	hrefs, err := c.RequestHrefs("/card/", []string{"https://dav.example.org/card/a.vcf"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(hrefs) != len(want) {
-		t.Fatalf("RequestHrefs() = %v, want %q", hrefs, want)
-	}
-	for i := range hrefs {
-		if got := hrefs[i].String(); got != want[i] {
-			t.Errorf("RequestHrefs()[%v] = %q, want %q", i, got, want[i])
-		}
+	if got, want := hrefs[0].String(), "/card/a.vcf"; got != want {
+		t.Errorf("RequestHrefs() = %q, want %q", got, want)
 	}
 }
 
