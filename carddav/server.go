@@ -178,6 +178,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			principalPath = b.Prefix + "/"
 		}
 
+		// The location depends on the user, so caches must check back
+		// before reusing the redirect (RFC 6764 section 5)
+		w.Header().Set("Cache-Control", "no-cache")
 		http.Redirect(w, r, principalPath, http.StatusPermanentRedirect)
 		return
 	}

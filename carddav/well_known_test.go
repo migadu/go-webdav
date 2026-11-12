@@ -103,3 +103,21 @@ func TestWellKnownCurrentUserPrincipalError(t *testing.T) {
 		})
 	}
 }
+
+// The redirect depends on the current user, so it mustn't be reused for
+// another one: RFC 6764 section 5 asks for a Cache-Control value such as
+// "no-cache" when the location may change, and a 308 response is cacheable
+// by default (RFC 9110 section 15.4.9).
+func TestWellKnownNoCache(t *testing.T) {
+	for _, principal := range []string{"/principals/alice/", ""} {
+		h := &Handler{Backend: wellKnownBackend{principal: principal}}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("PROPFIND", "/.well-known/carddav", nil))
+		if w.Code != http.StatusPermanentRedirect {
+			t.Fatalf("principal %q: status = %v, want 308", principal, w.Code)
+		}
+		if cc := w.Header().Get("Cache-Control"); cc != "no-cache" {
+			t.Errorf("principal %q: Cache-Control = %q, want %q", principal, cc, "no-cache")
+		}
+	}
+}
