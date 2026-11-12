@@ -317,11 +317,24 @@ func decodeTextMatch(el *textMatch) (*TextMatch, error) {
 	if !internal.IsSupportedCollation(el.Collation) {
 		return nil, newPreconditionError(http.StatusForbidden, PreconditionSupportedCollation)
 	}
+	collation := el.Collation
+	// "default" names the default collation (RFC 4791 section 7.5), which
+	// backends get as an empty Collation
+	if collation == internal.CollationDefault {
+		collation = ""
+	}
 	return &TextMatch{
 		Text:            el.Text,
-		Collation:       el.Collation,
+		Collation:       collation,
 		NegateCondition: bool(el.NegateCondition),
 	}, nil
+}
+
+// newSupportedCollationSet returns the CALDAV:supported-collation-set of the
+// resources which support calendar-query, the REPORT which does text
+// matching (RFC 4791 section 7.5.1).
+func newSupportedCollationSet() *supportedCollationSet {
+	return &supportedCollationSet{Collations: internal.SupportedCollations()}
 }
 
 func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {
@@ -1016,6 +1029,7 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 				Comp: components,
 			}, nil
 		},
+		supportedCollationSetName:            internal.PropFindValue(newSupportedCollationSet()),
 		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(internal.NewCurrentUserPrivilegeSet(cal.ReadOnly)),
 		internal.SupportedReportSetName:      internal.PropFindValue(b.supportedReportSet()),
 	}
@@ -1081,6 +1095,7 @@ func (b *backend) propFindInbox(ctx context.Context, propfind *internal.PropFind
 		// RFC 6638 section 2.3 extends these reports to the Inbox, while
 		// sync-collection REPORTs are only served for calendars
 		internal.SupportedReportSetName: internal.PropFindValue(internal.NewSupportedReportSet(calendarQueryName, calendarMultigetName)),
+		supportedCollationSetName:       internal.PropFindValue(newSupportedCollationSet()),
 	}
 	b.addACLProps(ctx, props, newScheduleDeliverSupportedPrivilege())
 	b.addPushProps(ctx, propfind, inbox.Path, props)

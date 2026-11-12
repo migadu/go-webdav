@@ -2,10 +2,12 @@ package caldav
 
 import (
 	"context"
+	"encoding/xml"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -205,4 +207,136 @@ func TestTextMatchCollation(t *testing.T) {
 			t.Errorf("raw REPORT body = %s, want %q precondition element", body, PreconditionSupportedCollation)
 		}
 	})
+}
+
+// RFC 4791 section 7.5: "if the client specifies the "default" collation
+// identifier (as defined in [RFC4790], Section 3.1), the server MUST default
+// to using "i;ascii-casemap" as the collation."
+func TestTextMatchDefaultCollation(t *testing.T) {
+	cal, err := ical.NewDecoder(strings.NewReader("BEGIN:VCALENDAR\r\n" +
+		"VERSION:2.0\r\n" +
+		"PRODID:-//Test//EN\r\n" +
+		"BEGIN:VEVENT\r\n" +
+		"UID:ev-default\r\n" +
+		"DTSTAMP:20260101T000000Z\r\n" +
+		"DTSTART:20260102T100000Z\r\n" +
+		"SUMMARY:Café Meeting\r\n" +
+		"END:VEVENT\r\n" +
+		"END:VCALENDAR\r\n")).Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	co := CalendarObject{Data: cal}
+
+	queryWith := func(text string) CompFilter {
+		return CompFilter{
+			Name: "VCALENDAR",
+			Comps: []CompFilter{{
+				Name: "VEVENT",
+				Props: []PropFilter{{
+					Name:      "SUMMARY",
+					TextMatch: &TextMatch{Text: text, Collation: "default"},
+				}},
+			}},
+		}
+	}
+
+	t.Run("Match", func(t *testing.T) {
+		for _, tc := range []struct {
+			text string
+			want bool
+		}{
+			{"meeting", true},
+			// i;ascii-casemap only folds ASCII letters
+			{"CAFÉ", false},
+		} {
+			ok, err := Match(queryWith(tc.text), &co)
+			if err != nil {
+				t.Fatalf("Match(%q, collation=default) error = %v", tc.text, err)
+			}
+			if ok != tc.want {
+				t.Errorf("Match(%q, collation=default) = %v, want %v", tc.text, ok, tc.want)
+			}
+		}
+	})
+
+	t.Run("REPORT", func(t *testing.T) {
+		rec := &collationQueryBackend{}
+		srv := httptest.NewServer(&Handler{Backend: rec})
+		defer srv.Close()
+
+		c, err := NewClient(http.DefaultClient, srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = c.QueryCalendar(context.Background(), "/user/calendars/cal/", &CalendarQuery{
+			CompFilter: queryWith("meeting"),
+		})
+		if err != nil {
+			t.Fatalf("QueryCalendar(collation=default) = %v", err)
+		}
+		// Backends get the default collation as an empty Collation
+		if gotTM := rec.got.CompFilter.Comps[0].Props[0].TextMatch; gotTM == nil || gotTM.Collation != "" {
+			t.Errorf("decoded TextMatch = %+v, want Collation=\"\"", gotTM)
+		}
+	})
+}
+
+const propFindSupportedCollationSet = `<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop><C:supported-collation-set/></D:prop>
+</D:propfind>`
+
+// testSupportedCollationSet decodes a CALDAV:supported-collation-set,
+// independently of the server's own types.
+type testSupportedCollationSet struct {
+	XMLName    xml.Name `xml:"urn:ietf:params:xml:ns:caldav supported-collation-set"`
+	Collations []string `xml:"urn:ietf:params:xml:ns:caldav supported-collation"`
+}
+
+// RFC 4791 section 7.5.1: CALDAV:supported-collation-set "MUST be defined on
+// any resource that supports a report that does text matching. If defined,
+// it MUST be protected and SHOULD NOT be returned by a PROPFIND DAV:allprop
+// request". Calendars and the scheduling Inbox (RFC 6638 section 2.3) support
+// calendar-query.
+func TestSupportedCollationSet(t *testing.T) {
+	name := xml.Name{Space: namespace, Local: "supported-collation-set"}
+	b := newSchedulingFullBackend(&Inbox{Path: schedulingInboxPath})
+	h := &Handler{Backend: b}
+
+	for _, p := range []string{schedulingCalendarPath, schedulingInboxPath} {
+		t.Run(p, func(t *testing.T) {
+			resp := propFindResponse(t, h, p, "0", propFindSupportedCollationSet, p)
+			var set testSupportedCollationSet
+			if err := resp.DecodeProp(&set); err != nil {
+				t.Fatalf("supported-collation-set: %v", err)
+			}
+			want := []string{"i;ascii-casemap", "i;octet", "i;unicode-casemap"}
+			if !reflect.DeepEqual(set.Collations, want) {
+				t.Errorf("supported-collation-set = %q, want %q", set.Collations, want)
+			}
+
+			resp = propFindResponse(t, h, p, "0", `<propfind xmlns="DAV:"><propname/></propfind>`, p)
+			if code := propStatus(t, resp, name); code != http.StatusOK {
+				t.Errorf("propname: supported-collation-set status = %v, want 200", code)
+			}
+
+			resp = propFindResponse(t, h, p, "0", propFindAllProp, p)
+			for _, propstat := range resp.PropStats {
+				if propstat.Prop.Get(name) != nil {
+					t.Errorf("allprop returned supported-collation-set")
+				}
+			}
+		})
+	}
+
+	codes := propPatchCalendar(t, h, schedulingCalendarPath, `<?xml version="1.0" encoding="UTF-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:set><D:prop>
+    <C:supported-collation-set><C:supported-collation>i;octet</C:supported-collation></C:supported-collation-set>
+  </D:prop></D:set>
+</D:propertyupdate>`)
+	if codes[name] != http.StatusForbidden {
+		t.Errorf("PROPPATCH supported-collation-set status = %v, want 403", codes[name])
+	}
 }
