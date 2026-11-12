@@ -560,6 +560,57 @@ func TestInboxSupportedReportSet(t *testing.T) {
 	}
 }
 
+const propFindCurrentUserPrincipal = `<?xml version="1.0" encoding="UTF-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:current-user-principal/>
+  </D:prop>
+</D:propfind>`
+
+// unauthenticatedSchedulingBackend is a schedulingBackend without a current
+// user.
+type unauthenticatedSchedulingBackend struct {
+	*schedulingBackend
+}
+
+func (unauthenticatedSchedulingBackend) CurrentUserPrincipal(ctx context.Context) (string, error) {
+	return "", nil
+}
+
+// RFC 5397 adds DAV:current-user-principal to the resources under access
+// control, as the Inbox is (RFC 6638 section 6.1), and it's served for the
+// calendars around it: the Inbox serves it too, whether it's requested or
+// listed in the calendar home set, and it's DAV:unauthenticated without a
+// current user (RFC 5397 section 3).
+func TestInboxCurrentUserPrincipal(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		backend Backend
+		href    string // empty for DAV:unauthenticated
+	}{
+		{"authenticated", newSchedulingBackend(&Inbox{Path: inboxMemberPath}), "/user/"},
+		{"unauthenticated", unauthenticatedSchedulingBackend{newSchedulingBackend(&Inbox{Path: inboxMemberPath})}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Handler{Backend: tc.backend}
+			for _, req := range []struct{ target, depth string }{
+				{inboxMemberPath, "0"},
+				{"/user/calendars/", "1"},
+			} {
+				resp := propFindResponse(t, h, req.target, req.depth, propFindCurrentUserPrincipal, inboxMemberPath)
+				var cup unauthenticatedCurrentUserPrincipal
+				if err := resp.DecodeProp(&cup); err != nil {
+					t.Errorf("PROPFIND %v: current-user-principal of the Inbox: %v", req.target, err)
+				} else if tc.href == "" && (cup.Unauthenticated == nil || cup.Href != nil) {
+					t.Errorf("PROPFIND %v: current-user-principal of the Inbox isn't DAV:unauthenticated", req.target)
+				} else if tc.href != "" && (cup.Href == nil || *cup.Href != tc.href) {
+					t.Errorf("PROPFIND %v: current-user-principal of the Inbox isn't %v", req.target, tc.href)
+				}
+			}
+		})
+	}
+}
+
 func TestInboxSyncCollection(t *testing.T) {
 	b := newSchedulingFullBackend(&Inbox{Path: inboxMemberPath})
 	res := serveTestRequest(t, &Handler{Backend: b}, "REPORT", inboxMemberPath, syncCollectionBody("", "1", 0))

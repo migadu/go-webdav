@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"fmt"
 	"mime"
 	"net/http"
 	"path"
@@ -206,18 +207,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	b := h.newBackend()
 	if internal.SamePath(r.URL.Path, "/.well-known/caldav") {
 		principalPath, err := h.Backend.CurrentUserPrincipal(r.Context())
 		if err != nil {
-			http.Error(w, "caldav: failed to determine current user principal", http.StatusInternalServerError)
+			// An HTTPError keeps its status: the server may require
+			// authentication here (RFC 6764 section 5)
+			internal.ServeError(w, fmt.Errorf("caldav: failed to determine current user principal: %w", err))
 			return
 		}
+		if principalPath == "" {
+			// Without a current user, redirect to the context path of the
+			// service, the root of the handler (RFC 6764 section 5), rather
+			// than resolve an empty path to "/.well-known/"
+			principalPath = b.Prefix + "/"
+		}
 
+		// The location depends on the user, so caches must check back
+		// before reusing the redirect (RFC 6764 section 5)
+		w.Header().Set("Cache-Control", "no-cache")
 		http.Redirect(w, r, principalPath, http.StatusPermanentRedirect)
 		return
 	}
 
-	b := h.newBackend()
 	if !b.inPrefix(r.URL.Path) {
 		if r.Method == http.MethodDelete {
 			if pb, ok := h.Backend.(PushBackend); ok {
@@ -1057,6 +1069,13 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 
 func (b *backend) propFindInbox(ctx context.Context, propfind *internal.PropFind, inbox *Inbox) (*internal.Response, error) {
 	props := map[xml.Name]internal.PropFindFunc{
+		internal.CurrentUserPrincipalName: func(*internal.RawXMLValue) (interface{}, error) {
+			path, err := b.Backend.CurrentUserPrincipal(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return internal.NewCurrentUserPrincipal(path), nil
+		},
 		internal.ResourceTypeName:            internal.PropFindValue(internal.NewResourceType(internal.CollectionName, scheduleInboxName)),
 		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(newInboxPrivilegeSet(inbox.ReadOnly)),
 		// RFC 6638 section 2.3 extends these reports to the Inbox, while
