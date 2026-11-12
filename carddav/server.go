@@ -358,6 +358,9 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *add
 		AllProp:  query.AllProp,
 		PropName: query.PropName,
 	}
+	if err := internal.CheckReportPropFind(&propfind); err != nil {
+		return err
+	}
 
 	var q AddressBookQuery
 	if query.Prop != nil {
@@ -428,6 +431,9 @@ func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multige
 		Prop:     multiget.Prop,
 		AllProp:  multiget.AllProp,
 		PropName: multiget.PropName,
+	}
+	if err := internal.CheckReportPropFind(&propfind); err != nil {
+		return err
 	}
 
 	var dataReq AddressDataRequest

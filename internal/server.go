@@ -642,15 +642,39 @@ func (propfind *PropFind) AsksForProps() bool {
 }
 
 // CheckPropFind returns the error NewPropFindResponse fails with for a request
-// which doesn't ask for any properties: one with neither a propname, an
-// allprop nor a prop element.
+// which doesn't match the DTD of RFC 4918 section 14.20: one with neither a
+// propname, an allprop nor a prop element, or one CheckReportPropFind refuses.
 func CheckPropFind(propfind *PropFind) error {
 	if !propfind.AsksForProps() {
 		return HTTPErrorf(http.StatusBadRequest, "webdav: request missing propname, allprop or prop element")
 	}
+	return CheckReportPropFind(propfind)
+}
+
+// CheckReportPropFind returns an error for a request with more than one of the
+// propname, allprop and prop elements, which RFC 4918 section 14.20 makes a
+// choice between, or with an include element but no allprop. Unlike a
+// PROPFIND request, a REPORT such as calendar-query may have none of them
+// (RFC 4791 sections 9.5 and 9.10, RFC 6352 sections 10.3 and 10.7).
+func CheckReportPropFind(propfind *PropFind) error {
+	n := 0
+	for _, present := range []bool{propfind.PropName != nil, propfind.AllProp != nil, propfind.Prop != nil} {
+		if present {
+			n++
+		}
+	}
+	if n > 1 {
+		return HTTPErrorf(http.StatusBadRequest, "webdav: request with more than one of the propname, allprop and prop elements")
+	}
+	if propfind.Include != nil && propfind.AllProp == nil {
+		return HTTPErrorf(http.StatusBadRequest, "webdav: request with an include element but no allprop")
+	}
 	return nil
 }
 
+// NewPropFindResponse returns the response to propfind for the resource at
+// path, whose live properties are props. A request with an empty prop element
+// gets a 200 OK status without any propstat, as from NewOKResponse.
 func NewPropFindResponse(path string, propfind *PropFind, props map[xml.Name]PropFindFunc) (*Response, error) {
 	return NewPropFindResponseWithDeadProps(path, propfind, props, nil)
 }
@@ -660,6 +684,10 @@ func NewPropFindResponse(path string, propfind *PropFind, props map[xml.Name]Pro
 // props, an allprop request returns all of them (RFC 4918 section 9.1). A
 // live property takes precedence over a dead property of the same name.
 func NewPropFindResponseWithDeadProps(path string, propfind *PropFind, props, deadProps map[xml.Name]PropFindFunc) (*Response, error) {
+	if err := CheckPropFind(propfind); err != nil {
+		return nil, err
+	}
+
 	resp := &Response{Hrefs: []Href{Href{Path: path}}}
 
 	if _, ok := props[ResourceTypeName]; !ok {
@@ -730,10 +758,14 @@ func NewPropFindResponseWithDeadProps(path string, propfind *PropFind, props, de
 				return nil, err
 			}
 		}
-	} else {
-		return nil, CheckPropFind(propfind)
 	}
 
+	if len(resp.PropStats) == 0 {
+		// An empty prop element (RFC 4918 section 14.18 lets it hold
+		// anything) leaves no property to report, but a response holds
+		// either a status or at least one propstat (section 14.24)
+		return NewOKResponse(path), nil
+	}
 	return resp, nil
 }
 
