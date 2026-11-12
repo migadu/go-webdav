@@ -185,4 +185,69 @@ END:VCARD&#13;
 			t.Errorf("expected Truncated=true on collection 507 response, got false")
 		}
 	})
+
+	// RFC 6578 section 3.2 doesn't allow a DAV:status for changed members:
+	// a server reports one it failed to retrieve with failed propstats.
+	t.Run("changed member with failed propstats is an HrefError", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.WriteHeader(http.StatusMultiStatus)
+			w.Write([]byte(`<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/ab/ok.vcf</D:href>
+    <D:propstat>
+      <D:prop><D:getetag>"e1"</D:getetag></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+    <D:propstat>
+      <D:prop><C:address-data/></D:prop>
+      <D:status>HTTP/1.1 404 Not Found</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/ab/corrupt.vcf</D:href>
+    <D:propstat>
+      <D:prop><D:getetag/><C:address-data/></D:prop>
+      <D:status>HTTP/1.1 500 Internal Server Error</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/ab/denied.vcf</D:href>
+    <D:propstat>
+      <D:prop><D:getetag>"e2"</D:getetag></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+    <D:propstat>
+      <D:prop><C:address-data/></D:prop>
+      <D:status>HTTP/1.1 403 Forbidden</D:status>
+    </D:propstat>
+  </D:response>
+  <D:sync-token>urn:sync:6</D:sync-token>
+</D:multistatus>`))
+		}))
+		defer srv.Close()
+
+		c, err := NewClient(srv.Client(), srv.URL)
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+
+		res, err := c.SyncCollection(context.Background(), "/ab/", &SyncQuery{
+			DataRequest: AddressDataRequest{AllProp: true},
+		})
+		if res == nil {
+			t.Fatalf("SyncCollection() = %v, want a partial result", err)
+		}
+		if res.SyncToken != "urn:sync:6" {
+			t.Errorf("got SyncToken %q, want %q", res.SyncToken, "urn:sync:6")
+		}
+		if len(res.Updated) != 1 || res.Updated[0].Path != "/ab/ok.vcf" || res.Updated[0].ETag != "e1" {
+			t.Errorf("got Updated %+v, want only /ab/ok.vcf", res.Updated)
+		}
+		checkStatusCodes(t, hrefErrorCodes(err), map[string]int{
+			"/ab/corrupt.vcf": http.StatusInternalServerError,
+			"/ab/denied.vcf":  http.StatusForbidden,
+		})
+	})
 }

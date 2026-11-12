@@ -83,6 +83,57 @@ func CheckSyncCollection(q *SyncCollectionQuery) (syncToken string, err error) {
 	return strings.TrimSpace(q.SyncToken), nil
 }
 
+// SyncErrorResponses returns the responses for the members a backend failed
+// to report in a sync-collection REPORT, given by errResps as
+// HrefErrorResponses returns them. updated and deleted are the paths of the
+// members the backend did report, as changed and as removed, and prop holds
+// the requested properties.
+//
+// RFC 6578 section 3.2 lists each member URL once, and only lets the
+// response for a removed member carry a DAV:status. So an error about a
+// member already reported, in updated, deleted or an earlier error, is left
+// out; a 404 Not Found error reports the member as removed; and any other
+// error reports the requested properties of a changed member in a propstat
+// with the status, DAV:error and description of the error.
+func SyncErrorResponses(errResps []Response, prop *Prop, updated, deleted []string) []Response {
+	var names []RawXMLValue
+	for _, raw := range prop.Raw {
+		if name, ok := raw.XMLName(); ok {
+			names = append(names, *NewRawXMLElement(name, nil, nil))
+		}
+	}
+
+	// Paths are compared as by SamePath, through a map since updated can
+	// list a whole collection
+	reported := make(map[string]bool, len(updated)+len(deleted))
+	for _, p := range updated {
+		reported[strings.TrimSuffix(p, "/")] = true
+	}
+	for _, p := range deleted {
+		reported[strings.TrimSuffix(p, "/")] = true
+	}
+
+	var resps []Response
+	for _, resp := range errResps {
+		key := strings.TrimSuffix(resp.Hrefs[0].Path, "/")
+		if reported[key] {
+			continue
+		}
+		reported[key] = true
+		if resp.Status.Code != http.StatusNotFound {
+			resp.PropStats = []PropStat{{
+				Prop:                Prop{Raw: names},
+				Status:              *resp.Status,
+				Error:               resp.Error,
+				ResponseDescription: resp.ResponseDescription,
+			}}
+			resp.Status, resp.Error, resp.ResponseDescription = nil, nil, ""
+		}
+		resps = append(resps, resp)
+	}
+	return resps
+}
+
 // ServeSyncCollection serves the response to a sync-collection REPORT on the
 // collection at r.URL.Path (RFC 6578 section 3.2), with the new sync token
 // syncToken. writeUpdated writes the responses for the updated members to mw,

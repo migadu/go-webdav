@@ -33,6 +33,16 @@ type SyncBackend interface {
 	// the partial state and set SyncResponse.Truncated. Backends that
 	// can't do this may ignore Limit and return all changes.
 	//
+	// Changed members that couldn't be loaded can be reported with
+	// webdav.NewHrefError (several combined with errors.Join), returned
+	// along with the SyncResponse holding the other changes. Since RFC 6578
+	// section 3.2 only allows an error status for removed members, such a
+	// member is listed with each requested property under the status of
+	// its error, except for 404 Not Found, which reports it as removed.
+	// Errors about members already in Updated or Deleted are ignored. Any
+	// other error, or an error without a SyncResponse, fails the whole
+	// request.
+	//
 	// Calendars have no sub-collections, so the DAV:sync-level values "1"
 	// and "infinite" are handled alike.
 	SyncCollection(ctx context.Context, path string, query *SyncQuery) (*SyncResponse, error)
@@ -78,6 +88,11 @@ func (h *Handler) handleSyncCollection(r *http.Request, w http.ResponseWriter, s
 		}
 		return internal.HTTPErrorf(http.StatusInternalServerError, "caldav: SyncCollection returned nil response")
 	}
+	updated := make([]string, len(res.Updated))
+	for i := range res.Updated {
+		updated[i] = res.Updated[i].Path
+	}
+	errResps = internal.SyncErrorResponses(errResps, sc.Prop, updated, res.Deleted)
 
 	propfind := internal.PropFind{Prop: sc.Prop}
 	return internal.ServeSyncCollection(w, r, res.SyncToken, res.Deleted, res.Truncated, func(mw *internal.MultiStatusWriter) error {
