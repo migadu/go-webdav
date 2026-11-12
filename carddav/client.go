@@ -346,7 +346,10 @@ func encodeAddressPropReq(req *AddressDataRequest) (*internal.Prop, error) {
 		addrDataReq.Allprop = &struct{}{}
 	} else {
 		for _, name := range req.Props {
-			addrDataReq.Props = append(addrDataReq.Props, prop{Name: name})
+			addrDataReq.Props = append(addrDataReq.Props, prop{
+				Name:    name,
+				NoValue: noValue(containsFold(req.NoValue, name)),
+			})
 		}
 	}
 

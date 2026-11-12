@@ -69,9 +69,21 @@ type AddressBookQuery struct {
 	Limit int // <= 0 means unlimited
 }
 
+// AddressDataRequest is the CARDDAV:address-data element of a REPORT
+// request: the parts of the address objects to return (RFC 6352 section
+// 10.4). Whatever the backend returns, the Handler only writes the requested
+// properties in the address data, so backends may return whole vCards.
 type AddressDataRequest struct {
+	// Props lists the names of the vCard properties to return, with or
+	// without a group prefix (RFC 6352 section 10.4.2). VERSION is always
+	// returned.
 	Props   []string
 	AllProp bool
+	// NoValue lists the names of Props requested with novalue="yes": the
+	// properties they match are returned with their group and parameters,
+	// but without their value (RFC 6352 section 10.4.2). A property also
+	// matched by a name of Props that isn't in NoValue keeps its value.
+	NoValue []string
 }
 
 type PropFilter struct {

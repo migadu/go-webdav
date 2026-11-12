@@ -42,6 +42,12 @@ func TestMatchPropFilterGroupPrefix(t *testing.T) {
 		{"group names are case-insensitive", PropFilter{Name: "ITEM1.tel"}, true},
 		{"unknown group", PropFilter{Name: "item3.TEL"}, false},
 		{"unknown group, is-not-defined", PropFilter{Name: "item3.TEL", IsNotDefined: true}, true},
+		// RFC 6350 section 3.3: group = 1*(ALPHA / DIGIT / "-"), so no
+		// property has an empty group or name
+		{"empty group", PropFilter{Name: ".TEL"}, false},
+		{"empty group, is-not-defined", PropFilter{Name: ".TEL", IsNotDefined: true}, true},
+		{"empty name", PropFilter{Name: "item1."}, false},
+		{"empty name, is-not-defined", PropFilter{Name: "item1.", IsNotDefined: true}, true},
 		{"grouped name matches its own value", PropFilter{
 			Name:        "item1.TEL",
 			TextMatches: []TextMatch{{Text: "+10000000001"}},
@@ -102,6 +108,7 @@ func TestFilterPropertiesGroupPrefix(t *testing.T) {
 			"item2.TEL:+10000000002",
 		}},
 		{"unknown group", []string{"item3.TEL"}, nil},
+		{"empty group", []string{".TEL"}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := filterProperties(AddressDataRequest{Props: tc.props}, ao)

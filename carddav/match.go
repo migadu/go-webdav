@@ -17,18 +17,47 @@ func filterProperties(req AddressDataRequest, ao AddressObject) AddressObject {
 
 	result := ao
 	result.Card = make(vcard.Card)
-	// result would be invalid w/o version
-	if version, ok := ao.Card[vcard.FieldVersion]; ok {
+	// result would be invalid w/o version. It gets its own slice, so that
+	// appending to it can't change ao.
+	version := slices.Clone(lookupFold(ao.Card, vcard.FieldVersion))
+	if len(version) > 0 {
 		result.Card[vcard.FieldVersion] = version
 	}
+	// The fields matched by a name which isn't in req.NoValue, if it's set
+	var valued map[*vcard.Field]bool
+	if len(req.NoValue) > 0 {
+		valued = make(map[*vcard.Field]bool)
+		for _, field := range version {
+			valued[field] = true
+		}
+	}
 	for _, prop := range req.Props {
-		_, name := splitGroup(prop)
+		_, name, _ := splitGroup(prop)
 		key := strings.ToUpper(name)
+		noValue := containsFold(req.NoValue, prop)
 		for _, field := range cardFields(ao.Card, prop) {
+			if valued != nil && !noValue {
+				valued[field] = true
+			}
 			// The same field may be requested twice, such as with
 			// and without its group
 			if !slices.Contains(result.Card[key], field) {
 				result.Card[key] = append(result.Card[key], field)
+			}
+		}
+	}
+
+	if valued != nil {
+		for _, fields := range result.Card {
+			for i, field := range fields {
+				if !valued[field] {
+					// Copy the field rather than change ao. The
+					// encoder writes the parameters followed by
+					// just a ":" (RFC 6352 section 10.4.2).
+					f := *field
+					f.Value = ""
+					fields[i] = &f
+				}
 			}
 		}
 	}
@@ -107,12 +136,14 @@ func Match(query *AddressBookQuery, ao *AddressObject) (matched bool, err error)
 
 // splitGroup splits a CardDAV property name into its vCard group prefix, if
 // any, and the vCard property name. Neither contains a dot (RFC 6350 section
-// 3.3).
-func splitGroup(name string) (group, prop string) {
-	if group, prop, ok := strings.Cut(name, "."); ok {
-		return group, prop
+// 3.3). ok is false if the name has a dot with nothing before or after it,
+// such as ".TEL" or "item1.": groups and names aren't empty, so it names no
+// property.
+func splitGroup(name string) (group, prop string, ok bool) {
+	if group, prop, found := strings.Cut(name, "."); found {
+		return group, prop, group != "" && prop != ""
 	}
-	return "", name
+	return "", name, true
 }
 
 // cardFields returns the fields of card named by name, a CardDAV property
@@ -120,8 +151,11 @@ func splitGroup(name string) (group, prop string) {
 // names the properties with any group prefix or none; with a group prefix,
 // only the properties with that group prefix. Names are case-insensitive.
 func cardFields(card vcard.Card, name string) []*vcard.Field {
-	group, name := splitGroup(name)
-	fields := cardFieldsByName(card, name)
+	group, name, ok := splitGroup(name)
+	if !ok {
+		return nil
+	}
+	fields := lookupFold(card, name)
 	if group == "" {
 		return fields
 	}
@@ -134,50 +168,49 @@ func cardFields(card vcard.Card, name string) []*vcard.Field {
 	return out
 }
 
-// cardFieldsByName returns the fields of card named name, whatever their
-// group.
-func cardFieldsByName(card vcard.Card, name string) []*vcard.Field {
-	if len(card) == 0 {
-		return nil
-	}
-	if fields, ok := card[name]; ok {
-		return fields
-	}
-	if upper := strings.ToUpper(name); upper != name {
-		if fields, ok := card[upper]; ok {
-			return fields
-		}
-	}
-	var out []*vcard.Field
-	for k, fields := range card {
+// lookupFold returns the values of m under the keys equal to name, ignoring
+// case. It returns the values of a single key as is: callers mustn't modify
+// them.
+//
+// vcard.Decoder uppercases property and parameter names, but a vcard.Card or
+// vcard.Params built in Go may have several keys differing only by case. All
+// of them have to be looked at, so they're merged in key order, which,
+// unlike map iteration order, is always the same.
+func lookupFold[T any](m map[string][]T, name string) []T {
+	var key string
+	n := 0
+	for k := range m {
 		if strings.EqualFold(k, name) {
-			out = append(out, fields...)
+			key = k
+			n++
 		}
+	}
+	switch n {
+	case 0:
+		return nil
+	case 1:
+		return m[key]
+	}
+
+	keys := make([]string, 0, n)
+	for k := range m {
+		if strings.EqualFold(k, name) {
+			keys = append(keys, k)
+		}
+	}
+	slices.Sort(keys)
+	var out []T
+	for _, k := range keys {
+		out = append(out, m[k]...)
 	}
 	return out
 }
 
-func paramValues(params vcard.Params, name string) ([]string, bool) {
-	if len(params) == 0 {
-		return nil, false
-	}
-	if vals, ok := params[name]; ok {
-		return vals, len(vals) > 0
-	}
-	if upper := strings.ToUpper(name); upper != name {
-		if vals, ok := params[upper]; ok {
-			return vals, len(vals) > 0
-		}
-	}
-	var out []string
-	var found bool
-	for k, vals := range params {
-		if strings.EqualFold(k, name) {
-			out = append(out, vals...)
-			found = found || len(vals) > 0
-		}
-	}
-	return out, found
+// containsFold reports whether list holds s, ignoring case.
+func containsFold(list []string, s string) bool {
+	return slices.ContainsFunc(list, func(v string) bool {
+		return strings.EqualFold(v, s)
+	})
 }
 
 func matchPropFilter(prop PropFilter, ao *AddressObject) (bool, error) {
@@ -261,8 +294,8 @@ func matchFieldPropFilter(prop PropFilter, field *vcard.Field) (bool, error) {
 }
 
 func matchParamFilter(param ParamFilter, field *vcard.Field) (bool, error) {
-	values, ok := paramValues(field.Params, param.Name)
-	if !ok {
+	values := lookupFold(field.Params, param.Name)
+	if len(values) == 0 {
 		return param.IsNotDefined, nil
 	}
 	if param.IsNotDefined {
