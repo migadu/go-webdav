@@ -181,6 +181,21 @@ func TestHandler_propFindPlainError(t *testing.T) {
 			fmt.Errorf("listing: %w", webdav.NewHrefError("/dir/c.txt", webdav.NewHTTPError(http.StatusForbidden, nil))),
 			http.StatusForbidden,
 		},
+		{
+			// An href is an absolute path (RFC 4918 section 8.3): an empty
+			// one would refer to the request target
+			"HrefError with an empty path",
+			webdav.NewHrefError("", webdav.NewHTTPError(http.StatusForbidden, nil)),
+			http.StatusForbidden,
+		},
+		{
+			"HrefError with a relative path",
+			errors.Join(
+				webdav.NewHrefError("/dir/c.txt", webdav.NewHTTPError(http.StatusForbidden, nil)),
+				webdav.NewHrefError("d.txt", webdav.NewHTTPError(http.StatusForbidden, nil)),
+			),
+			http.StatusForbidden,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := &testFileSystem{children: twoFiles, readDirErr: tc.err}
@@ -245,6 +260,26 @@ func TestHandler_deleteError(t *testing.T) {
 			webdav.NewHrefError("/dir", webdav.NewHTTPError(http.StatusForbidden, nil)),
 			http.StatusForbidden,
 		},
+		{
+			// An href is an absolute path (RFC 4918 section 8.3): an empty
+			// one would refer to the request target, so does the error
+			"HrefError with an empty path, on the root",
+			"/",
+			webdav.NewHrefError("", webdav.NewHTTPError(http.StatusLocked, nil)),
+			http.StatusLocked,
+		},
+		{
+			"HrefError with an empty path",
+			"/dir/",
+			webdav.NewHrefError("", webdav.NewHTTPError(http.StatusLocked, nil)),
+			http.StatusLocked,
+		},
+		{
+			"HrefError with a relative path",
+			"/dir/",
+			webdav.NewHrefError("locked.txt", webdav.NewHTTPError(http.StatusLocked, nil)),
+			http.StatusLocked,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := &testFileSystem{removeErr: tc.err}
@@ -302,6 +337,18 @@ func TestHandler_copyMoveError(t *testing.T) {
 			"/dir/", "http://example.com/dst/",
 			webdav.NewHrefError("/dst", webdav.NewHTTPError(http.StatusForbidden, nil)),
 			http.StatusForbidden,
+		},
+		{
+			"HrefError with an empty path, from the root",
+			"/", "http://example.com/dst/",
+			webdav.NewHrefError("", webdav.NewHTTPError(http.StatusLocked, nil)),
+			http.StatusLocked,
+		},
+		{
+			"HrefError with an empty path",
+			"/dir/", "http://example.com/dst/",
+			webdav.NewHrefError("", webdav.NewHTTPError(http.StatusLocked, nil)),
+			http.StatusLocked,
 		},
 		{
 			"HrefErrors for the source and the destination",

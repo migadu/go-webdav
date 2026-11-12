@@ -162,7 +162,9 @@ type HrefError = internal.HrefError
 //
 // An error created by NewHrefError that is wrapped in another error (e.g. by
 // fmt.Errorf with a single %w verb), or joined with errors of other kinds,
-// fails the whole request, like any other error.
+// fails the whole request, like any other error. So does one whose path isn't
+// absolute, such as an empty one: an href is resolved against the request
+// URI, so it would be about the request target.
 func NewHrefError(path string, err error) error {
 	return &internal.HrefError{Href: url.URL{Path: path}, Err: err}
 }

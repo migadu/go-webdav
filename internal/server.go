@@ -338,7 +338,8 @@ func ServeMultiStatus(w http.ResponseWriter, ms *MultiStatus) error {
 // nested, the request partially succeeded: HrefErrorResponses returns one
 // error response per *HrefError, built by NewErrorResponse, and a nil error.
 // Otherwise err is a failure of the whole request, and is returned as is;
-// this includes an *HrefError wrapped in another error.
+// this includes an *HrefError wrapped in another error, and one whose path
+// isn't absolute, such as an empty one.
 func HrefErrorResponses(err error) ([]Response, error) {
 	if err == nil {
 		return nil, nil
@@ -349,6 +350,13 @@ func HrefErrorResponses(err error) ([]Response, error) {
 	}
 	resps := make([]Response, len(hrefErrs))
 	for i, hrefErr := range hrefErrs {
+		if !strings.HasPrefix(hrefErr.Href.Path, "/") {
+			// The hrefs of a multi-status response are absolute paths or
+			// URIs (RFC 4918 section 8.3). Another reference is resolved
+			// against the Request-URI, an empty one being the Request-URI
+			// itself: the error is about the request target
+			return nil, err
+		}
 		resp := NewErrorResponse(hrefErr.Href.Path, hrefErr.Err)
 		resp.Hrefs = []Href{Href(hrefErr.Href)}
 		resps[i] = *resp
@@ -392,8 +400,9 @@ func splitHrefErrors(err error) []*HrefError {
 // Failed Dependency.
 //
 // Otherwise, including when the only failed resources are the request target
-// itself or, for COPY and MOVE, the destination, given in paths, err is
-// returned to be served as the status of the whole request.
+// itself or, for COPY and MOVE, the destination, given in paths, or when an
+// *HrefError has a path that isn't absolute, err is returned to be served as
+// the status of the whole request.
 func serveMemberErrors(w http.ResponseWriter, err error, paths ...string) error {
 	resps, plainErr := HrefErrorResponses(err)
 	if plainErr != nil || onlyHrefs(resps, paths) {
