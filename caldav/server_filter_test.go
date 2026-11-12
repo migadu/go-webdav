@@ -114,3 +114,28 @@ func TestDecodeFilterValid(t *testing.T) {
 		t.Errorf("decoded range [%v, %v), want [%v, %v)", c.Start, c.End, start, start.Add(time.Second))
 	}
 }
+
+// The components and properties of RFC 4791 section 9.9 take a time-range,
+// whatever the case of their name.
+func TestDecodeFilterTimeRangeDefined(t *testing.T) {
+	const timeRange = `<C:time-range start="20060104T000000Z"/>`
+	var filters []string
+	for _, comp := range []string{"VEVENT", "VTODO", "VJOURNAL", "VFREEBUSY", "vevent"} {
+		filters = append(filters, `<C:comp-filter name="`+comp+`">`+timeRange+`</C:comp-filter>`)
+	}
+	filters = append(filters, `<C:comp-filter name="VEVENT"><C:comp-filter name="VALARM">`+timeRange+`</C:comp-filter></C:comp-filter>`)
+	for _, prop := range []string{"COMPLETED", "CREATED", "DTEND", "DTSTAMP", "DTSTART", "DUE", "LAST-MODIFIED", "dtstart"} {
+		filters = append(filters, `<C:comp-filter name="VTODO"><C:prop-filter name="`+prop+`">`+timeRange+`</C:prop-filter></C:comp-filter>`)
+	}
+	for _, f := range filters {
+		body := `<C:calendar-query xmlns:C="urn:ietf:params:xml:ns:caldav"><C:filter><C:comp-filter name="VCALENDAR">` +
+			f + `</C:comp-filter></C:filter></C:calendar-query>`
+		var cq calendarQuery
+		if err := xml.Unmarshal([]byte(body), &cq); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := decodeFilter(cq.Filter); err != nil {
+			t.Errorf("decodeFilter(%v) = %v", f, err)
+		}
+	}
+}

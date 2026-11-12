@@ -388,6 +388,11 @@ func decodePropFilter(el *propFilter) (*PropFilter, error) {
 		pf.TextMatch = tm
 	}
 	if len(el.TimeRange) > 0 {
+		// RFC 4791 section 7.8 gives a time-range in a SUMMARY prop-filter as
+		// an invalid filter: section 9.9 defines none for that property
+		if !timeRangeProps[strings.ToUpper(el.Name)] {
+			return nil, newPreconditionError(http.StatusForbidden, PreconditionValidFilter)
+		}
 		var err error
 		if pf.Start, pf.End, err = decodeTimeRange(&el.TimeRange[0]); err != nil {
 			return nil, err
@@ -412,6 +417,11 @@ func decodeCompFilter(el *compFilter) (*CompFilter, error) {
 	}
 	cf := &CompFilter{Name: el.Name, IsNotDefined: len(el.IsNotDefined) > 0}
 	if len(el.TimeRange) > 0 {
+		// RFC 4791 section 9.9 defines no time range for VCALENDAR,
+		// VTIMEZONE and the other components it doesn't list
+		if !timeRangeComps[strings.ToUpper(el.Name)] {
+			return nil, newPreconditionError(http.StatusForbidden, PreconditionValidFilter)
+		}
 		var err error
 		if cf.Start, cf.End, err = decodeTimeRange(&el.TimeRange[0]); err != nil {
 			return nil, err
