@@ -282,12 +282,12 @@ func (t *dateWithUTCTime) MarshalText() ([]byte, error) {
 
 // Request variant of https://tools.ietf.org/html/rfc4791#section-9.6
 //
-// The request holds at most one expand, limit-recurrence-set and
+// The request holds at most one comp, expand, limit-recurrence-set and
 // limit-freebusy-set element. They're slices to tell a repeated element,
 // which encoding/xml would decode onto the first one, from a single one.
 type calendarDataReq struct {
 	XMLName            xml.Name             `xml:"urn:ietf:params:xml:ns:caldav calendar-data"`
-	Comp               *comp                `xml:"comp,omitempty"`
+	Comp               []comp               `xml:"comp,omitempty"`
 	Expand             []expand             `xml:"expand,omitempty"`
 	LimitRecurrenceSet []limitRecurrenceSet `xml:"limit-recurrence-set,omitempty"`
 	LimitFreeBusySet   []limitFreeBusySet   `xml:"limit-freebusy-set,omitempty"`

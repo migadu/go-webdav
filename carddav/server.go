@@ -319,6 +319,13 @@ func decodeAddressDataReq(addressData *addressDataReq) (*AddressDataRequest, err
 	if addressData.Allprop != nil && len(addressData.Props) > 0 {
 		return nil, internal.HTTPErrorf(http.StatusBadRequest, "carddav: only one of allprop or prop can be specified in address-data")
 	}
+	for _, p := range addressData.Props {
+		// <!ATTLIST prop name CDATA #REQUIRED novalue (yes | no) "no">
+		// (RFC 6352 section 10.4.2)
+		if p.Name == "" {
+			return nil, internal.HTTPErrorf(http.StatusBadRequest, "carddav: prop without a name in address-data")
+		}
+	}
 
 	// RFC 6352 section 10.4: without prop elements, address object resources
 	// are returned in their entirety.

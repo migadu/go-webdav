@@ -113,6 +113,30 @@ func TestHandlerAddressDataProps(t *testing.T) {
 			t.Errorf("got status %v, want 400 Bad Request", res.Status)
 		}
 	})
+
+	// <!ATTLIST prop name CDATA #REQUIRED novalue (yes | no) "no"> (RFC
+	// 6352 section 10.4.2)
+	for _, p := range []string{`<C:prop/>`, `<C:prop name="" novalue="yes"/>`} {
+		t.Run("prop without a name: "+p, func(t *testing.T) {
+			res := serveTestRequest(t, h, "REPORT", syncAddressBookPath, `<?xml version="1.0" encoding="utf-8"?>
+<C:addressbook-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:prop><C:address-data><C:prop name="FN"/>`+p+`</C:address-data></D:prop>
+  <D:href>`+objPath+`</D:href>
+</C:addressbook-multiget>`)
+			res.Body.Close()
+			if res.StatusCode != http.StatusBadRequest {
+				t.Errorf("got status %v, want 400 Bad Request", res.Status)
+			}
+		})
+	}
+}
+
+// The client never sends a prop element without a name, which the server
+// would refuse.
+func TestEncodeAddressDataEmptyName(t *testing.T) {
+	if _, err := encodeAddressPropReq(&AddressDataRequest{Props: []string{"FN", ""}}); err == nil {
+		t.Errorf("encodeAddressPropReq() with an empty name succeeded")
+	}
 }
 
 func TestDecodeAddressDataNoValue(t *testing.T) {

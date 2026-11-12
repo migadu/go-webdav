@@ -370,6 +370,11 @@ func encodeAddressPropReq(req *AddressDataRequest) (*internal.Prop, error) {
 		addrDataReq.Allprop = &struct{}{}
 	} else {
 		for _, name := range req.Props {
+			if name == "" {
+				// The name attribute is required (RFC 6352 section
+				// 10.4.2)
+				return nil, fmt.Errorf("carddav: missing property name in address data request")
+			}
 			addrDataReq.Props = append(addrDataReq.Props, prop{
 				Name:    name,
 				NoValue: noValue(containsFold(req.NoValue, name)),

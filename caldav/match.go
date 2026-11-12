@@ -68,11 +68,7 @@ func filterCalendar(req *CalendarCompRequest, cal *ical.Calendar) *ical.Calendar
 // that's all of it, otherwise a new component. The caller checks that req is
 // for comp.
 func filterComponent(req *CalendarCompRequest, comp *ical.Component) *ical.Component {
-	// An empty comp element asks for the whole component, as for VTIMEZONE
-	// in the example of RFC 4791 section 7.8.1
-	noProps := !req.AllProps && len(req.Props) == 0
-	noComps := !req.AllComps && len(req.Comps) == 0
-	if (noProps && noComps) || (req.AllProps && req.AllComps) {
+	if req.isWhole() {
 		return comp
 	}
 
@@ -98,15 +94,94 @@ func filterComponent(req *CalendarCompRequest, comp *ical.Component) *ical.Compo
 		out.Children = slices.Clone(comp.Children)
 	} else {
 		for _, child := range comp.Children {
-			i := slices.IndexFunc(req.Comps, func(c CalendarCompRequest) bool {
-				return strings.EqualFold(c.Name, child.Name)
-			})
-			if i >= 0 {
-				out.Children = append(out.Children, filterComponent(&req.Comps[i], child))
+			// The requests for the type of child, merged if there are
+			// several, which the Handler already did for those it decoded
+			var childReq *CalendarCompRequest
+			for i := range req.Comps {
+				if !strings.EqualFold(req.Comps[i].Name, child.Name) {
+					continue
+				}
+				if childReq == nil {
+					childReq = &req.Comps[i]
+				} else {
+					merged := mergeCompRequest(childReq, &req.Comps[i])
+					childReq = &merged
+				}
+			}
+			if childReq != nil {
+				out.Children = append(out.Children, filterComponent(childReq, child))
 			}
 		}
 	}
 	return out
+}
+
+// isWhole reports whether req asks for the whole component: it has none of
+// AllProps, Props, AllComps and Comps, as an empty comp element, like the
+// one for VTIMEZONE in the example of RFC 4791 section 7.8.1, or both
+// AllProps and AllComps.
+func (req *CalendarCompRequest) isWhole() bool {
+	noProps := !req.AllProps && len(req.Props) == 0
+	noComps := !req.AllComps && len(req.Comps) == 0
+	return (noProps && noComps) || (req.AllProps && req.AllComps)
+}
+
+// mergeCompRequests returns reqs with the requests for the same component
+// type, compared case-insensitively, merged into the first one by
+// mergeCompRequest. <!ELEMENT comp ((allprop | prop*), (allcomp | comp*))>
+// (RFC 4791 section 9.6.1) allows several comp elements with the same name,
+// each asking for some of the parts of the components of that type.
+func mergeCompRequests(reqs []CalendarCompRequest) []CalendarCompRequest {
+	var out []CalendarCompRequest
+	for i := range reqs {
+		j := slices.IndexFunc(out, func(r CalendarCompRequest) bool {
+			return strings.EqualFold(r.Name, reqs[i].Name)
+		})
+		if j < 0 {
+			out = append(out, reqs[i])
+		} else {
+			out[j] = mergeCompRequest(&out[j], &reqs[i])
+		}
+	}
+	return out
+}
+
+// mergeCompRequest returns the request for all that a and b, two requests
+// for the same component type, ask for: a component is returned with the
+// properties and components either of them asks for. A property asked for
+// with its value by either of them keeps its value.
+func mergeCompRequest(a, b *CalendarCompRequest) CalendarCompRequest {
+	merged := CalendarCompRequest{Name: a.Name}
+	if a.isWhole() || b.isWhole() {
+		merged.AllProps, merged.AllComps = true, true
+		return merged
+	}
+
+	if a.AllProps || b.AllProps {
+		merged.AllProps = true
+	} else {
+		merged.Props = slices.Clone(a.Props)
+		for _, name := range b.Props {
+			if !containsFold(merged.Props, name) {
+				merged.Props = append(merged.Props, name)
+			}
+		}
+		withValue := func(req *CalendarCompRequest, name string) bool {
+			return containsFold(req.Props, name) && !containsFold(req.NoValue, name)
+		}
+		for _, name := range slices.Concat(a.NoValue, b.NoValue) {
+			if !withValue(a, name) && !withValue(b, name) && !containsFold(merged.NoValue, name) {
+				merged.NoValue = append(merged.NoValue, name)
+			}
+		}
+	}
+
+	if a.AllComps || b.AllComps {
+		merged.AllComps = true
+	} else {
+		merged.Comps = mergeCompRequests(slices.Concat(a.Comps, b.Comps))
+	}
+	return merged
 }
 
 // containsFold reports whether list holds s, ignoring case.
