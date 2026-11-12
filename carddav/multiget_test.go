@@ -77,3 +77,37 @@ func TestMultiGetBackend(t *testing.T) {
 		t.Errorf("response for alice = %+v, want her properties", resp)
 	}
 }
+
+// With AddressObjectsBackend, the hrefs of an addressbook-multiget outside
+// Handler.Prefix aren't passed to the backend either, including one sharing
+// the prefix without a slash boundary. RFC 6352 section 8.7 still asks for a
+// response for each href, with an error status for those that can't be
+// accessed: they get 404 Not Found.
+func TestMultiGetBackendOutOfPrefix(t *testing.T) {
+	const alice = "/dav" + multiGetAlicePath
+	backend := &multiGetBackend{}
+	handler := Handler{Backend: backend, Prefix: "/dav"}
+
+	body := `<?xml version="1.0" encoding="UTF-8"?>
+<C:addressbook-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:prop><D:getetag/></D:prop>
+  <D:href>/other/alice.vcf</D:href>
+  <D:href>/dav2/test/contacts/private/alice.vcf</D:href>
+  <D:href>` + alice + `</D:href>
+</C:addressbook-multiget>`
+	req := httptest.NewRequest("REPORT", "/dav/test/contacts/private/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/xml")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// multiGetBackend only has an object at multiGetAlicePath, which has no
+	// prefix: all three are missing
+	checkStatusCodes(t, multiStatusCodes(t, w), map[string]int{
+		"/other/alice.vcf":                      http.StatusNotFound,
+		"/dav2/test/contacts/private/alice.vcf": http.StatusNotFound,
+		alice:                                   http.StatusNotFound,
+	})
+	if want := [][]string{{alice}}; !reflect.DeepEqual(backend.calls, want) {
+		t.Errorf("GetAddressObjects calls = %v, want %v", backend.calls, want)
+	}
+}
