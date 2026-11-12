@@ -133,8 +133,21 @@ type Response struct {
 	base   *url.URL
 }
 
+// newResponseHref returns the href of a response for p, the path of a resource
+// or, for a URI naming no resource of the server, that URI (see
+// MultigetPaths). As a path, such a URI would be written as a relative
+// reference ("./urn:uuid:1234"), which RFC 4918 section 8.3 doesn't allow.
+func newResponseHref(p string) Href {
+	if !strings.HasPrefix(p, "/") {
+		if u, err := url.Parse(p); err == nil && u.Scheme != "" {
+			return Href(*u)
+		}
+	}
+	return Href{Path: p}
+}
+
 func NewOKResponse(path string) *Response {
-	href := Href{Path: path}
+	href := newResponseHref(path)
 	return &Response{
 		Hrefs:  []Href{href},
 		Status: &Status{Code: http.StatusOK},
@@ -161,7 +174,7 @@ func NewErrorResponse(path string, err error) *Response {
 		desc = err.Error()
 	}
 
-	href := Href{Path: path}
+	href := newResponseHref(path)
 	return &Response{
 		Hrefs:               []Href{href},
 		Status:              &Status{Code: code},
