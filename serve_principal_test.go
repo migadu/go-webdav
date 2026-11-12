@@ -227,6 +227,63 @@ func TestServePrincipalUnauthenticated(t *testing.T) {
 	}
 }
 
+// RFC 3744 section 4.2: DAV:principal-URL identifies the principal served,
+// which owns itself (section 5.1). A principal other than the current
+// user's, such as one whose DAV:displayname a client looks up (section 5.8),
+// reports its own path, and DAV:current-user-principal still names the
+// current user. The current user's principal requested without its trailing
+// slash reports CurrentUserPrincipalPath, which RFC 5397 section 3 requires
+// to be one of its URLs.
+func TestServePrincipalOtherPrincipal(t *testing.T) {
+	const alice = "/principals/alice/"
+	opts := &webdav.ServePrincipalOptions{CurrentUserPrincipalPath: alice}
+	for _, tc := range []struct {
+		name, target, principal, displayName string
+	}{
+		{"other principal", "/principals/bob/", "/principals/bob/", "bob"},
+		{"current user", alice, alice, "alice"},
+		{"current user without trailing slash", "/principals/alice", alice, "alice"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := servePrincipalAt(opts, "PROPFIND", tc.target, propFindPrincipalIdentity)
+			resps := decodePrincipalResponses(t, w)
+			if len(resps) != 1 {
+				t.Fatalf("got %d responses, want 1:\n%s", len(resps), w.Body)
+			}
+			resp := &resps[0]
+			body := w.Body.String()
+			if p := resp.Hrefs[0].Path; p != tc.target {
+				t.Errorf("response is for %v, want %v", p, tc.target)
+			}
+
+			var cup testCurrentUserPrincipal
+			if err := resp.DecodeProp(&cup); err != nil {
+				t.Errorf("current-user-principal: %v", err)
+			} else if cup.Href == nil || *cup.Href != alice {
+				t.Errorf("current-user-principal isn't %v:\n%s", alice, body)
+			}
+			var principalURL testPrincipalURL
+			if err := resp.DecodeProp(&principalURL); err != nil {
+				t.Errorf("principal-URL: %v", err)
+			} else if principalURL.Href == nil || *principalURL.Href != tc.principal {
+				t.Errorf("principal-URL isn't %v:\n%s", tc.principal, body)
+			}
+			var owner testOwner
+			if err := resp.DecodeProp(&owner); err != nil {
+				t.Errorf("owner: %v", err)
+			} else if owner.Href == nil || *owner.Href != tc.principal {
+				t.Errorf("owner isn't %v:\n%s", tc.principal, body)
+			}
+			var dn testDisplayName
+			if err := resp.DecodeProp(&dn); err != nil {
+				t.Errorf("displayname: %v", err)
+			} else if dn.Name != tc.displayName {
+				t.Errorf("displayname = %q, want %q", dn.Name, tc.displayName)
+			}
+		})
+	}
+}
+
 // A client asking ServePrincipal for the current user's principal without
 // being authenticated is told so, rather than given an empty path.
 func TestServePrincipalUnauthenticatedClient(t *testing.T) {

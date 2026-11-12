@@ -616,10 +616,10 @@ type Capability string
 // ServePrincipalOptions holds options for ServePrincipal.
 type ServePrincipalOptions struct {
 	// CurrentUserPrincipalPath is the path of the principal of the current
-	// user, reported in DAV:current-user-principal. If empty, the user isn't
-	// authenticated: DAV:current-user-principal is then DAV:unauthenticated
-	// (RFC 5397 section 3), and the principal served is the one at the
-	// request URL.
+	// user, reported in DAV:current-user-principal. It needn't be the
+	// principal served, which is the one at the request URL. If empty, the
+	// user isn't authenticated: DAV:current-user-principal is then
+	// DAV:unauthenticated (RFC 5397 section 3).
 	CurrentUserPrincipalPath string
 	HomeSets                 []BackendSuppliedHomeSet
 	Capabilities             []Capability
@@ -646,7 +646,10 @@ type ServePrincipalOptions struct {
 	Push PushBackend
 }
 
-// ServePrincipal replies to requests for a principal URL.
+// ServePrincipal replies to requests for a principal URL. The principal
+// served is the one at the request URL, which may be a principal other than
+// the current user's. Its DAV:principal-URL is the path of the request URL,
+// or CurrentUserPrincipalPath if they only differ by a trailing slash.
 //
 // Along with the principal properties of RFC 3744 section 4, the principal
 // reports the access control properties DAV:owner, itself,
@@ -774,18 +777,20 @@ func servePrincipalPropfind(w http.ResponseWriter, r *http.Request, options *Ser
 		}
 	}
 
-	// Without a current user, the principal served is the one at the
-	// request URL, and DAV:current-user-principal says the user isn't
-	// authenticated (RFC 5397 section 3)
-	principalPath := options.CurrentUserPrincipalPath
-	currentUserPrincipal := internal.NewCurrentUserPrincipal(principalPath)
-	if principalPath == "" {
-		principalPath = r.URL.Path
+	// The principal served is the one at the request URL, which needn't be
+	// the current user's: its DAV:principal-URL and DAV:owner are its own
+	// path (RFC 3744 sections 4.2 and 5.1). For the current user's
+	// principal, requested with or without its trailing slash, that's
+	// CurrentUserPrincipalPath: DAV:current-user-principal must be one of
+	// its URLs (RFC 5397 section 3).
+	principalPath := r.URL.Path
+	if internal.SamePath(principalPath, options.CurrentUserPrincipalPath) {
+		principalPath = options.CurrentUserPrincipalPath
 	}
 
 	props := map[xml.Name]internal.PropFindFunc{
 		internal.ResourceTypeName:         internal.PropFindValue(internal.NewResourceType(internal.PrincipalName)),
-		internal.CurrentUserPrincipalName: internal.PropFindValue(currentUserPrincipal),
+		internal.CurrentUserPrincipalName: internal.PropFindValue(internal.NewCurrentUserPrincipal(options.CurrentUserPrincipalPath)),
 	}
 
 	internal.AddPrincipalProps(props, principalPath, options.DisplayName)

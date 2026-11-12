@@ -162,18 +162,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	b := h.newBackend()
 	if internal.SamePath(r.URL.Path, "/.well-known/carddav") {
 		principalPath, err := h.Backend.CurrentUserPrincipal(r.Context())
 		if err != nil {
-			http.Error(w, "carddav: failed to determine current user principal", http.StatusInternalServerError)
+			// An HTTPError keeps its status: the server may require
+			// authentication here (RFC 6764 section 5)
+			internal.ServeError(w, fmt.Errorf("carddav: failed to determine current user principal: %w", err))
 			return
+		}
+		if principalPath == "" {
+			// Without a current user, redirect to the context path of the
+			// service, the root of the handler (RFC 6764 section 5), rather
+			// than resolve an empty path to "/.well-known/"
+			principalPath = b.Prefix + "/"
 		}
 
 		http.Redirect(w, r, principalPath, http.StatusPermanentRedirect)
 		return
 	}
 
-	b := h.newBackend()
 	if !b.inPrefix(r.URL.Path) {
 		if r.Method == http.MethodDelete {
 			if pb, ok := h.Backend.(PushBackend); ok {
