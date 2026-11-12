@@ -110,3 +110,40 @@ func TestMultiGetBackend(t *testing.T) {
 		}
 	}
 }
+
+// With CalendarObjectsBackend, the hrefs of a calendar-multiget outside
+// Handler.Prefix aren't passed to the backend either, including one sharing
+// the prefix without a slash boundary. RFC 4791 section 7.9 still asks for a
+// response for each href, with an error status for those that can't be
+// accessed: they get 404 Not Found.
+func TestMultiGetBackendOutOfPrefix(t *testing.T) {
+	const calPath = "/dav/user/calendars/work/"
+	backend := &multiGetBackend{testBackend: testBackend{
+		calendars: []Calendar{{Path: calPath}},
+		objectMap: map[string][]CalendarObject{calPath: {
+			newMultiGetTestObject(calPath+"event.ics", "uid-1"),
+		}},
+	}}
+	handler := Handler{Backend: backend, Prefix: "/dav"}
+
+	body := `<?xml version="1.0" encoding="UTF-8"?>
+<C:calendar-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop><D:getetag/></D:prop>
+  <D:href>/other/event.ics</D:href>
+  <D:href>/dav2/user/calendars/work/event.ics</D:href>
+  <D:href>` + calPath + `event.ics</D:href>
+</C:calendar-multiget>`
+	req := httptest.NewRequest("REPORT", calPath, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/xml")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	checkStatusCodes(t, multiStatusCodes(t, w), map[string]int{
+		"/other/event.ics":                    http.StatusNotFound,
+		"/dav2/user/calendars/work/event.ics": http.StatusNotFound,
+		calPath + "event.ics":                 http.StatusOK,
+	})
+	if want := [][]string{{calPath + "event.ics"}}; !reflect.DeepEqual(backend.calls, want) {
+		t.Errorf("GetCalendarObjects calls = %v, want %v", backend.calls, want)
+	}
+}
