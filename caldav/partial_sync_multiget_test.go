@@ -175,6 +175,77 @@ func TestSyncCollectionHrefErrors(t *testing.T) {
 			cal + "denied.ics":  http.StatusForbidden,
 		})
 	})
+
+	// With an empty DAV:prop, the propstat of a changed member which failed
+	// names no property: Response.PropStatErr still reports its error
+	t.Run("empty prop", func(t *testing.T) {
+		srv := httptest.NewServer(&Handler{Backend: b})
+		defer srv.Close()
+		c, err := internal.NewClient(srv.Client(), srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var errs []error
+		_, err = c.SyncCollection(context.Background(), cal, "urn:sync:1", internal.DepthOne, nil, &internal.Prop{}, func(resp *internal.Response) error {
+			_, err := resp.Path()
+			if err == nil {
+				err = resp.PropStatErr()
+			}
+			errs = append(errs, err)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkStatusCodes(t, hrefErrorCodes(errors.Join(errs...)), map[string]int{
+			cal + "gone.ics":     http.StatusNotFound,
+			cal + "corrupt.ics":  http.StatusInternalServerError,
+			cal + "denied.ics":   http.StatusForbidden,
+			cal + "vanished.ics": http.StatusNotFound,
+		})
+	})
+}
+
+// A sync-collection REPORT lists the members of the calendar (RFC 6578
+// section 3.2), and the only response for the request-URI is the 507
+// Insufficient Storage of a truncated result (section 3.6). An HrefError
+// about the calendar itself, such as a 404 Not Found for a calendar which
+// doesn't exist, fails the whole request instead, with its status and
+// description.
+func TestSyncCollectionCollectionHrefError(t *testing.T) {
+	const cal = "/user/calendars/a/"
+	ok := newSyncTestObject("ok", "OK", "e1")
+	ok.Path = cal + "ok.ics"
+	for _, tc := range []struct {
+		name      string
+		href      string
+		code      int
+		truncated bool
+	}{
+		{"error", cal, http.StatusInternalServerError, false},
+		{"error in a truncated result", cal, http.StatusInternalServerError, true},
+		{"error without the trailing slash", strings.TrimSuffix(cal, "/"), http.StatusForbidden, true},
+		{"not found", cal, http.StatusNotFound, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &syncMultigetPartialBackend{
+				testBackend: testBackend{calendars: []Calendar{{Path: cal}}},
+				syncRes: &SyncResponse{
+					SyncToken: "urn:sync:2",
+					Updated:   []CalendarObject{ok},
+					Truncated: tc.truncated,
+				},
+				syncErr: errors.Join(
+					webdav.NewHrefError(cal+"corrupt.ics", webdav.NewHTTPError(http.StatusInternalServerError, nil)),
+					webdav.NewHrefError(tc.href, webdav.NewHTTPError(tc.code, errors.New("calendar unavailable"))),
+				),
+			}
+			w := serveCalDAV(b, "REPORT", cal, "", syncCollectionBody("urn:sync:1", "1", 0))
+			if w.Code != tc.code || !strings.Contains(w.Body.String(), "calendar unavailable") {
+				t.Errorf("got status %v and body:\n%s\nwant status %v with the error description", w.Code, w.Body.String(), tc.code)
+			}
+		})
+	}
 }
 
 // decodeSyncResponses decodes the multistatus body of a sync-collection

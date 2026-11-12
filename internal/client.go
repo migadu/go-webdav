@@ -921,15 +921,7 @@ func (pe *propErrors) addPropStats(propStats []PropStat) {
 		if propstat.Status.Code/100 == 2 {
 			continue
 		}
-		var errs []error
-		for j := range propstat.Prop.Raw {
-			errs = append(errs, PropStatError(&propstat.Prop.Raw[j], propstat))
-		}
-		if len(errs) == 0 {
-			// The request failed all the same, if not for any property
-			// the server names
-			errs = append(errs, fmt.Errorf("webdav: propstat without properties: %w", propStatHTTPError(propstat)))
-		}
+		errs := propStatErrors(propstat)
 		if propstat.Status.Code == http.StatusFailedDependency {
 			pe.failedDeps = append(pe.failedDeps, errs...)
 		} else {
@@ -940,6 +932,22 @@ func (pe *propErrors) addPropStats(propStats []PropStat) {
 
 func (pe *propErrors) err() error {
 	return errors.Join(append(pe.errs, pe.failedDeps...)...)
+}
+
+// propStatErrors returns the errors of the properties of propstat, a propstat
+// element with a status outside 2xx, as built by PropStatError. If propstat
+// names no property, its status is an error of its own.
+func propStatErrors(propstat *PropStat) []error {
+	var errs []error
+	for j := range propstat.Prop.Raw {
+		errs = append(errs, PropStatError(&propstat.Prop.Raw[j], propstat))
+	}
+	if len(errs) == 0 {
+		// The request failed all the same, if not for any property the
+		// server names
+		errs = append(errs, fmt.Errorf("webdav: propstat without properties: %w", propStatHTTPError(propstat)))
+	}
+	return errs
 }
 
 // PropStatError returns the error of raw, a property of propstat, a propstat
@@ -965,6 +973,8 @@ func propStatHTTPError(propstat *PropStat) *HTTPError {
 // 2xx, other than 404 Not Found, which only means that the resource doesn't
 // have the property. Like Err, it returns an HrefError for each href of resp,
 // wrapping the errors of these properties as built by PropStatError, or nil.
+// A propstat element naming no property, as a server may send for a request
+// with an empty prop element, is an error of its own.
 func (resp *Response) PropStatErr() error {
 	var propErrs []error
 	for i := range resp.PropStats {
@@ -972,9 +982,7 @@ func (resp *Response) PropStatErr() error {
 		if code := propstat.Status.Code; code/100 == 2 || code == http.StatusNotFound {
 			continue
 		}
-		for j := range propstat.Prop.Raw {
-			propErrs = append(propErrs, PropStatError(&propstat.Prop.Raw[j], propstat))
-		}
+		propErrs = append(propErrs, propStatErrors(propstat)...)
 	}
 	if len(propErrs) == 0 {
 		return nil

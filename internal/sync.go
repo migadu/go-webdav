@@ -84,10 +84,10 @@ func CheckSyncCollection(q *SyncCollectionQuery) (syncToken string, err error) {
 }
 
 // SyncErrorResponses returns the responses for the members a backend failed
-// to report in a sync-collection REPORT, given by errResps as
-// HrefErrorResponses returns them. updated and deleted are the paths of the
-// members the backend did report, as changed and as removed, and prop holds
-// the requested properties.
+// to report in a sync-collection REPORT on the collection at collectionPath,
+// given by errResps as HrefErrorResponses returns them. updated and deleted
+// are the paths of the members the backend did report, as changed and as
+// removed, and prop holds the requested properties.
 //
 // RFC 6578 section 3.2 lists each member URL once, and only lets the
 // response for a removed member carry a DAV:status. So an error about a
@@ -97,7 +97,13 @@ func CheckSyncCollection(q *SyncCollectionQuery) (syncToken string, err error) {
 // with the status, DAV:error and description of the error. If prop is empty,
 // so is the prop element of that propstat, which RFC 4918 section 14.22
 // allows.
-func SyncErrorResponses(errResps []Response, prop *Prop, updated, deleted []string) []Response {
+//
+// An error about the collection itself fails the whole request: it is
+// returned, with its status, DAV:error and description. The collection isn't
+// one of its members, and the only response for the request-URI is the 507
+// Insufficient Storage of a truncated result (section 3.6), which doesn't
+// tell the client about an error.
+func SyncErrorResponses(collectionPath string, errResps []Response, prop *Prop, updated, deleted []string) ([]Response, error) {
 	var names []RawXMLValue
 	for _, raw := range prop.Raw {
 		if name, ok := raw.XMLName(); ok {
@@ -117,6 +123,12 @@ func SyncErrorResponses(errResps []Response, prop *Prop, updated, deleted []stri
 
 	var resps []Response
 	for _, resp := range errResps {
+		if SamePath(resp.Hrefs[0].Path, collectionPath) {
+			return nil, &HTTPError{
+				Code: resp.Status.Code,
+				Err:  describedError(resp.Error, resp.ResponseDescription),
+			}
+		}
 		key := strings.TrimSuffix(resp.Hrefs[0].Path, "/")
 		if reported[key] {
 			continue
@@ -133,7 +145,7 @@ func SyncErrorResponses(errResps []Response, prop *Prop, updated, deleted []stri
 		}
 		resps = append(resps, resp)
 	}
-	return resps
+	return resps, nil
 }
 
 // SyncChangedResponse returns resp, the response built by NewPropFindResponse
