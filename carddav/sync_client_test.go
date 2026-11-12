@@ -250,4 +250,53 @@ END:VCARD&#13;
 			"/ab/denied.vcf":  http.StatusForbidden,
 		})
 	})
+
+	// A request with an empty DAV:prop gets failed propstats without any
+	// property, as the go-webdav server sends them: they're errors all the
+	// same, unlike a 200 OK one
+	t.Run("changed member with a failed propstat without properties is an HrefError", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.WriteHeader(http.StatusMultiStatus)
+			w.Write([]byte(`<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/ab/ok.vcf</D:href>
+    <D:propstat>
+      <D:prop/>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/ab/corrupt.vcf</D:href>
+    <D:propstat>
+      <D:prop/>
+      <D:status>HTTP/1.1 500 Internal Server Error</D:status>
+      <D:responsedescription>corrupt vcard</D:responsedescription>
+    </D:propstat>
+  </D:response>
+  <D:sync-token>urn:sync:7</D:sync-token>
+</D:multistatus>`))
+		}))
+		defer srv.Close()
+
+		c, err := NewClient(srv.Client(), srv.URL)
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+
+		res, err := c.SyncCollection(context.Background(), "/ab/", &SyncQuery{})
+		if res == nil {
+			t.Fatalf("SyncCollection() = %v, want a partial result", err)
+		}
+		if len(res.Updated) != 1 || res.Updated[0].Path != "/ab/ok.vcf" {
+			t.Errorf("got Updated %+v, want only /ab/ok.vcf", res.Updated)
+		}
+		checkStatusCodes(t, hrefErrorCodes(err), map[string]int{
+			"/ab/corrupt.vcf": http.StatusInternalServerError,
+		})
+		if err != nil && !strings.Contains(err.Error(), "corrupt vcard") {
+			t.Errorf("SyncCollection() = %v, want the description of the propstat", err)
+		}
+	})
 }

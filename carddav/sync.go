@@ -44,8 +44,8 @@ type SyncBackend interface {
 	// member is listed with each requested property under the status of
 	// its error, except for 404 Not Found, which reports it as removed.
 	// Errors about members already in Updated or Deleted are ignored. Any
-	// other error, or an error without a SyncResponse, fails the whole
-	// request.
+	// other error, including an HrefError about the address book itself, or
+	// an error without a SyncResponse, fails the whole request.
 	//
 	// Address books have no sub-collections, so the DAV:sync-level values
 	// "1" and "infinite" are handled alike.
@@ -91,7 +91,10 @@ func (h *Handler) handleSyncCollection(r *http.Request, w http.ResponseWriter, s
 	for i := range res.Updated {
 		updated[i] = res.Updated[i].Path
 	}
-	errResps = internal.SyncErrorResponses(errResps, sc.Prop, updated, res.Deleted)
+	errResps, err = internal.SyncErrorResponses(r.URL.Path, errResps, sc.Prop, updated, res.Deleted)
+	if err != nil {
+		return err
+	}
 
 	propfind := internal.PropFind{Prop: sc.Prop}
 	return internal.ServeSyncCollection(w, r, res.SyncToken, res.Deleted, res.Truncated, func(mw *internal.MultiStatusWriter) error {

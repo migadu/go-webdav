@@ -200,6 +200,47 @@ func TestSyncCollectionHrefErrors(t *testing.T) {
 	})
 }
 
+// A sync-collection REPORT lists the members of the address book (RFC 6578
+// section 3.2), and the only response for the request-URI is the 507
+// Insufficient Storage of a truncated result (section 3.6). An HrefError
+// about the address book itself, such as a 404 Not Found for an address book
+// which doesn't exist, fails the whole request instead, with its status and
+// description.
+func TestSyncCollectionCollectionHrefError(t *testing.T) {
+	const ab = "/test/contacts/private/"
+	ok := newSyncTestObject("ok", "OK", "e1")
+	ok.Path = ab + "ok.vcf"
+	for _, tc := range []struct {
+		name      string
+		href      string
+		code      int
+		truncated bool
+	}{
+		{"error", ab, http.StatusInternalServerError, false},
+		{"error in a truncated result", ab, http.StatusInternalServerError, true},
+		{"error without the trailing slash", strings.TrimSuffix(ab, "/"), http.StatusForbidden, true},
+		{"not found", ab, http.StatusNotFound, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &syncMultigetPartialBackend{
+				syncRes: &SyncResponse{
+					SyncToken: "urn:sync:2",
+					Updated:   []AddressObject{ok},
+					Truncated: tc.truncated,
+				},
+				syncErr: errors.Join(
+					webdav.NewHrefError(ab+"corrupt.vcf", webdav.NewHTTPError(http.StatusInternalServerError, nil)),
+					webdav.NewHrefError(tc.href, webdav.NewHTTPError(tc.code, errors.New("address book unavailable"))),
+				),
+			}
+			w := serveCardDAV(b, "REPORT", ab, "", syncCollectionBody("urn:sync:1", "1", 0))
+			if w.Code != tc.code || !strings.Contains(w.Body.String(), "address book unavailable") {
+				t.Errorf("got status %v and body:\n%s\nwant status %v with the error description", w.Code, w.Body.String(), tc.code)
+			}
+		})
+	}
+}
+
 // decodeSyncResponses decodes the multistatus body of a sync-collection
 // REPORT, checks that each response has a shape RFC 6578 section 3.2 allows,
 // and maps each href to its response.
