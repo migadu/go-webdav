@@ -699,6 +699,11 @@ func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multige
 		dataReq = *decoded
 	}
 
+	paths, err := internal.MultigetPaths(r, multiget.Hrefs)
+	if err != nil {
+		return err
+	}
+
 	b := h.newBackend()
 	// The hrefs must name members of the resource at the Request-URI
 	// (RFC 4791 section 7.9, RFC 6352 section 8.7): others are answered
@@ -710,15 +715,15 @@ func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multige
 	var objects map[string]*CalendarObject
 	var objErrResps map[string]internal.Response
 	if mb, ok := h.Backend.(CalendarObjectsBackend); ok {
-		paths := make([]string, 0, len(multiget.Hrefs))
-		for _, href := range multiget.Hrefs {
-			if inScope(href.Path) {
-				paths = append(paths, href.Path)
+		var inScopePaths []string
+		for _, p := range paths {
+			if inScope(p) {
+				inScopePaths = append(inScopePaths, p)
 			}
 		}
-		objects = make(map[string]*CalendarObject, len(paths))
-		if len(paths) > 0 {
-			l, err := mb.GetCalendarObjects(ctx, paths, &dataReq)
+		objects = make(map[string]*CalendarObject, len(inScopePaths))
+		if len(inScopePaths) > 0 {
+			l, err := mb.GetCalendarObjects(ctx, inScopePaths, &dataReq)
 			errResps, err := internal.HrefErrorResponses(err)
 			if err != nil {
 				return err
@@ -736,9 +741,9 @@ func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multige
 	}
 
 	return internal.StreamMultiStatus(w, r, func(mw *internal.MultiStatusWriter) error {
-		for _, href := range multiget.Hrefs {
-			if !inScope(href.Path) {
-				resp := internal.NewErrorResponse(href.Path, internal.HTTPErrorf(http.StatusNotFound, "caldav: calendar object not found"))
+		for _, p := range paths {
+			if !inScope(p) {
+				resp := internal.NewErrorResponse(p, internal.HTTPErrorf(http.StatusNotFound, "caldav: calendar object not found"))
 				if err := mw.WriteResponse(resp); err != nil {
 					return err
 				}
@@ -748,22 +753,22 @@ func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multige
 			var co *CalendarObject
 			var err error
 			if objects != nil {
-				if errResp, ok := objErrResps[href.Path]; ok {
+				if errResp, ok := objErrResps[p]; ok {
 					if err := mw.WriteResponse(&errResp); err != nil {
 						return err
 					}
 					continue
 				}
-				if co = objects[href.Path]; co == nil {
+				if co = objects[p]; co == nil {
 					err = internal.HTTPErrorf(http.StatusNotFound, "caldav: calendar object not found")
 				}
 			} else {
-				co, err = h.Backend.GetCalendarObject(ctx, href.Path, &dataReq)
+				co, err = h.Backend.GetCalendarObject(ctx, p, &dataReq)
 			}
 
 			var resp *internal.Response
 			if err != nil {
-				resp = internal.NewErrorResponse(href.Path, err)
+				resp = internal.NewErrorResponse(p, err)
 			} else if resp, err = b.propFindCalendarObject(ctx, &propfind, &dataReq, co); err != nil {
 				return err
 			}

@@ -40,7 +40,8 @@ func TestMultiGetOutOfScope(t *testing.T) {
   <D:prop><D:getetag/></D:prop>
   <D:href>` + private + `alice.vcf</D:href>
   <D:href>` + shared + `alice.vcf</D:href>
-  <D:href>` + private + `../shared/alice.vcf</D:href>
+  <D:href>` + private + `../shared/bob.vcf</D:href>
+  <D:href>carol.vcf</D:href>
 </C:addressbook-multiget>`
 
 	t.Run("GetAddressObject", func(t *testing.T) {
@@ -51,12 +52,15 @@ func TestMultiGetOutOfScope(t *testing.T) {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
 
+		// Responses are for the hrefs resolved against the Request-URI,
+		// with dot-segments removed (RFC 4918 section 8.3)
 		checkStatusCodes(t, multiStatusCodes(t, w), map[string]int{
-			private + "alice.vcf":           http.StatusOK,
-			shared + "alice.vcf":            http.StatusNotFound,
-			private + "../shared/alice.vcf": http.StatusNotFound,
+			private + "alice.vcf": http.StatusOK,
+			shared + "alice.vcf":  http.StatusNotFound,
+			shared + "bob.vcf":    http.StatusNotFound,
+			private + "carol.vcf": http.StatusOK,
 		})
-		if want := []string{private + "alice.vcf"}; !reflect.DeepEqual(backend.paths, want) {
+		if want := []string{private + "alice.vcf", private + "carol.vcf"}; !reflect.DeepEqual(backend.paths, want) {
 			t.Errorf("GetAddressObject paths = %v, want %v", backend.paths, want)
 		}
 	})
@@ -97,4 +101,21 @@ func TestMultiGetCollectionWithoutSlash(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	checkStatusCodes(t, multiStatusCodes(t, w), map[string]int{"/test/contacts/private/alice.vcf": http.StatusOK})
+}
+
+// RFC 6352 section 10.7: <!ELEMENT addressbook-multiget ((DAV:allprop |
+// DAV:propname | DAV:prop)?, DAV:href+)>
+func TestMultiGetWithoutHref(t *testing.T) {
+	handler := Handler{Backend: &scopeBackend{}}
+	body := `<?xml version="1.0" encoding="UTF-8"?>
+<C:addressbook-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:prop><D:getetag/></D:prop>
+</C:addressbook-multiget>`
+	req := httptest.NewRequest("REPORT", "/test/contacts/private/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/xml")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %v, want 400; body:\n%s", w.Code, w.Body)
+	}
 }

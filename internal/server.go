@@ -1060,3 +1060,25 @@ func (h *Handler) handleUnlock(w http.ResponseWriter, r *http.Request, b LockBac
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
+
+// MultigetPaths returns the paths of the hrefs of a multiget REPORT, such as
+// calendar-multiget or addressbook-multiget, in the form backends expect: a
+// relative reference is resolved against the Request-URI (RFC 4918 section
+// 8.3), and dot-segments are removed (RFC 3986 section 5.2.4). As for the
+// Destination header, the scheme and host of an absolute URL are ignored:
+// servers behind a reverse proxy may not know theirs.
+//
+// The report requires at least one href (RFC 4791 section 9.10, RFC 6352
+// section 10.7), so without any MultigetPaths fails with 400 Bad Request.
+func MultigetPaths(r *http.Request, hrefs []Href) ([]string, error) {
+	if len(hrefs) == 0 {
+		return nil, HTTPErrorf(http.StatusBadRequest, "webdav: multiget REPORT without href")
+	}
+	base := url.URL{Path: r.URL.Path, RawPath: r.URL.RawPath}
+	paths := make([]string, len(hrefs))
+	for i, href := range hrefs {
+		ref := url.URL{Path: href.Path, RawPath: href.RawPath}
+		paths[i] = base.ResolveReference(&ref).Path
+	}
+	return paths, nil
+}
