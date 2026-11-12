@@ -536,6 +536,17 @@ func (p *CurrentUserPrincipal) MarshalXML(e *xml.Encoder, start xml.StartElement
 	}{})
 }
 
+// NewCurrentUserPrincipal returns the DAV:current-user-principal of a request
+// whose user has the principal at principalPath. An empty principalPath means
+// that the user isn't authenticated: the property is then DAV:unauthenticated
+// (RFC 5397 section 3), rather than an empty href.
+func NewCurrentUserPrincipal(principalPath string) *CurrentUserPrincipal {
+	if principalPath == "" {
+		return &CurrentUserPrincipal{Unauthenticated: &struct{}{}}
+	}
+	return &CurrentUserPrincipal{Href: Href{Path: principalPath}}
+}
+
 // https://tools.ietf.org/html/rfc4918#section-14.19
 type PropertyUpdate struct {
 	XMLName xml.Name `xml:"DAV: propertyupdate"`

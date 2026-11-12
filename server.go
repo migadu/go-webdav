@@ -774,10 +774,9 @@ func servePrincipalPropfind(w http.ResponseWriter, r *http.Request, options *Ser
 	// request URL, and DAV:current-user-principal says the user isn't
 	// authenticated (RFC 5397 section 3)
 	principalPath := options.CurrentUserPrincipalPath
-	currentUserPrincipal := &internal.CurrentUserPrincipal{Href: internal.Href{Path: principalPath}}
+	currentUserPrincipal := internal.NewCurrentUserPrincipal(principalPath)
 	if principalPath == "" {
 		principalPath = r.URL.Path
-		currentUserPrincipal = &internal.CurrentUserPrincipal{Unauthenticated: &struct{}{}}
 	}
 
 	props := map[xml.Name]internal.PropFindFunc{
