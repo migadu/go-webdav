@@ -828,6 +828,9 @@ func (c *Client) DoCreateCollection(req *http.Request) error {
 		}
 		return errs.err()
 	case resp.StatusCode/100 == 2:
+		// The body may hold a DAV:mkcol-response element (RFC 5689 section
+		// 3.4): read it, so that the connection can be reused
+		discardResponse(resp)
 		return nil
 	case !isXMLMediaType(resp.Header):
 		return responseError(resp)
@@ -878,13 +881,19 @@ func (pe *propErrors) addPropStats(propStats []PropStat) {
 		if propstat.Status.Code/100 == 2 {
 			continue
 		}
+		var errs []error
 		for j := range propstat.Prop.Raw {
-			err := PropStatError(&propstat.Prop.Raw[j], propstat)
-			if propstat.Status.Code == http.StatusFailedDependency {
-				pe.failedDeps = append(pe.failedDeps, err)
-			} else {
-				pe.errs = append(pe.errs, err)
-			}
+			errs = append(errs, PropStatError(&propstat.Prop.Raw[j], propstat))
+		}
+		if len(errs) == 0 {
+			// The request failed all the same, if not for any property
+			// the server names
+			errs = append(errs, fmt.Errorf("webdav: propstat without properties: %w", propStatHTTPError(propstat)))
+		}
+		if propstat.Status.Code == http.StatusFailedDependency {
+			pe.failedDeps = append(pe.failedDeps, errs...)
+		} else {
+			pe.errs = append(pe.errs, errs...)
 		}
 	}
 }
@@ -895,14 +904,20 @@ func (pe *propErrors) err() error {
 
 // PropStatError returns the error of raw, a property of propstat, a propstat
 // element with a status outside 2xx: an HTTPError with that status, wrapping
-// the DAV:error element of propstat if any.
+// the DAV:error and DAV:responsedescription elements of propstat if any, as
+// for Response.Err.
 func PropStatError(raw *RawXMLValue, propstat *PropStat) error {
-	err := &HTTPError{Code: propstat.Status.Code}
-	if propstat.Error != nil {
-		err.Err = propstat.Error
-	}
 	name, _ := raw.XMLName()
-	return fmt.Errorf("webdav: property <%v %v>: %w", name.Space, name.Local, err)
+	return fmt.Errorf("webdav: property <%v %v>: %w", name.Space, name.Local, propStatHTTPError(propstat))
+}
+
+// propStatHTTPError returns the HTTPError of propstat, a propstat element with
+// a status outside 2xx (see PropStatError).
+func propStatHTTPError(propstat *PropStat) *HTTPError {
+	return &HTTPError{
+		Code: propstat.Status.Code,
+		Err:  describedError(propstat.Error, propstat.ResponseDescription),
+	}
 }
 
 // PropStatErr returns the error of resp if the server failed to retrieve some

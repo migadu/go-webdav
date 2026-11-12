@@ -175,19 +175,7 @@ func (resp *Response) Err() error {
 		return nil
 	}
 
-	var err error
-	if resp.Error != nil {
-		err = resp.Error
-	}
-	if resp.ResponseDescription != "" {
-		if err != nil {
-			err = fmt.Errorf("%v (%w)", resp.ResponseDescription, err)
-		} else {
-			err = fmt.Errorf("%v", resp.ResponseDescription)
-		}
-	}
-
-	err = &HTTPError{Code: resp.Status.Code, Err: err}
+	err := &HTTPError{Code: resp.Status.Code, Err: describedError(resp.Error, resp.ResponseDescription)}
 	if len(resp.Hrefs) == 0 {
 		return err
 	}
@@ -197,6 +185,24 @@ func (resp *Response) Err() error {
 		hrefErrs[i] = &HrefError{Href: url.URL(href), Err: err}
 	}
 	return errors.Join(hrefErrs...)
+}
+
+// describedError returns the error described by errElt and desc, the
+// DAV:error and DAV:responsedescription elements of a response or propstat
+// element, or nil if there are none.
+func describedError(errElt *Error, desc string) error {
+	var err error
+	if errElt != nil {
+		err = errElt
+	}
+	if desc != "" {
+		if err != nil {
+			err = fmt.Errorf("%v (%w)", desc, err)
+		} else {
+			err = fmt.Errorf("%v", desc)
+		}
+	}
+	return err
 }
 
 // Path returns the path of the resource the response is about, along with
