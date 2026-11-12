@@ -406,6 +406,31 @@ func decodePropFilter(el *propFilter) (*PropFilter, error) {
 	return pf, nil
 }
 
+// compParents maps each component of RFC 5545 to the components it can be in
+// (section 3.6): VALARM in VEVENT and VTODO, STANDARD and DAYLIGHT in
+// VTIMEZONE, the others in VCALENDAR, which is in none. A filter can't nest
+// one elsewhere: RFC 4791 section 7.8 says "a CALDAV:filter cannot nest a
+// <C:comp name="VEVENT"> element in a <C:comp name="VTODO"> element". Other
+// components, such as X- ones or those of extensions, can be anywhere.
+var compParents = map[string][]string{
+	ical.CompCalendar:         nil,
+	ical.CompEvent:            {ical.CompCalendar},
+	ical.CompToDo:             {ical.CompCalendar},
+	ical.CompJournal:          {ical.CompCalendar},
+	ical.CompFreeBusy:         {ical.CompCalendar},
+	ical.CompTimezone:         {ical.CompCalendar},
+	ical.CompAlarm:            {ical.CompEvent, ical.CompToDo},
+	ical.CompTimezoneStandard: {ical.CompTimezone},
+	ical.CompTimezoneDaylight: {ical.CompTimezone},
+}
+
+// canNest reports whether a comp-filter on the component child can be in one
+// on parent, ignoring case.
+func canNest(parent, child string) bool {
+	parents, ok := compParents[strings.ToUpper(child)]
+	return !ok || slices.Contains(parents, strings.ToUpper(parent))
+}
+
 func decodeCompFilter(el *compFilter) (*CompFilter, error) {
 	// RFC 4791 section 9.7.1: (is-not-defined | (time-range?, prop-filter*,
 	// comp-filter*)), and a name
@@ -433,6 +458,9 @@ func decodeCompFilter(el *compFilter) (*CompFilter, error) {
 		cf.Props = append(cf.Props, *pf)
 	}
 	for _, childEl := range el.CompFilters {
+		if !canNest(el.Name, childEl.Name) {
+			return nil, newPreconditionError(http.StatusForbidden, PreconditionValidFilter)
+		}
 		child, err := decodeCompFilter(&childEl)
 		if err != nil {
 			return nil, err

@@ -192,6 +192,9 @@ func containsFold(list []string, s string) bool {
 }
 
 // Match reports whether the provided CalendarObject matches the query.
+//
+// For a time range, Match looks at no more than 100000 occurrences of a
+// recurring component, and returns an error if it would need more.
 func Match(query CompFilter, co *CalendarObject) (matched bool, err error) {
 	if co.Data == nil || co.Data.Component == nil {
 		panic("request to process empty calendar object")
@@ -266,6 +269,15 @@ func matchCompFilter(filter CompFilter, comp *ical.Component) (bool, error) {
 
 func matchPropFilter(filter PropFilter, comp *ical.Component) (bool, error) {
 	fields := comp.Props.Values(filter.Name)
+	if len(fields) == 0 && (!filter.Start.IsZero() || !filter.End.IsZero()) {
+		prop, err := effectiveEnd(comp, filter.Name)
+		if err != nil {
+			return false, err
+		}
+		if prop != nil {
+			fields = []ical.Prop{*prop}
+		}
+	}
 	if len(fields) == 0 {
 		return filter.IsNotDefined, nil
 	}
@@ -283,6 +295,43 @@ func matchPropFilter(filter PropFilter, comp *ical.Component) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// effectiveEnd returns the effective DTEND of a VEVENT, or DUE of a VTODO,
+// without one: DTSTART+DURATION. RFC 4791 section 9.9 says a time-range on
+// that property "should instead operate on the 'effective' DTEND" or DUE. The
+// effective property has the parameters of DTSTART, and is nil if comp has no
+// DTSTART or DURATION, or name is another property.
+func effectiveEnd(comp *ical.Component, name string) (*ical.Prop, error) {
+	name = strings.ToUpper(name)
+	compName := strings.ToUpper(comp.Name)
+	if !(name == ical.PropDateTimeEnd && compName == ical.CompEvent) && !(name == ical.PropDue && compName == ical.CompToDo) {
+		return nil, nil
+	}
+	dtstart := comp.Props.Get(ical.PropDateTimeStart)
+	durationProp := comp.Props.Get(ical.PropDuration)
+	if dtstart == nil || durationProp == nil {
+		return nil, nil
+	}
+	start, err := dtstart.DateTime(time.UTC)
+	if err != nil {
+		return nil, err
+	}
+	duration, err := durationProp.Duration()
+	if err != nil {
+		return nil, err
+	}
+
+	prop := ical.NewProp(name)
+	for k, v := range dtstart.Params {
+		prop.Params[k] = slices.Clone(v)
+	}
+	if dtstart.ValueType() == ical.ValueDate {
+		prop.SetDate(start.Add(duration))
+	} else {
+		prop.SetDateTime(start.Add(duration))
+	}
+	return prop, nil
 }
 
 func matchProp(filter PropFilter, field *ical.Prop) (bool, error) {
@@ -329,6 +378,21 @@ var (
 		ical.PropLastModified:  true,
 	}
 )
+
+// maxOccurrences is how many occurrences of a recurring component Match looks
+// at for a time range before it gives up with an error. rrule-go generates
+// them one at a time from DTSTART, so a rule such as FREQ=SECONDLY without
+// COUNT or UNTIL would take billions of them, and hours, to reach a range
+// some years later. The limit is enough for a daily event over more than
+// 270 years, or an hourly one over more than 11.
+const maxOccurrences = 100000
+
+// errTooManyOccurrences returns the error of Match when comp has more than
+// maxOccurrences occurrences before the time range.
+func errTooManyOccurrences(comp *ical.Component) error {
+	uid, _ := comp.Props.Text(ical.PropUID)
+	return fmt.Errorf("caldav: %v %q has more than %d occurrences before the time range", comp.Name, uid, maxOccurrences)
+}
 
 // matchCompTimeRange reports whether comp, a child of parent, overlaps the
 // time range [start, end), as defined in RFC 4791 section 9.9. A zero start or
@@ -410,12 +474,16 @@ func matchCompTimeRange(start, end time.Time, comp, parent *ical.Component) (boo
 	// can overlap it. Stop at the first one that does: a rule may have no end,
 	// and with an open start the first occurrence decides.
 	next := rset.Iterator()
+	n := 0
 	for occStart, ok := next(); ok; occStart, ok = next() {
 		if !end.IsZero() && occStart.After(end) {
 			break
 		}
 		if overlaps(occStart) {
 			return true, nil
+		}
+		if n++; n == maxOccurrences {
+			return false, errTooManyOccurrences(comp)
 		}
 	}
 	return false, nil
@@ -535,7 +603,7 @@ func matchFreeBusyTimeRange(start, end time.Time, comp *ical.Component) (bool, e
 }
 
 // parsePeriod parses a PERIOD value (RFC 5545 section 3.3.9): a start, and
-// an end or a duration.
+// either an end after it or "a positive duration of time".
 func parsePeriod(s string) (start, end time.Time, err error) {
 	startValue, endValue, ok := strings.Cut(s, "/")
 	if !ok {
@@ -545,16 +613,19 @@ func parsePeriod(s string) (start, end time.Time, err error) {
 	if err != nil {
 		return time.Time{}, time.Time{}, err
 	}
-	if strings.HasPrefix(strings.TrimLeft(endValue, "+-"), "P") {
+	// The ABNF strings of a duration, such as "P", are case-insensitive (RFC
+	// 5234 section 2.3), as go-ical reads them
+	if v := strings.ToUpper(endValue); strings.HasPrefix(v, "P") || strings.HasPrefix(v, "+P") || strings.HasPrefix(v, "-P") {
 		duration, err := (&ical.Prop{Name: ical.PropDuration, Value: endValue}).Duration()
 		if err != nil {
 			return time.Time{}, time.Time{}, err
 		}
-		return start, start.Add(duration), nil
-	}
-	end, err = (&ical.Prop{Name: ical.PropDateTimeEnd, Value: endValue}).DateTime(time.UTC)
-	if err != nil {
+		end = start.Add(duration)
+	} else if end, err = (&ical.Prop{Name: ical.PropDateTimeEnd, Value: endValue}).DateTime(time.UTC); err != nil {
 		return time.Time{}, time.Time{}, err
+	}
+	if !end.After(start) {
+		return time.Time{}, time.Time{}, fmt.Errorf("caldav: invalid period: %q doesn't end after its start", s)
 	}
 	return start, end, nil
 }
@@ -644,6 +715,7 @@ func matchAlarmTimeRange(start, end time.Time, alarm, parent *ical.Component) (b
 	// before it, so once one is past the end of the range, all the next are
 	sinceStart := related.Sub(parentStart)
 	next := rset.Iterator()
+	n := 0
 	for occStart, ok := next(); ok; occStart, ok = next() {
 		first := occStart.Add(sinceStart + offset)
 		if !end.IsZero() && !first.Before(end) {
@@ -651,6 +723,9 @@ func matchAlarmTimeRange(start, end time.Time, alarm, parent *ical.Component) (b
 		}
 		if triggersOverlap(start, end, first, interval, repeat) {
 			return true, nil
+		}
+		if n++; n == maxOccurrences {
+			return false, errTooManyOccurrences(parent)
 		}
 	}
 	return false, nil

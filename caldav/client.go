@@ -555,6 +555,9 @@ func encodeCompFilter(filter *CompFilter) (*compFilter, error) {
 		encoded.TimeRange = []timeRange{tr}
 	}
 	for _, child := range filter.Comps {
+		if !canNest(filter.Name, child.Name) {
+			return nil, fmt.Errorf("caldav: CompFilter %v can't be in CompFilter %v", child.Name, filter.Name)
+		}
 		el, err := encodeCompFilter(&child)
 		if err != nil {
 			return nil, err

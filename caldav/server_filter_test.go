@@ -115,6 +115,30 @@ func TestDecodeFilterValid(t *testing.T) {
 	}
 }
 
+// The components of RFC 5545 can be nested where they belong, whatever the
+// case of their name, and X- and IANA components anywhere.
+func TestDecodeFilterNesting(t *testing.T) {
+	for _, f := range []string{
+		`<C:comp-filter name="VEVENT"><C:comp-filter name="VALARM"/></C:comp-filter>`,
+		`<C:comp-filter name="VTODO"><C:comp-filter name="VALARM"/></C:comp-filter>`,
+		`<C:comp-filter name="vtodo"><C:comp-filter name="valarm"/></C:comp-filter>`,
+		`<C:comp-filter name="VJOURNAL"/><C:comp-filter name="VFREEBUSY"/>`,
+		`<C:comp-filter name="VTIMEZONE"><C:comp-filter name="STANDARD"/><C:comp-filter name="DAYLIGHT"/></C:comp-filter>`,
+		`<C:comp-filter name="VEVENT"><C:comp-filter name="VLOCATION"/><C:comp-filter name="X-THING"/></C:comp-filter>`,
+		`<C:comp-filter name="X-WRAPPER"><C:comp-filter name="X-THING"/></C:comp-filter>`,
+	} {
+		body := `<C:calendar-query xmlns:C="urn:ietf:params:xml:ns:caldav"><C:filter><C:comp-filter name="VCALENDAR">` +
+			f + `</C:comp-filter></C:filter></C:calendar-query>`
+		var cq calendarQuery
+		if err := xml.Unmarshal([]byte(body), &cq); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := decodeFilter(cq.Filter); err != nil {
+			t.Errorf("decodeFilter(%v) = %v", f, err)
+		}
+	}
+}
+
 // The components and properties of RFC 4791 section 9.9 take a time-range,
 // whatever the case of their name.
 func TestDecodeFilterTimeRangeDefined(t *testing.T) {
