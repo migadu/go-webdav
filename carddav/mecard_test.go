@@ -235,15 +235,19 @@ func TestServerMeCard(t *testing.T) {
 		const body = `<?xml version="1.0" encoding="utf-8"?><D:propfind xmlns:D="DAV:"><D:propname/></D:propfind>`
 		for _, tc := range []struct {
 			meCard string
+			err    error
 			want   bool
 		}{
-			{meCardObject, true},
-			{"", false},
+			{meCardObject, nil, true},
+			{"", nil, false},
+			// A propname response can't carry the error, and whether there's
+			// a me card is unknown
+			{"", webdav.NewHTTPError(http.StatusServiceUnavailable, errors.New("unavailable")), false},
 		} {
-			b := &meCardTestBackend{meCard: tc.meCard}
+			b := &meCardTestBackend{meCard: tc.meCard, meCardErr: tc.err}
 			resp := propFindMeCardResponse(t, &Handler{Backend: b}, meCardHomeSet, "0", body)
 			if got := propStatus(resp, meCardPropName) == http.StatusOK; got != tc.want {
-				t.Errorf("me card %q: me-card listed: %v, want %v", tc.meCard, got, tc.want)
+				t.Errorf("me card %q, error %v: me-card listed: %v, want %v", tc.meCard, tc.err, got, tc.want)
 			}
 		}
 	})
