@@ -93,6 +93,40 @@ func TestMemLockSystemMaxSharedLocks(t *testing.T) {
 	}
 }
 
+// MemLockSystem limits the total size of the owners of locks whose scopes
+// overlap, and so the size of the owners listed in the lockdiscovery of any
+// resource.
+func TestMemLockSystemMaxOwnerBytes(t *testing.T) {
+	ctx := context.Background()
+	ls := &MemLockSystem{MaxOwnerBytes: 10}
+
+	for _, owner := range []string{"123456", "1234", ""} {
+		if _, err := ls.Create(ctx, Lock{Root: "/a/b", Shared: true, Owner: owner}); err != nil {
+			t.Fatalf("Create() of a shared lock with owner %q = %v", owner, err)
+		}
+	}
+	_, err := ls.Create(ctx, Lock{Root: "/a/b", Shared: true, Owner: "1"})
+	expectInsufficientStorage(t, err, "Create() of a shared lock over MaxOwnerBytes")
+	_, err = ls.Create(ctx, Lock{Root: "/a", Recursive: true, Shared: true, Owner: "1"})
+	expectInsufficientStorage(t, err, "Create() of a shared lock on the collection over MaxOwnerBytes")
+	_, err = ls.Create(ctx, Lock{Root: "/d", Owner: "12345678901"})
+	expectInsufficientStorage(t, err, "Create() of a lock with an owner over MaxOwnerBytes")
+
+	// Other resources aren't affected
+	for _, lock := range []Lock{
+		{Root: "/a/c", Shared: true, Owner: "1234567890"},
+		{Root: "/a", Shared: true, Owner: "1234567890"},
+		{Root: "/d", Owner: "1234567890"},
+	} {
+		if _, err := ls.Create(ctx, lock); err != nil {
+			t.Errorf("Create(%+v) = %v", lock, err)
+		}
+	}
+	if _, err := ls.Create(ctx, Lock{Root: "/a/b", Owner: "1"}); !errors.Is(err, ErrLocked) {
+		t.Errorf("Create() of an exclusive lock = %v, want ErrLocked", err)
+	}
+}
+
 // The limits of MemLockSystem have defaults, and negative values remove
 // them.
 func TestMemLockSystemDefaultLimits(t *testing.T) {
@@ -103,12 +137,18 @@ func TestMemLockSystemDefaultLimits(t *testing.T) {
 	if got := ls.maxSharedLocks(); got != 64 {
 		t.Errorf("default MaxSharedLocks = %v, want 64", got)
 	}
-	ls = &MemLockSystem{MaxLocks: -1, MaxSharedLocks: -1}
+	if got := ls.maxOwnerBytes(); got != 64<<10 {
+		t.Errorf("default MaxOwnerBytes = %v, want 64 KiB", got)
+	}
+	ls = &MemLockSystem{MaxLocks: -1, MaxSharedLocks: -1, MaxOwnerBytes: -1}
 	if got := ls.maxLocks(); got != 0 {
 		t.Errorf("MaxLocks -1 = limit %v, want none", got)
 	}
 	if got := ls.maxSharedLocks(); got != 0 {
 		t.Errorf("MaxSharedLocks -1 = limit %v, want none", got)
+	}
+	if got := ls.maxOwnerBytes(); got != 0 {
+		t.Errorf("MaxOwnerBytes -1 = limit %v, want none", got)
 	}
 
 	ctx := context.Background()

@@ -153,6 +153,13 @@ type MemLockSystem struct {
 	// members, even if each member has fewer. Zero means 64. A negative
 	// value means no limit.
 	MaxSharedLocks int
+	// MaxOwnerBytes is the maximum total size, in bytes, of the Owner of
+	// locks whose scopes overlap: Create refuses a lock if its Owner and
+	// those of the active locks overlapping its scope add up to more. It
+	// limits the size of the owners listed in the lockdiscovery property of
+	// a resource, counted as for MaxSharedLocks. Zero means 64 KiB. A
+	// negative value means no limit.
+	MaxOwnerBytes int
 
 	mu    sync.Mutex
 	locks map[string]Lock  // by token
@@ -173,6 +180,11 @@ const (
 	defaultMaxLocks = 10000
 	// Clients rarely share a lock with more than a few others.
 	defaultMaxSharedLocks = 64
+	// Owners are usually a name or a URL, so this only stops large owners
+	// adding up: 64 shared locks with owners of 4 KiB, the most a Handler
+	// accepts, would add 256 KiB to every resource in their scope in a
+	// PROPFIND response. 64 KiB is 16 such owners, or 64 of 1 KiB.
+	defaultMaxOwnerBytes = 64 << 10
 )
 
 // limit returns the value of a limit field: def if v is zero, and zero,
@@ -194,6 +206,10 @@ func (ls *MemLockSystem) maxLocks() int {
 
 func (ls *MemLockSystem) maxSharedLocks() int {
 	return int(limit(int64(ls.MaxSharedLocks), defaultMaxSharedLocks))
+}
+
+func (ls *MemLockSystem) maxOwnerBytes() int {
+	return int(limit(int64(ls.MaxOwnerBytes), defaultMaxOwnerBytes))
 }
 
 func (ls *MemLockSystem) maxTimeout() time.Duration {
@@ -247,12 +263,13 @@ func (ls *MemLockSystem) Create(ctx context.Context, lock Lock) (Lock, error) {
 	defer ls.mu.Unlock()
 
 	now := ls.expire()
-	overlapping := 0
+	overlapping, ownerBytes := 0, len(lock.Owner)
 	for _, other := range ls.locks {
 		if lock.conflicts(&other) {
 			return Lock{}, fmt.Errorf("%w: %v is locked", ErrLocked, other.Root)
 		} else if lock.overlaps(&other) {
 			overlapping++
+			ownerBytes += len(other.Owner)
 		}
 	}
 	if max := ls.maxLocks(); max > 0 && len(ls.locks) >= max {
@@ -260,6 +277,9 @@ func (ls *MemLockSystem) Create(ctx context.Context, lock Lock) (Lock, error) {
 	}
 	if max := ls.maxSharedLocks(); max > 0 && overlapping >= max {
 		return Lock{}, NewHTTPError(http.StatusInsufficientStorage, fmt.Errorf("webdav: too many shared locks on %v (%v)", lock.Root, max))
+	}
+	if max := ls.maxOwnerBytes(); max > 0 && ownerBytes > max {
+		return Lock{}, NewHTTPError(http.StatusInsufficientStorage, fmt.Errorf("webdav: owners of the locks on %v too large (over %v bytes)", lock.Root, max))
 	}
 
 	if ls.locks == nil {

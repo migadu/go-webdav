@@ -1,6 +1,7 @@
 package webdav
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -21,6 +22,41 @@ func TestLockOwnerTooLarge(t *testing.T) {
 
 	token := lt.lock(http.StatusOK, "/file.txt", lockInfo("<D:href>mailto:"+strings.Repeat("a", 3000)+"@example.com</D:href>"))
 	lt.expect(http.StatusOK, "LOCK", "/file.txt", "", "If", "(<"+token+">)")
+}
+
+// Shared locks don't conflict, and the lockdiscovery property of a resource
+// lists the DAV:owner of each lock on it, for every resource in a PROPFIND
+// response. With the default limits, LOCK requests with large owners can't
+// add more than 64 KiB of owners to each resource (RFC 4918 section 20.2).
+func TestLockOwnersOfResourceTooLarge(t *testing.T) {
+	lt := newLockTest(t)
+	owner := "<D:href>mailto:" + strings.Repeat("a", 4000) + "@example.com</D:href>"
+	lockInfo := strings.Replace(sharedLockInfo, "<D:owner>bob</D:owner>", "<D:owner>"+owner+"</D:owner>", 1)
+
+	granted := 0
+	for granted < 64 {
+		w := lt.serve("LOCK", "/", lockInfo, "Depth", "infinity")
+		if w.Code != http.StatusOK {
+			if w.Code != http.StatusInsufficientStorage {
+				t.Errorf("LOCK %v: status = %v, want 507\n%v", granted+1, w.Code, w.Body.String())
+			}
+			break
+		}
+		granted++
+	}
+
+	locks, err := lt.ls.Locks(context.Background(), "/dir/a.txt", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for _, lock := range locks {
+		total += len(lock.Owner)
+	}
+	// The limit is reached, not exceeded
+	if len(locks) == 0 || total > 64<<10 || total+len(locks[0].Owner) <= 64<<10 {
+		t.Errorf("%v LOCK requests granted, with %v bytes of owners on /dir/a.txt, want at most 64 KiB, and no room for another", granted, total)
+	}
 }
 
 // RFC 4918 section 10.4: each condition of the If header field may need the
