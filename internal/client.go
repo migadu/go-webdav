@@ -76,7 +76,7 @@ func DiscoverContextURL(ctx context.Context, service, domain string) (string, er
 		txtStrings = append(txtStrings, splitTXT(record)...)
 	}
 
-	var urlPath string
+	var urlPath, rawPath string
 	var foundPath bool
 	for _, s := range txtStrings {
 		k, v, ok := strings.Cut(s, "=")
@@ -92,7 +92,15 @@ func DiscoverContextURL(ctx context.Context, service, domain string) (string, er
 		if !strings.HasPrefix(v, "/") {
 			v = "/" + v
 		}
-		urlPath = v
+		// The value is the path of the HTTP requests for the service (RFC
+		// 6764 sections 1 and 4), so it's percent-encoded: "%7E" is "~".
+		// url.URL uses it as is, unless it holds characters a request path
+		// can't hold, such as spaces, which are then escaped.
+		p, err := url.PathUnescape(v)
+		if err != nil {
+			return "", fmt.Errorf("webdav: invalid path for %s TXT record: %w", txtName, err)
+		}
+		urlPath, rawPath = p, v
 		foundPath = true
 	}
 	if !foundPath {
@@ -100,8 +108,9 @@ func DiscoverContextURL(ctx context.Context, service, domain string) (string, er
 	}
 
 	u := url.URL{
-		Scheme: "https",
-		Path:   urlPath,
+		Scheme:  "https",
+		Path:    urlPath,
+		RawPath: rawPath,
 	}
 	if addr.Port == 443 {
 		u.Host = target
