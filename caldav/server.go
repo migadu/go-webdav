@@ -601,13 +601,19 @@ func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multige
 	}
 
 	b := h.newBackend()
+	// The hrefs must name members of the resource at the Request-URI
+	// (RFC 4791 section 7.9, RFC 6352 section 8.7): others are answered
+	// like missing ones, without reaching the backend
+	inScope := func(p string) bool {
+		return b.inPrefix(p) && internal.IsInScope(r.URL.Path, p)
+	}
 
 	var objects map[string]*CalendarObject
 	var objErrResps map[string]internal.Response
 	if mb, ok := h.Backend.(CalendarObjectsBackend); ok {
 		paths := make([]string, 0, len(multiget.Hrefs))
 		for _, href := range multiget.Hrefs {
-			if b.inPrefix(href.Path) {
+			if inScope(href.Path) {
 				paths = append(paths, href.Path)
 			}
 		}
@@ -632,7 +638,7 @@ func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multige
 
 	return internal.StreamMultiStatus(w, r, func(mw *internal.MultiStatusWriter) error {
 		for _, href := range multiget.Hrefs {
-			if !b.inPrefix(href.Path) {
+			if !inScope(href.Path) {
 				resp := internal.NewErrorResponse(href.Path, internal.HTTPErrorf(http.StatusNotFound, "caldav: calendar object not found"))
 				if err := mw.WriteResponse(resp); err != nil {
 					return err
