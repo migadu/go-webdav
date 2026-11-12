@@ -24,6 +24,16 @@ type principalURL struct {
 	Href    internal.Href `xml:"href"`
 }
 
+// currentUserPrincipal is the DAV:current-user-principal property as clients
+// decode it (RFC 5397 section 3). Unlike internal.CurrentUserPrincipal, which
+// servers encode, it keeps every href: encoding/xml would decode several
+// into the same value, and the last one would win.
+type currentUserPrincipal struct {
+	XMLName         xml.Name        `xml:"DAV: current-user-principal"`
+	Hrefs           []internal.Href `xml:"href"`
+	Unauthenticated *struct{}       `xml:"unauthenticated"`
+}
+
 // https://datatracker.ietf.org/doc/html/rfc3744#section-4.4
 type groupMembership struct {
 	XMLName xml.Name        `xml:"DAV: group-membership"`

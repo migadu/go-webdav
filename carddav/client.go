@@ -123,7 +123,8 @@ func (c *Client) FindAddressBookHomeSets(ctx context.Context, principal string) 
 // as SabreDAV and CalendarServer report with the CalendarServer me-card
 // property of the address book home set (see
 // https://sabre.io/dav/carddav-me-card/). It returns an empty path if the
-// server doesn't report a me card.
+// server doesn't report a me card, and the first href if the property holds
+// several, as SabreDAV does.
 func (c *Client) FindMeCard(ctx context.Context, addressBookHomeSet string) (string, error) {
 	propfind := internal.NewPropNamePropFind(meCardName)
 	resp, err := c.ic.PropFindFlat(ctx, addressBookHomeSet, propfind)
@@ -134,7 +135,7 @@ func (c *Client) FindMeCard(ctx context.Context, addressBookHomeSet string) (str
 		return "", err
 	}
 
-	var prop meCard
+	var prop meCardHrefs
 	if err := resp.DecodeProp(&prop); internal.IsNotFound(err) {
 		return "", nil
 	} else if err != nil {
@@ -142,10 +143,10 @@ func (c *Client) FindMeCard(ctx context.Context, addressBookHomeSet string) (str
 	}
 	// Without an href, there's no me card. An empty href is a reference to
 	// the request URL (RFC 3986 section 4.4), as any other.
-	if prop.Href == nil {
+	if len(prop.Hrefs) == 0 {
 		return "", nil
 	}
-	return resp.HrefPath(prop.Href), nil
+	return resp.HrefPath(&prop.Hrefs[0]), nil
 }
 
 func decodeSupportedAddressData(supported *supportedAddressData) []AddressDataType {

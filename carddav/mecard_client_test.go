@@ -63,6 +63,13 @@ func TestClientFindMeCard(t *testing.T) {
 			propstats: `<D:propstat><D:prop><CS:me-card><D:href></D:href></CS:me-card></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>`,
 			want:      meCardHomeSet,
 		},
+		{
+			// No spec limits me-card to one href. SabreDAV decodes it as
+			// any number of hrefs and takes the first one.
+			name:      "two hrefs",
+			propstats: `<D:propstat><D:prop><CS:me-card><D:href>/user/contacts/default/me.vcf</D:href><D:href>/user/contacts/default/other.vcf</D:href></CS:me-card></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>`,
+			want:      "/user/contacts/default/me.vcf",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var ts *httptest.Server

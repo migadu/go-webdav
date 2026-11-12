@@ -42,10 +42,20 @@ var meCardName = xml.Name{Space: internal.CalendarServerNamespace, Local: "me-ca
 // meCard is the CalendarServer me-card property of an address book home set,
 // an extension of Apple's address book clients: the href of the address
 // object of the user's own contact. See https://sabre.io/dav/carddav-me-card/
-// and MeCardBackend. Href is nil if the property holds no href.
+// and MeCardBackend. The server encodes it; clients decode meCardHrefs.
 type meCard struct {
 	XMLName xml.Name       `xml:"http://calendarserver.org/ns/ me-card"`
 	Href    *internal.Href `xml:"DAV: href"`
+}
+
+// meCardHrefs is the me-card property as clients decode it. It keeps every
+// href: encoding/xml would decode several into the same value, and the last
+// one would win. The property has no published definition limiting it to one
+// href, and SabreDAV decodes it as any number of hrefs, of which it uses the
+// first one.
+type meCardHrefs struct {
+	XMLName xml.Name        `xml:"http://calendarserver.org/ns/ me-card"`
+	Hrefs   []internal.Href `xml:"DAV: href"`
 }
 
 type addressbookDescription struct {
