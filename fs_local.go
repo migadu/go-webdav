@@ -24,6 +24,13 @@ import (
 // only followed if they are relative and resolve to a location inside the
 // directory. Copying a collection copies the symbolic links it contains as
 // links.
+//
+// Create writes an upload to a temporary file in the destination's
+// directory, renamed to the destination once complete, so that a failed
+// upload leaves an existing file alone. Overwriting a file thus needs write
+// access to its directory, not only to the file: the file is replaced with a
+// new one, which gets the permissions of the old one, but not its owner, and
+// other hard links to the old file keep its old contents.
 type LocalFileSystem string
 
 var _ FileSystem = LocalFileSystem("")
@@ -352,6 +359,13 @@ func (fs LocalFileSystem) Create(ctx context.Context, name string, body io.ReadC
 		return nil, false, err
 	}
 	defer wc.Close()
+	if origStat != nil {
+		// Unlike the mode a file is created with, Chmod isn't masked by
+		// the umask: the new file gets all of the old one's permissions.
+		// Some file systems don't support it, but their files have no
+		// permissions of their own to keep.
+		wc.Chmod(perm)
+	}
 
 	if _, err := io.Copy(wc, body); err != nil {
 		wc.Close()
