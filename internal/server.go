@@ -1065,8 +1065,12 @@ func (h *Handler) handleUnlock(w http.ResponseWriter, r *http.Request, b LockBac
 // calendar-multiget or addressbook-multiget, in the form backends expect: a
 // relative reference is resolved against the Request-URI (RFC 4918 section
 // 8.3), and dot-segments are removed (RFC 3986 section 5.2.4). As for the
-// Destination header, the scheme and host of an absolute URL are ignored:
-// servers behind a reverse proxy may not know theirs.
+// Destination header, the scheme and host of an http or https URL are
+// ignored: servers behind a reverse proxy may not know theirs. Such a URL
+// with an empty path names "/" (RFC 3986 section 6.2.3). Any other URI, such
+// as "urn:uuid:…", names no resource of the server: it's returned whole, out
+// of the scope of any request (see IsInScope), and NewErrorResponse uses it
+// as the href of the response.
 //
 // The report requires at least one href (RFC 4791 section 9.10, RFC 6352
 // section 10.7), so without any MultigetPaths fails with 400 Bad Request.
@@ -1077,8 +1081,29 @@ func MultigetPaths(r *http.Request, hrefs []Href) ([]string, error) {
 	base := url.URL{Path: r.URL.Path, RawPath: r.URL.RawPath}
 	paths := make([]string, len(hrefs))
 	for i, href := range hrefs {
-		ref := url.URL{Path: href.Path, RawPath: href.RawPath}
+		u := url.URL(href)
+		if !isHTTPReference(&u) {
+			paths[i] = u.String()
+			continue
+		}
+		ref := url.URL{Path: u.Path, RawPath: u.RawPath}
+		if u.Host != "" && ref.Path == "" {
+			// Unlike an empty relative reference, which is the
+			// Request-URI (RFC 3986 section 5.2.2)
+			ref.Path = "/"
+		}
 		paths[i] = base.ResolveReference(&ref).Path
 	}
 	return paths, nil
+}
+
+// isHTTPReference reports whether u is a relative reference, or an http or
+// https URL with a host (RFC 9110 section 4.2): the URIs which can name a
+// resource of an HTTP server.
+func isHTTPReference(u *url.URL) bool {
+	if u.Scheme == "" {
+		return true
+	}
+	isHTTP := strings.EqualFold(u.Scheme, "http") || strings.EqualFold(u.Scheme, "https")
+	return isHTTP && u.Opaque == "" && u.Host != ""
 }
