@@ -12,8 +12,8 @@ import (
 	"testing"
 
 	"github.com/emersion/go-vcard"
-	"github.com/emersion/go-webdav"
-	"github.com/emersion/go-webdav/internal"
+	"github.com/migadu/go-webdav"
+	"github.com/migadu/go-webdav/internal"
 )
 
 type syncMultigetPartialBackend struct {

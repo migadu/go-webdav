@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 // encodeBody applies the content codings listed in a Content-Encoding header

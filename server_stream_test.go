@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 // streamTimeout bounds the wait for a response in the streaming tests, so

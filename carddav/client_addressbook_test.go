@@ -15,7 +15,7 @@ import (
 	"testing"
 
 	"github.com/emersion/go-vcard"
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 // memAddressBookBackend stores address books in memory, and lets clients

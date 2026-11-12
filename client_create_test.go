@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 // Create sends If-Match and If-None-Match, and a failed precondition is

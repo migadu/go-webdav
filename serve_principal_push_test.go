@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/emersion/go-webdav"
-	"github.com/emersion/go-webdav/caldav"
-	"github.com/emersion/go-webdav/carddav"
-	"github.com/emersion/go-webdav/internal"
+	"github.com/migadu/go-webdav"
+	"github.com/migadu/go-webdav/caldav"
+	"github.com/migadu/go-webdav/carddav"
+	"github.com/migadu/go-webdav/internal"
 )
 
 const testPushNamespace = "https://bitfire.at/webdav-push"

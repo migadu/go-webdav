@@ -15,7 +15,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/emersion/go-webdav/internal"
+	"github.com/migadu/go-webdav/internal"
 )
 
 // LocalFileSystem implements FileSystem for a local directory.

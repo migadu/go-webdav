@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/emersion/go-ical"
-	"github.com/emersion/go-webdav/internal"
+	"github.com/migadu/go-webdav/internal"
 )
 
 func TestPropPatchPropsAndOptions(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 const homeSetTestPrincipal = "/principals/me/"

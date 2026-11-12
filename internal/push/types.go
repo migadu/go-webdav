@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/emersion/go-webdav/internal"
+	"github.com/migadu/go-webdav/internal"
 )
 
 // The types of this file are exported by the webdav package as aliases, with

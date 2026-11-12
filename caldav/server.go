@@ -16,9 +16,9 @@ import (
 	"time"
 
 	"github.com/emersion/go-ical"
-	"github.com/emersion/go-webdav"
-	"github.com/emersion/go-webdav/internal"
-	"github.com/emersion/go-webdav/internal/push"
+	"github.com/migadu/go-webdav"
+	"github.com/migadu/go-webdav/internal"
+	"github.com/migadu/go-webdav/internal/push"
 )
 
 // TODO if nothing more Caldav-specific needs to be added this should be merged with carddav.PutAddressObjectOptions

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 type failingReader struct {

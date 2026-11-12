@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/emersion/go-vcard"
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 type collationCardBackend struct {

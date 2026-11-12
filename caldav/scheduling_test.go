@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/emersion/go-webdav"
-	"github.com/emersion/go-webdav/internal"
+	"github.com/migadu/go-webdav"
+	"github.com/migadu/go-webdav/internal"
 )
 
 // Tests for the scheduling (RFC 6638) support enabled by InboxBackend.

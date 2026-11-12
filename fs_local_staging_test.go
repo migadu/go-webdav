@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 // testStagingName is named like the files LocalFileSystem.Create stages

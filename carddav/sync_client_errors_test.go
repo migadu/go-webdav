@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 const syncValidCard = `<D:response>

@@ -1,4 +1,4 @@
-module github.com/emersion/go-webdav
+module github.com/migadu/go-webdav
 
 go 1.25.0
 

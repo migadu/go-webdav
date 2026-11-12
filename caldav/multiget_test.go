@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/emersion/go-ical"
-	"github.com/emersion/go-webdav/internal"
+	"github.com/migadu/go-webdav/internal"
 )
 
 // multiGetBackend fetches the objects of a calendar-multiget at once.

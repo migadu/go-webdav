@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/emersion/go-ical"
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 // xPropsICS is a reminder as Apple clients store it, with the properties and

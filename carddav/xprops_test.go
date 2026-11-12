@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/emersion/go-vcard"
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 // xPropsVCF is a contact as Apple clients store it, with the properties and

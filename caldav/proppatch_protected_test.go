@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/emersion/go-webdav/internal"
+	"github.com/migadu/go-webdav/internal"
 )
 
 // propPatchErrors returns the status of each property of the response to a

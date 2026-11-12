@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/emersion/go-ical"
-	"github.com/emersion/go-webdav"
-	"github.com/emersion/go-webdav/internal"
+	"github.com/migadu/go-webdav"
+	"github.com/migadu/go-webdav/internal"
 )
 
 // streamTimeout bounds the wait for a response in the streaming tests, so

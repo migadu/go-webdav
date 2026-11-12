@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 // The push types are aliases of internal types. This test only needs to

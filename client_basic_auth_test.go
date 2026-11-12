@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/emersion/go-webdav"
-	"github.com/emersion/go-webdav/internal"
+	"github.com/migadu/go-webdav"
+	"github.com/migadu/go-webdav/internal"
 )
 
 // originServer answers the requests for any host name from routes, keyed by
