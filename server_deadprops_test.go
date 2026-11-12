@@ -615,12 +615,25 @@ func TestDeadPropertiesUnsupported(t *testing.T) {
 	h := &webdav.Handler{FileSystem: fs}
 
 	w := davRequest(h, "PROPPATCH", "/dir/a.txt", "", propPatchBody(
-		setInstruction("<Z:color>red</Z:color>", "<D:displayname>Report</D:displayname>"),
+		setInstruction("<Z:color>red</Z:color>", "<D:displayname>Report</D:displayname>", `<D:getetag>"forged"</D:getetag>`),
 	))
-	checkStatuses(t, parseMultiStatus(t, w)["/dir/a.txt"], map[string]int{
+	props := parseMultiStatus(t, w)["/dir/a.txt"]
+	checkStatuses(t, props, map[string]int{
 		nameKey(colorName):  http.StatusForbidden,
 		"{DAV:}displayname": http.StatusForbidden,
+		"{DAV:}getetag":     http.StatusForbidden,
 	})
+	// RFC 4918 section 9.2.1: a protected property gets its precondition
+	// all the same
+	for name, want := range map[string][]string{
+		nameKey(colorName):  nil,
+		"{DAV:}displayname": nil,
+		"{DAV:}getetag":     {"{DAV:}cannot-modify-protected-property"},
+	} {
+		if got := props[name].errors; !reflect.DeepEqual(got, want) {
+			t.Errorf("%v: error conditions = %v, want %v", name, got, want)
+		}
+	}
 
 	w = davRequest(h, http.MethodOptions, "/dir/a.txt", "", "")
 	if allow := w.Header().Get("Allow"); strings.Contains(allow, "PROPPATCH") {

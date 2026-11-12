@@ -419,7 +419,7 @@ func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*
 
 	fs, ok := b.FileSystem.(DeadPropertyFileSystem)
 	if !ok {
-		return internal.NewPropPatchResponse(fi.Path, update, http.StatusForbidden)
+		return internal.NewPropPatchResponse(fi.Path, update, isProtectedProp)
 	}
 
 	var patch []DeadPropertyPatch

@@ -261,6 +261,37 @@ func TestMkcolErrors(t *testing.T) {
 			wantCode: http.StatusConflict,
 			wantBody: "mkcol-response 409 {urn:ietf:params:xml:ns:caldav}supported-calendar-component-set; 424 {DAV:}resourcetype",
 		},
+		{
+			// RFC 5689 section 3.3: "The server MUST support the
+			// specified resourcetype value for the specified
+			// collection", here a calendar which is something else too
+			name: "calendar and another resource type",
+			body: mkcolBody(`<D:resourcetype xmlns:E="http://example.com/ns/"><D:collection/><C:calendar/><E:special-resource/></D:resourcetype>
+<D:displayname>Special Resource</D:displayname>`),
+			wantCode: http.StatusForbidden,
+			wantBody: "mkcol-response 403 {DAV:}resourcetype error {DAV:}valid-resourcetype; 424 {DAV:}displayname",
+		},
+		{
+			name:     "calendar and address book resource type",
+			body:     mkcolBody(`<D:resourcetype><D:collection/><C:calendar/><CR:addressbook/></D:resourcetype>`),
+			wantCode: http.StatusForbidden,
+			wantBody: "mkcol-response 403 {DAV:}resourcetype error {DAV:}valid-resourcetype",
+		},
+		{
+			// Each property which can't be set gets its own status,
+			// only the others 424 (RFC 5689 section 3)
+			name:     "resource type and protected property",
+			body:     mkcolBody(mkcolAddressBookType + `<D:getetag>"1"</D:getetag><D:displayname>Work</D:displayname>`),
+			wantCode: http.StatusForbidden,
+			wantBody: "mkcol-response 403 {DAV:}resourcetype error {DAV:}valid-resourcetype; " +
+				"403 {DAV:}getetag error {DAV:}cannot-modify-protected-property; 424 {DAV:}displayname",
+		},
+		{
+			name:     "resource type and empty component set",
+			body:     mkcolBody(mkcolAddressBookType + `<C:supported-calendar-component-set/>`),
+			wantCode: http.StatusForbidden,
+			wantBody: "mkcol-response 403 {DAV:}resourcetype error {DAV:}valid-resourcetype; 409 {urn:ietf:params:xml:ns:caldav}supported-calendar-component-set",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			backend := &createBackend{}

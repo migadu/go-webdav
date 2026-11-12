@@ -116,3 +116,65 @@ func TestPropPatchCalendarProtectedProps(t *testing.T) {
 		t.Errorf("propstats = %v, want %v", errs, want)
 	}
 }
+
+// Where no property can be changed, on a calendar object or on the calendar
+// of a backend which isn't a CalendarUpdater, the protected properties are
+// still reported with DAV:cannot-modify-protected-property (RFC 4918 section
+// 9.2.1), and the others with a plain 403.
+func TestPropPatchReadOnlyProtectedProps(t *testing.T) {
+	const calPath = "/user/calendars/work/"
+	const protected = "403 {DAV:}cannot-modify-protected-property"
+	h := &Handler{Backend: testBackend{
+		calendars: []Calendar{{Path: calPath}},
+		objectMap: map[string][]CalendarObject{calPath: {newDataRequestTestObject(calPath + "event.ics")}},
+	}}
+
+	for _, tc := range []struct {
+		name, path string
+		want       map[string]string
+	}{
+		{
+			name: "calendar",
+			path: calPath,
+			want: map[string]string{
+				"{DAV:}getetag":      protected,
+				"{DAV:}resourcetype": protected,
+				"{urn:ietf:params:xml:ns:caldav}supported-calendar-component-set": protected,
+				"{DAV:}getcontenttype":                      "403",
+				"{DAV:}displayname":                         "403",
+				"{http://apple.com/ns/ical/}calendar-order": "403",
+			},
+		},
+		{
+			name: "calendar object",
+			path: calPath + "event.ics",
+			want: map[string]string{
+				"{DAV:}getetag":      protected,
+				"{DAV:}resourcetype": protected,
+				// The server sets it, to text/calendar
+				"{DAV:}getcontenttype": protected,
+				// Not a property of calendar objects
+				"{urn:ietf:params:xml:ns:caldav}supported-calendar-component-set": "403",
+				"{DAV:}displayname":                         "403",
+				"{http://apple.com/ns/ical/}calendar-order": "403",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := propPatchErrors(t, h, tc.path, `<?xml version="1.0" encoding="UTF-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:A="http://apple.com/ns/ical/">
+  <D:set><D:prop>
+    <D:displayname>Work</D:displayname>
+    <D:getetag>"1"</D:getetag>
+    <D:getcontenttype>text/plain</D:getcontenttype>
+    <A:calendar-order>2</A:calendar-order>
+    <C:supported-calendar-component-set><C:comp name="VTODO"/></C:supported-calendar-component-set>
+  </D:prop></D:set>
+  <D:remove><D:prop><D:resourcetype/></D:prop></D:remove>
+</D:propertyupdate>`)
+			if !reflect.DeepEqual(errs, tc.want) {
+				t.Errorf("propstats = %v, want %v", errs, tc.want)
+			}
+		})
+	}
+}

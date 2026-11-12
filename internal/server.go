@@ -770,13 +770,18 @@ func NewPropFindResponseWithDeadProps(path string, propfind *PropFind, props, de
 }
 
 // NewPropPatchResponse returns a response to a PROPPATCH request for path
-// which reports every property named in update with the status code. It is
-// meant for resources whose properties cannot be modified: the request still
-// gets a multistatus naming each property, as RFC 4918 section 9.2 requires,
-// rather than failing as a whole.
-func NewPropPatchResponse(path string, update *PropertyUpdate, code int) (*Response, error) {
-	refuse := func(*RawXMLValue, bool) error {
-		return &HTTPError{Code: code}
+// which refuses every property named in update with 403 Forbidden, with the
+// DAV:cannot-modify-protected-property precondition for those isProtected,
+// if not nil, reports (RFC 4918 section 9.2.1). It is meant for resources
+// whose properties cannot be modified: the request still gets a multistatus
+// naming each property, as RFC 4918 section 9.2 requires, rather than failing
+// as a whole.
+func NewPropPatchResponse(path string, update *PropertyUpdate, isProtected func(name xml.Name) bool) (*Response, error) {
+	refuse := func(raw *RawXMLValue, _ bool) error {
+		if name, _ := raw.XMLName(); isProtected != nil && isProtected(name) {
+			return NewProtectedPropError()
+		}
+		return &HTTPError{Code: http.StatusForbidden}
 	}
 	return PatchProps(path, update, refuse, nil)
 }
