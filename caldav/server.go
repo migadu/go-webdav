@@ -924,10 +924,8 @@ func (b *backend) propFindRoot(ctx context.Context, rootPath string, propfind *i
 	}
 
 	props := map[xml.Name]internal.PropFindFunc{
-		internal.CurrentUserPrincipalName: internal.PropFindValue(&internal.CurrentUserPrincipal{
-			Href: internal.Href{Path: principalPath},
-		}),
-		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName)),
+		internal.CurrentUserPrincipalName: internal.PropFindValue(internal.NewCurrentUserPrincipal(principalPath)),
+		internal.ResourceTypeName:         internal.PropFindValue(internal.NewResourceType(internal.CollectionName)),
 	}
 	return internal.NewPropFindResponse(rootPath, propfind, props)
 }
@@ -943,9 +941,7 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 	}
 
 	props := map[xml.Name]internal.PropFindFunc{
-		internal.CurrentUserPrincipalName: internal.PropFindValue(&internal.CurrentUserPrincipal{
-			Href: internal.Href{Path: principalPath},
-		}),
+		internal.CurrentUserPrincipalName: internal.PropFindValue(internal.NewCurrentUserPrincipal(principalPath)),
 		calendarHomeSetName: internal.PropFindValue(&calendarHomeSet{
 			Href: internal.Href{Path: homeSetPath},
 		}),
@@ -982,10 +978,8 @@ func (b *backend) propFindHomeSet(ctx context.Context, propfind *internal.PropFi
 
 	// TODO anything else to return here?
 	props := map[xml.Name]internal.PropFindFunc{
-		internal.CurrentUserPrincipalName: internal.PropFindValue(&internal.CurrentUserPrincipal{
-			Href: internal.Href{Path: principalPath},
-		}),
-		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName)),
+		internal.CurrentUserPrincipalName: internal.PropFindValue(internal.NewCurrentUserPrincipal(principalPath)),
+		internal.ResourceTypeName:         internal.PropFindValue(internal.NewResourceType(internal.CollectionName)),
 	}
 	internal.AddACLProps(props, func() (string, error) { return principalPath, nil })
 	b.addPushProps(ctx, propfind, homeSetPath, props)
@@ -999,7 +993,7 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 			if err != nil {
 				return nil, err
 			}
-			return &internal.CurrentUserPrincipal{Href: internal.Href{Path: path}}, nil
+			return internal.NewCurrentUserPrincipal(path), nil
 		},
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, calendarName)),
 		supportedCalendarDataName: internal.PropFindValue(&supportedCalendarData{
@@ -1193,7 +1187,7 @@ func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal
 			if err != nil {
 				return nil, err
 			}
-			return &internal.CurrentUserPrincipal{Href: internal.Href{Path: path}}, nil
+			return internal.NewCurrentUserPrincipal(path), nil
 		},
 		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(internal.NewCurrentUserPrivilegeSet(co.ReadOnly)),
 		internal.GetContentTypeName: internal.PropFindValue(&internal.GetContentType{

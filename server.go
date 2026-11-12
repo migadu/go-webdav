@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/emersion/go-webdav/internal"
+	"github.com/emersion/go-webdav/internal/push"
 )
 
 // FileSystem is a WebDAV server backend.
@@ -626,6 +627,23 @@ type ServePrincipalOptions struct {
 	// last segment of the principal's path is used: RFC 3744 section 4
 	// requires principals to have a non-empty display name.
 	DisplayName string
+	// Push, if set, supports WebDAV-Push (draft-bitfire-webdav-push-00) for
+	// the principal, so that clients can subscribe to changes of its
+	// properties, such as DAV:displayname: the draft recommends it (section
+	// 5). It can be the push backend of the CalDAV and CardDAV servers, see
+	// PushBackend.
+	//
+	// If Push.PushInfo returns information for the principal, ServePrincipal
+	// advertises the webdav-push capability and the POST method in OPTIONS
+	// responses, serves the transports, topic and supported-triggers
+	// properties, and registers push subscriptions, POST requests with a
+	// push-register body, with Push.RegisterPush. It also offers every
+	// DELETE request to Push.UnregisterPush, which removes the registration
+	// if the request is for a registration URL: the server can route the
+	// registration URLs to ServePrincipal, or to a caldav.Handler or
+	// carddav.Handler with the same push backend. The methods are given the
+	// path of the request URL.
+	Push PushBackend
 }
 
 // ServePrincipal replies to requests for a principal URL.
@@ -636,32 +654,101 @@ type ServePrincipalOptions struct {
 // DAV:supported-privilege-set (RFC 3744 section 5).
 //
 // The principal has no members and no content: it supports the OPTIONS and
-// PROPFIND methods only. A nil options is the same as empty options.
+// PROPFIND methods only, and POST if it supports WebDAV-Push (see
+// ServePrincipalOptions.Push). A nil options is the same as empty options.
 func ServePrincipal(w http.ResponseWriter, r *http.Request, options *ServePrincipalOptions) {
 	if options == nil {
 		options = &ServePrincipalOptions{}
 	}
-	allow := strings.Join([]string{http.MethodOptions, "PROPFIND"}, ", ")
 
+	var err error
 	switch r.Method {
 	case http.MethodOptions:
-		caps := []string{"1", "3"}
-		for _, c := range options.Capabilities {
-			caps = append(caps, string(c))
-		}
-		w.Header().Add("DAV", strings.Join(caps, ", "))
-		w.Header().Add("Allow", allow)
-		w.WriteHeader(http.StatusNoContent)
+		err = servePrincipalOptions(w, r, options)
 	case "PROPFIND":
-		if err := servePrincipalPropfind(w, r, options); err != nil {
-			internal.ServeError(w, err)
-		}
+		err = servePrincipalPropfind(w, r, options)
 	default:
-		// A 405 response lists the supported methods (RFC 9110 section
-		// 15.5.6)
-		w.Header().Set("Allow", allow)
-		http.Error(w, "unsupported method", http.StatusMethodNotAllowed)
+		var handled bool
+		if handled, err = servePrincipalPush(w, r, options); err == nil && !handled {
+			err = servePrincipalMethodNotAllowed(w, r, options)
+		}
 	}
+	if err != nil {
+		internal.ServeError(w, err)
+	}
+}
+
+// principalAllow returns the methods the principal at the request URL
+// supports, for the Allow header field (RFC 9110 section 10.2.1), and its
+// push information: nil if it doesn't support WebDAV-Push.
+func principalAllow(r *http.Request, options *ServePrincipalOptions) (string, *PushInfo, error) {
+	methods := []string{http.MethodOptions, "PROPFIND"}
+	var info *PushInfo
+	if options.Push != nil {
+		var err error
+		if info, err = push.Info(r.Context(), options.Push, r.URL.Path); err != nil {
+			return "", nil, err
+		}
+	}
+	if info != nil {
+		methods = append(methods, http.MethodPost)
+	}
+	return strings.Join(methods, ", "), info, nil
+}
+
+func servePrincipalOptions(w http.ResponseWriter, r *http.Request, options *ServePrincipalOptions) error {
+	allow, info, err := principalAllow(r, options)
+	if err != nil {
+		return err
+	}
+	caps := []string{"1", "3"}
+	for _, c := range options.Capabilities {
+		caps = append(caps, string(c))
+	}
+	if info != nil {
+		// draft-bitfire-webdav-push section 2
+		caps = append(caps, string(CapabilityPush))
+	}
+	w.Header().Add("DAV", strings.Join(caps, ", "))
+	w.Header().Add("Allow", allow)
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+func servePrincipalMethodNotAllowed(w http.ResponseWriter, r *http.Request, options *ServePrincipalOptions) error {
+	allow, _, err := principalAllow(r, options)
+	if err != nil {
+		return err
+	}
+	// A 405 response lists the supported methods (RFC 9110 section 15.5.6)
+	w.Header().Set("Allow", allow)
+	http.Error(w, "unsupported method", http.StatusMethodNotAllowed)
+	return nil
+}
+
+// servePrincipalPush serves the WebDAV-Push requests, if options.Push is
+// set: POST requests, which register push subscriptions for the principal,
+// and DELETE requests for registration URLs. It reports false for other
+// requests.
+func servePrincipalPush(w http.ResponseWriter, r *http.Request, options *ServePrincipalOptions) (bool, error) {
+	if options.Push == nil {
+		return false, nil
+	}
+	switch r.Method {
+	case http.MethodPost:
+		r, err := internal.DecodeRequestBody(w, r)
+		if err != nil {
+			return true, err
+		}
+		info, err := push.Info(r.Context(), options.Push, r.URL.Path)
+		if err != nil {
+			return true, err
+		}
+		return true, push.ServeRegister(w, r, options.Push, info)
+	case http.MethodDelete:
+		return push.ServeUnregister(w, r, options.Push)
+	}
+	return false, nil
 }
 
 func servePrincipalPropfind(w http.ResponseWriter, r *http.Request, options *ServePrincipalOptions) error {
@@ -691,10 +778,9 @@ func servePrincipalPropfind(w http.ResponseWriter, r *http.Request, options *Ser
 	// request URL, and DAV:current-user-principal says the user isn't
 	// authenticated (RFC 5397 section 3)
 	principalPath := options.CurrentUserPrincipalPath
-	currentUserPrincipal := &internal.CurrentUserPrincipal{Href: internal.Href{Path: principalPath}}
+	currentUserPrincipal := internal.NewCurrentUserPrincipal(principalPath)
 	if principalPath == "" {
 		principalPath = r.URL.Path
-		currentUserPrincipal = &internal.CurrentUserPrincipal{Unauthenticated: &struct{}{}}
 	}
 
 	props := map[xml.Name]internal.PropFindFunc{
@@ -710,6 +796,10 @@ func servePrincipalPropfind(w http.ResponseWriter, r *http.Request, options *Ser
 
 	for _, homeSet := range options.HomeSets {
 		props[homeSet.GetXMLName()] = internal.PropFindValue(homeSet)
+	}
+
+	if options.Push != nil {
+		push.AddProps(r.Context(), options.Push, &propfind, r.URL.Path, props)
 	}
 
 	resp, err := internal.NewPropFindResponse(r.URL.Path, &propfind, props)

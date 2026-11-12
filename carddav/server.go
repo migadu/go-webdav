@@ -680,10 +680,8 @@ func (b *backend) propFindRoot(ctx context.Context, rootPath string, propfind *i
 	}
 
 	props := map[xml.Name]internal.PropFindFunc{
-		internal.CurrentUserPrincipalName: internal.PropFindValue(&internal.CurrentUserPrincipal{
-			Href: internal.Href{Path: principalPath},
-		}),
-		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName)),
+		internal.CurrentUserPrincipalName: internal.PropFindValue(internal.NewCurrentUserPrincipal(principalPath)),
+		internal.ResourceTypeName:         internal.PropFindValue(internal.NewResourceType(internal.CollectionName)),
 	}
 	return internal.NewPropFindResponse(rootPath, propfind, props)
 }
@@ -695,9 +693,7 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 	}
 
 	props := map[xml.Name]internal.PropFindFunc{
-		internal.CurrentUserPrincipalName: internal.PropFindValue(&internal.CurrentUserPrincipal{
-			Href: internal.Href{Path: principalPath},
-		}),
+		internal.CurrentUserPrincipalName: internal.PropFindValue(internal.NewCurrentUserPrincipal(principalPath)),
 		addressBookHomeSetName: func(*internal.RawXMLValue) (interface{}, error) {
 			homeSetPath, err := b.Backend.AddressBookHomeSetPath(ctx)
 			if err != nil {
@@ -735,7 +731,7 @@ func (b *backend) propFindHomeSet(ctx context.Context, propfind *internal.PropFi
 			if err != nil {
 				return nil, err
 			}
-			return &internal.CurrentUserPrincipal{Href: internal.Href{Path: principalPath}}, nil
+			return internal.NewCurrentUserPrincipal(principalPath), nil
 		},
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName)),
 	}
@@ -798,7 +794,7 @@ func (b *backend) propFindAddressBook(ctx context.Context, propfind *internal.Pr
 			if err != nil {
 				return nil, err
 			}
-			return &internal.CurrentUserPrincipal{Href: internal.Href{Path: path}}, nil
+			return internal.NewCurrentUserPrincipal(path), nil
 		},
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, addressBookName)),
 		supportedAddressDataName: internal.PropFindValue(&supportedAddressData{
@@ -880,7 +876,7 @@ func (b *backend) propFindAddressObject(ctx context.Context, propfind *internal.
 			if err != nil {
 				return nil, err
 			}
-			return &internal.CurrentUserPrincipal{Href: internal.Href{Path: path}}, nil
+			return internal.NewCurrentUserPrincipal(path), nil
 		},
 		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(internal.NewCurrentUserPrivilegeSet(ao.ReadOnly)),
 		internal.GetContentTypeName: internal.PropFindValue(&internal.GetContentType{

@@ -1,7 +1,7 @@
 // Package push implements the server side of WebDAV-Push
-// (draft-bitfire-webdav-push-00) for the CalDAV and CardDAV servers: the push
-// properties of collections, and the registration and removal of push
-// subscriptions.
+// (draft-bitfire-webdav-push-00) for the CalDAV and CardDAV servers and
+// webdav.ServePrincipal: the push properties of collections and principals,
+// and the registration and removal of push subscriptions.
 package push
 
 import (
@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/internal"
 )
 
@@ -29,11 +28,11 @@ var (
 	SupportedTriggersName = xml.Name{Space: Namespace, Local: "supported-triggers"}
 )
 
-// Backend is the WebDAV-Push part of a backend: caldav.PushBackend and
-// carddav.PushBackend.
+// Backend is the WebDAV-Push part of a backend: caldav.PushBackend,
+// carddav.PushBackend and webdav.PushBackend.
 type Backend interface {
-	PushInfo(ctx context.Context, path string) (*webdav.PushInfo, error)
-	RegisterPush(ctx context.Context, path string, sub *webdav.PushSubscription) (*webdav.PushRegistration, error)
+	PushInfo(ctx context.Context, path string) (*PushInfo, error)
+	RegisterPush(ctx context.Context, path string, sub *PushSubscription) (*PushRegistration, error)
 	UnregisterPush(ctx context.Context, path string) (bool, error)
 }
 
@@ -90,7 +89,7 @@ func requested(propfind *internal.PropFind) bool {
 // Info returns the push information of the collection at path, or nil if push
 // isn't available for it. Backends may return a 404 error for a path where
 // there's no collection: push isn't available there either.
-func Info(ctx context.Context, b Backend, path string) (*webdav.PushInfo, error) {
+func Info(ctx context.Context, b Backend, path string) (*PushInfo, error) {
 	info, err := b.PushInfo(ctx, path)
 	if internal.IsNotFound(err) {
 		return nil, nil
@@ -154,14 +153,14 @@ func AddProps(ctx context.Context, b Backend, propfind *internal.PropFind, path 
 
 // checkInfo checks that the push information returned by a backend can be
 // served as the draft requires.
-func checkInfo(info *webdav.PushInfo) error {
+func checkInfo(info *PushInfo) error {
 	if info.Topic == "" {
 		return fmt.Errorf("webdav: push information without a topic")
 	}
 	if info.ContentUpdate == nil && info.PropertyUpdate == nil {
 		return fmt.Errorf("webdav: push information without a supported trigger")
 	}
-	for _, t := range []*webdav.PushTrigger{info.ContentUpdate, info.PropertyUpdate} {
+	for _, t := range []*PushTrigger{info.ContentUpdate, info.PropertyUpdate} {
 		if t != nil && !validDepth(t.Depth) {
 			return fmt.Errorf("webdav: push trigger with an invalid depth %d", int(t.Depth))
 		}
@@ -182,9 +181,9 @@ func checkInfo(info *webdav.PushInfo) error {
 	return nil
 }
 
-func validDepth(d webdav.Depth) bool {
+func validDepth(d internal.Depth) bool {
 	switch d {
-	case webdav.DepthZero, webdav.DepthOne, webdav.DepthInfinity:
+	case internal.DepthZero, internal.DepthOne, internal.DepthInfinity:
 		return true
 	}
 	return false
@@ -227,16 +226,16 @@ type triggerUpdate struct {
 }
 
 var (
-	errInvalidSubscription = webdav.NewPushPreconditionError(webdav.PushPreconditionInvalidSubscription)
-	errPushNotAvailable    = webdav.NewPushPreconditionError(webdav.PushPreconditionPushNotAvailable)
-	errNoSupportedTrigger  = webdav.NewPushPreconditionError(webdav.PushPreconditionNoSupportedTrigger)
+	errInvalidSubscription = NewPushPreconditionError(PushPreconditionInvalidSubscription)
+	errPushNotAvailable    = NewPushPreconditionError(PushPreconditionPushNotAvailable)
+	errNoSupportedTrigger  = NewPushPreconditionError(PushPreconditionNoSupportedTrigger)
 )
 
 // ServeRegister serves a push subscription registration, a POST request with
 // a push-register body (draft-bitfire-webdav-push section 3.1), for the
 // collection at r.URL.Path. info is the push information of the collection,
 // nil if push isn't available for it.
-func ServeRegister(w http.ResponseWriter, r *http.Request, b Backend, info *webdav.PushInfo) error {
+func ServeRegister(w http.ResponseWriter, r *http.Request, b Backend, info *PushInfo) error {
 	var req pushRegister
 	if err := internal.DecodeXMLRequest(r, &req); err != nil {
 		return err
@@ -249,7 +248,7 @@ func ServeRegister(w http.ResponseWriter, r *http.Request, b Backend, info *webd
 		return err
 	}
 
-	sub := webdav.PushSubscription{}
+	sub := PushSubscription{}
 	if len(req.Subscription) != 1 {
 		return errInvalidSubscription
 	}
@@ -311,7 +310,7 @@ func ServeRegister(w http.ResponseWriter, r *http.Request, b Backend, info *webd
 // decodeWebPushSubscription decodes the subscription of a registration,
 // which must hold a single Web Push subscription with the encryption keys
 // (draft-bitfire-webdav-push sections 6.1 and 6.3).
-func decodeWebPushSubscription(sub *subscription) (*webdav.WebPushSubscription, error) {
+func decodeWebPushSubscription(sub *subscription) (*WebPushSubscription, error) {
 	if len(sub.WebPush) != 1 || len(sub.Other) != 0 {
 		return nil, errInvalidSubscription
 	}
@@ -350,7 +349,7 @@ func decodeWebPushSubscription(sub *subscription) (*webdav.WebPushSubscription, 
 		return nil, errInvalidSubscription
 	}
 
-	return &webdav.WebPushSubscription{
+	return &WebPushSubscription{
 		PushResource: pushResource,
 		PublicKey:    pubKey,
 		AuthSecret:   authSecret,
@@ -365,7 +364,7 @@ func decodeBase64URL(s string) ([]byte, error) {
 
 // decodeTrigger decodes the content-update or property-update element of a
 // registration, if any.
-func decodeTrigger(l []triggerUpdate, props bool) (*webdav.PushTrigger, error) {
+func decodeTrigger(l []triggerUpdate, props bool) (*PushTrigger, error) {
 	if len(l) == 0 {
 		return nil, nil
 	} else if len(l) > 1 {
@@ -379,7 +378,7 @@ func decodeTrigger(l []triggerUpdate, props bool) (*webdav.PushTrigger, error) {
 	if err != nil {
 		return nil, &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
 	}
-	t := &webdav.PushTrigger{Depth: depth}
+	t := &PushTrigger{Depth: depth}
 	if props && tu.Prop != nil {
 		for i := range tu.Prop.Raw {
 			if name, ok := tu.Prop.Raw[i].XMLName(); ok {
@@ -391,8 +390,8 @@ func decodeTrigger(l []triggerUpdate, props bool) (*webdav.PushTrigger, error) {
 }
 
 // depthOrder orders depths from the lowest to the highest.
-func depthOrder(d webdav.Depth) int {
-	if d == webdav.DepthInfinity {
+func depthOrder(d internal.Depth) int {
+	if d == internal.DepthInfinity {
 		return 2
 	}
 	return int(d)
@@ -402,7 +401,7 @@ func depthOrder(d webdav.Depth) int {
 // supported by a collection: nil if the collection doesn't support it, and
 // with the depth sup supports at most (draft-bitfire-webdav-push sections
 // 3.1.1 and 3.1.2).
-func downgradeTrigger(req, sup *webdav.PushTrigger) *webdav.PushTrigger {
+func downgradeTrigger(req, sup *PushTrigger) *PushTrigger {
 	if req == nil || sup == nil {
 		return nil
 	}

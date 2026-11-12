@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/internal"
 )
 
@@ -55,38 +54,38 @@ const draftSamplePushRegister = `<?xml version="1.0" encoding="utf-8" ?>
 </push-register>`
 
 type fakeBackend struct {
-	info    map[string]*webdav.PushInfo
+	info    map[string]*PushInfo
 	infoErr error
 
-	reg    *webdav.PushRegistration
+	reg    *PushRegistration
 	regErr error
 
 	infoCalls []string
-	registers []webdav.PushSubscription
+	registers []PushSubscription
 }
 
 func newFakeBackend() *fakeBackend {
 	return &fakeBackend{
-		info: map[string]*webdav.PushInfo{
+		info: map[string]*PushInfo{
 			testPath: {
 				Topic:          "O7M1nQ7cKkKTKsoS_j6Z3w",
-				ContentUpdate:  &webdav.PushTrigger{Depth: webdav.DepthOne},
-				PropertyUpdate: &webdav.PushTrigger{Depth: webdav.DepthZero},
+				ContentUpdate:  &PushTrigger{Depth: internal.DepthOne},
+				PropertyUpdate: &PushTrigger{Depth: internal.DepthZero},
 			},
 		},
-		reg: &webdav.PushRegistration{
+		reg: &PushRegistration{
 			URL:     "https://example.com/webdav/subscriptions/io6Efei4ooph",
 			Expires: time.Date(2024, 10, 2, 7, 28, 0, 0, time.UTC),
 		},
 	}
 }
 
-func (b *fakeBackend) PushInfo(ctx context.Context, path string) (*webdav.PushInfo, error) {
+func (b *fakeBackend) PushInfo(ctx context.Context, path string) (*PushInfo, error) {
 	b.infoCalls = append(b.infoCalls, path)
 	return b.info[path], b.infoErr
 }
 
-func (b *fakeBackend) RegisterPush(ctx context.Context, path string, sub *webdav.PushSubscription) (*webdav.PushRegistration, error) {
+func (b *fakeBackend) RegisterPush(ctx context.Context, path string, sub *PushSubscription) (*PushRegistration, error) {
 	if path != testPath {
 		return nil, errors.New("unexpected path " + path)
 	}
@@ -100,7 +99,7 @@ func (b *fakeBackend) UnregisterPush(ctx context.Context, path string) (bool, er
 		return false, nil
 	}
 	if id != "io6Efei4ooph" {
-		return true, webdav.NewHTTPError(http.StatusNotFound, nil)
+		return true, &internal.HTTPError{Code: http.StatusNotFound}
 	}
 	return true, nil
 }
@@ -158,17 +157,17 @@ func TestServeRegister(t *testing.T) {
 	}
 	pubKey, _ := base64.RawURLEncoding.DecodeString(testP256DH)
 	authSecret, _ := base64.RawURLEncoding.DecodeString(testAuthSecret)
-	want := webdav.PushSubscription{
-		WebPush: webdav.WebPushSubscription{
+	want := PushSubscription{
+		WebPush: WebPushSubscription{
 			PushResource: testPushResource,
 			PublicKey:    pubKey,
 			AuthSecret:   authSecret,
 		},
 		// The collection supports content updates up to depth 1: the
 		// requested depth is downgraded (draft section 4.1.1)
-		ContentUpdate: &webdav.PushTrigger{Depth: webdav.DepthOne},
-		PropertyUpdate: &webdav.PushTrigger{
-			Depth: webdav.DepthZero,
+		ContentUpdate: &PushTrigger{Depth: internal.DepthOne},
+		PropertyUpdate: &PushTrigger{
+			Depth: internal.DepthZero,
 			Props: []xml.Name{{Space: "DAV:", Local: "displayname"}, {Space: "DAV:", Local: "owner"}},
 		},
 		Expires: time.Date(2023, 12, 20, 10, 3, 31, 0, time.UTC),
@@ -278,9 +277,9 @@ func TestServeRegisterRelaxed(t *testing.T) {
 
 	for _, tc := range []struct {
 		name  string
-		info  webdav.PushInfo
+		info  PushInfo
 		body  string
-		check func(t *testing.T, sub *webdav.PushSubscription)
+		check func(t *testing.T, sub *PushSubscription)
 	}{
 		{
 			name: "padded base64 and whitespace",
@@ -289,8 +288,8 @@ func TestServeRegisterRelaxed(t *testing.T) {
 </P:push-resource>
 <P:subscription-public-key type="p256dh"> `+base64.URLEncoding.EncodeToString(pubKey)+` </P:subscription-public-key>
 <P:auth-secret>`+base64.URLEncoding.EncodeToString(authSecret)+`</P:auth-secret>`),
-			check: func(t *testing.T, sub *webdav.PushSubscription) {
-				want := webdav.WebPushSubscription{PushResource: testPushResource, PublicKey: pubKey, AuthSecret: authSecret}
+			check: func(t *testing.T, sub *PushSubscription) {
+				want := WebPushSubscription{PushResource: testPushResource, PublicKey: pubKey, AuthSecret: authSecret}
 				if !reflect.DeepEqual(sub.WebPush, want) {
 					t.Errorf("WebPush = %+v, want %+v", sub.WebPush, want)
 				}
@@ -306,7 +305,7 @@ func TestServeRegisterRelaxed(t *testing.T) {
 		{
 			name: "invalid expiration ignored",
 			body: registerBody(validSubscription, validTrigger, "<P:expires>next week</P:expires>"),
-			check: func(t *testing.T, sub *webdav.PushSubscription) {
+			check: func(t *testing.T, sub *PushSubscription) {
 				if !sub.Expires.IsZero() {
 					t.Errorf("Expires = %v, want zero", sub.Expires)
 				}
@@ -314,31 +313,31 @@ func TestServeRegisterRelaxed(t *testing.T) {
 		},
 		{
 			name: "unsupported trigger ignored",
-			info: webdav.PushInfo{Topic: "t", ContentUpdate: &webdav.PushTrigger{Depth: webdav.DepthInfinity}},
+			info: PushInfo{Topic: "t", ContentUpdate: &PushTrigger{Depth: internal.DepthInfinity}},
 			body: registerBody(validSubscription, `<P:trigger>
   <P:property-update><D:depth>0</D:depth></P:property-update>
   <P:content-update><D:depth>0</D:depth></P:content-update>
   <X:moon-phase xmlns:X="urn:example"/>
 </P:trigger>`),
-			check: func(t *testing.T, sub *webdav.PushSubscription) {
+			check: func(t *testing.T, sub *PushSubscription) {
 				if sub.PropertyUpdate != nil {
 					t.Errorf("PropertyUpdate = %+v, want nil", sub.PropertyUpdate)
 				}
 				// A lower depth than supported is kept
-				if sub.ContentUpdate == nil || sub.ContentUpdate.Depth != webdav.DepthZero {
+				if sub.ContentUpdate == nil || sub.ContentUpdate.Depth != internal.DepthZero {
 					t.Errorf("ContentUpdate = %+v, want depth 0", sub.ContentUpdate)
 				}
 			},
 		},
 		{
 			name: "property update downgraded",
-			info: webdav.PushInfo{Topic: "t", PropertyUpdate: &webdav.PushTrigger{Depth: webdav.DepthOne}},
+			info: PushInfo{Topic: "t", PropertyUpdate: &PushTrigger{Depth: internal.DepthOne}},
 			body: registerBody(validSubscription, `<P:trigger><P:property-update><D:depth>infinity</D:depth><D:prop/></P:property-update></P:trigger>`),
-			check: func(t *testing.T, sub *webdav.PushSubscription) {
+			check: func(t *testing.T, sub *PushSubscription) {
 				if sub.ContentUpdate != nil {
 					t.Errorf("ContentUpdate = %+v, want nil", sub.ContentUpdate)
 				}
-				want := &webdav.PushTrigger{Depth: webdav.DepthOne}
+				want := &PushTrigger{Depth: internal.DepthOne}
 				if !reflect.DeepEqual(sub.PropertyUpdate, want) {
 					t.Errorf("PropertyUpdate = %+v, want %+v", sub.PropertyUpdate, want)
 				}
@@ -382,19 +381,19 @@ func TestServeRegisterNotAvailable(t *testing.T) {
 
 func TestServeRegisterBackendError(t *testing.T) {
 	b := newFakeBackend()
-	b.regErr = webdav.NewPushPreconditionError(webdav.PushPreconditionPushNotAvailable)
+	b.regErr = NewPushPreconditionError(PushPreconditionPushNotAvailable)
 	b.reg = nil
 	checkPrecondition(t, serveRegister(t, b, "application/xml", draftSamplePushRegister), "push-not-available")
 
 	b = newFakeBackend()
-	b.regErr = webdav.NewHTTPError(http.StatusInsufficientStorage, nil)
+	b.regErr = &internal.HTTPError{Code: http.StatusInsufficientStorage}
 	b.reg = nil
 	if w := serveRegister(t, b, "application/xml", draftSamplePushRegister); w.Code != http.StatusInsufficientStorage {
 		t.Errorf("status = %v, want 507", w.Code)
 	}
 
 	// The Location and Expires header fields are required
-	for _, reg := range []webdav.PushRegistration{
+	for _, reg := range []PushRegistration{
 		{Expires: time.Now().Add(time.Hour)},
 		{URL: "/subscriptions/a"},
 	} {
@@ -487,8 +486,8 @@ func TestAddProps(t *testing.T) {
 	const pushProps = `<D:propfind xmlns:D="DAV:" xmlns:P="https://bitfire.at/webdav-push">
   <D:prop><P:transports/><P:topic/><P:supported-triggers/></D:prop>
 </D:propfind>`
-	errUnavailable := webdav.NewHTTPError(http.StatusServiceUnavailable, nil)
-	errNotFound := webdav.NewHTTPError(http.StatusNotFound, nil)
+	errUnavailable := &internal.HTTPError{Code: http.StatusServiceUnavailable}
+	errNotFound := &internal.HTTPError{Code: http.StatusNotFound}
 
 	for _, tc := range []struct {
 		name     string
@@ -550,19 +549,19 @@ func TestAddPropsInvalidInfo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	one := &webdav.PushTrigger{Depth: webdav.DepthOne}
+	one := &PushTrigger{Depth: internal.DepthOne}
 	for _, tc := range []struct {
 		name string
-		info webdav.PushInfo
+		info PushInfo
 	}{
-		{name: "no topic", info: webdav.PushInfo{ContentUpdate: one}},
-		{name: "no trigger", info: webdav.PushInfo{Topic: "t"}},
-		{name: "invalid depth", info: webdav.PushInfo{Topic: "t", ContentUpdate: &webdav.PushTrigger{Depth: webdav.Depth(2)}}},
-		{name: "P-384 VAPID key", info: webdav.PushInfo{Topic: "t", ContentUpdate: one, VAPIDPublicKey: &p384Key.PublicKey}},
-		{name: "VAPID key off the curve", info: webdav.PushInfo{Topic: "t", ContentUpdate: one, VAPIDPublicKey: &ecdsa.PublicKey{
+		{name: "no topic", info: PushInfo{ContentUpdate: one}},
+		{name: "no trigger", info: PushInfo{Topic: "t"}},
+		{name: "invalid depth", info: PushInfo{Topic: "t", ContentUpdate: &PushTrigger{Depth: internal.Depth(2)}}},
+		{name: "P-384 VAPID key", info: PushInfo{Topic: "t", ContentUpdate: one, VAPIDPublicKey: &p384Key.PublicKey}},
+		{name: "VAPID key off the curve", info: PushInfo{Topic: "t", ContentUpdate: one, VAPIDPublicKey: &ecdsa.PublicKey{
 			Curve: elliptic.P256(), X: big.NewInt(1), Y: big.NewInt(1),
 		}}},
-		{name: "VAPID key without coordinates", info: webdav.PushInfo{Topic: "t", ContentUpdate: one, VAPIDPublicKey: &ecdsa.PublicKey{
+		{name: "VAPID key without coordinates", info: PushInfo{Topic: "t", ContentUpdate: one, VAPIDPublicKey: &ecdsa.PublicKey{
 			Curve: elliptic.P256(),
 		}}},
 	} {
@@ -594,10 +593,10 @@ func TestAddPropsInvalidInfo(t *testing.T) {
 }
 
 func TestDowngradeTrigger(t *testing.T) {
-	zero, one, inf := webdav.DepthZero, webdav.DepthOne, webdav.DepthInfinity
+	zero, one, inf := internal.DepthZero, internal.DepthOne, internal.DepthInfinity
 	for _, tc := range []struct {
-		req, sup *webdav.Depth
-		want     *webdav.Depth
+		req, sup *internal.Depth
+		want     *internal.Depth
 	}{
 		{req: &inf, sup: &one, want: &one},
 		{req: &one, sup: &inf, want: &one},
@@ -607,12 +606,12 @@ func TestDowngradeTrigger(t *testing.T) {
 		{req: &one, sup: nil, want: nil},
 		{req: nil, sup: &one, want: nil},
 	} {
-		var req, sup *webdav.PushTrigger
+		var req, sup *PushTrigger
 		if tc.req != nil {
-			req = &webdav.PushTrigger{Depth: *tc.req, Props: []xml.Name{internal.DisplayNameName}}
+			req = &PushTrigger{Depth: *tc.req, Props: []xml.Name{internal.DisplayNameName}}
 		}
 		if tc.sup != nil {
-			sup = &webdav.PushTrigger{Depth: *tc.sup}
+			sup = &PushTrigger{Depth: *tc.sup}
 		}
 		got := downgradeTrigger(req, sup)
 		if (got == nil) != (tc.want == nil) {
