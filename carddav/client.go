@@ -226,34 +226,36 @@ func decodeAddressBook(path string, resp *internal.Response) (*AddressBook, erro
 		return nil, err
 	}
 
-	var syncToken internal.SyncToken
-	if err := resp.DecodeProp(&syncToken); err != nil && !internal.IsNotFound(err) {
-		return nil, err
-	}
-
-	var ctag internal.GetCTag
-	if err := resp.DecodeProp(&ctag); err != nil && !internal.IsNotFound(err) {
-		return nil, err
-	}
-
-	var readOnly bool
-	var privSet internal.CurrentUserPrivilegeSet
-	if err := resp.DecodeProp(&privSet); err == nil {
-		readOnly = !privSet.HasWrite()
-	} else if !internal.IsNotFound(err) {
-		return nil, err
-	}
-
-	return &AddressBook{
+	ab := &AddressBook{
 		Path:                 path,
 		Name:                 dispName.Name,
 		Description:          desc.Description,
 		MaxResourceSize:      maxResSize.Size,
-		SyncToken:            syncToken.Token,
 		SupportedAddressData: decodeSupportedAddressData(&supported),
-		ReadOnly:             readOnly,
-		CTag:                 ctag.CTag,
-	}, nil
+	}
+
+	// The other properties only fill in optional fields. Clients should be
+	// prepared for any status for a property (RFC 4918 section 9.1.2), e.g.
+	// 403 Forbidden for current-user-privilege-set, which needs its own
+	// privilege (RFC 3744 section 3.7): if the server fails to return one,
+	// or returns a value which can't be decoded, its field is left empty
+	// rather than failing the whole request.
+	var syncToken internal.SyncToken
+	if resp.DecodeProp(&syncToken) == nil {
+		ab.SyncToken = syncToken.Token
+	}
+
+	var ctag internal.GetCTag
+	if resp.DecodeProp(&ctag) == nil {
+		ab.CTag = ctag.CTag
+	}
+
+	var privSet internal.CurrentUserPrivilegeSet
+	if resp.DecodeProp(&privSet) == nil {
+		ab.ReadOnly = !privSet.HasWrite()
+	}
+
+	return ab, nil
 }
 
 // CreateAddressBook creates an address book at addressBook.Path with an
