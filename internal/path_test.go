@@ -27,6 +27,11 @@ func TestSamePath(t *testing.T) {
 		{"/c", "/c.ics", false},
 		{"https://example.com/c/", "https://example.org/c/", false},
 		{"https://example.com/c/", "/c/", false},
+		// An empty path isn't the root, although both trimmed of a trailing
+		// slash are empty
+		{"", "", true},
+		{"", "/", false},
+		{"", "//", false},
 	} {
 		if got := SamePath(tc.a, tc.b); got != tc.want {
 			t.Errorf("SamePath(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
@@ -34,5 +39,18 @@ func TestSamePath(t *testing.T) {
 		if got := SamePath(tc.b, tc.a); got != tc.want {
 			t.Errorf("SamePath(%q, %q) = %v, want %v", tc.b, tc.a, got, tc.want)
 		}
+	}
+}
+
+// An HrefError with an empty path isn't about the root collection.
+func TestContainsPathEmpty(t *testing.T) {
+	if containsPath([]string{"/"}, "") {
+		t.Errorf(`containsPath(["/"], "") = true, want false`)
+	}
+	if !onlyHrefs([]Response{{Hrefs: []Href{{Path: "/"}}}}, []string{"/"}) {
+		t.Errorf(`onlyHrefs() = false for a response on "/", want true`)
+	}
+	if onlyHrefs([]Response{{Hrefs: []Href{{Path: ""}}}}, []string{"/"}) {
+		t.Errorf(`onlyHrefs() = true for a response on "", want false`)
 	}
 }
