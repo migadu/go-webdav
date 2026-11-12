@@ -22,13 +22,22 @@ func ServeError(w http.ResponseWriter, err error) {
 		code = httpErr.Code
 	}
 
+	// The body of an extended MKCOL response (RFC 5689 section 3), or the
+	// DAV:error element of RFC 4918 section 16
+	var body interface{}
+	var mkcolResp *MkcolResponse
 	var errElt *Error
-	if errors.As(err, &errElt) {
+	if errors.As(err, &mkcolResp) {
+		body = mkcolResp
+	} else if errors.As(err, &errElt) {
+		body = errElt
+	}
+	if body != nil {
 		// The header fields must be set before the status is written
 		w.Header().Set("Content-Type", xmlContentType)
 		w.WriteHeader(code)
 		w.Write([]byte(xml.Header))
-		xml.NewEncoder(w).Encode(errElt)
+		xml.NewEncoder(w).Encode(body)
 		return
 	}
 

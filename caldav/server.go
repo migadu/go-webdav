@@ -1476,30 +1476,30 @@ func (b *backend) Delete(r *http.Request) error {
 	return internal.HTTPErrorf(http.StatusForbidden, "caldav: cannot delete resource at given location")
 }
 
+// Mkcol handles extended MKCOL requests, which create calendars as MKCALENDAR
+// requests do (RFC 5689 section 4.1).
 func (b *backend) Mkcol(r *http.Request) error {
+	m, err := internal.DecodeMkcolRequest(r)
+	if err != nil {
+		return err
+	}
+	// The Backend only creates calendars: not the ordinary collection of a
+	// MKCOL request without a body, for instance
+	if err := m.CheckResourceType(calendarName); err != nil {
+		return err
+	}
 	if b.resourceTypeAtPath(r.Context(), r.URL.Path) != resourceTypeCalendar {
-		return internal.HTTPErrorf(http.StatusForbidden, "caldav: calendar creation not allowed at given location")
+		return newPreconditionError(http.StatusForbidden, PreconditionCalendarCollectionLocationOk)
 	}
 
-	cal := Calendar{
-		Path: r.URL.Path,
+	var prop mkcolProp
+	if err := m.DecodeProp(&prop); err != nil {
+		return err
 	}
-
-	if !internal.IsRequestBodyEmpty(r) {
-		var m mkcolReq
-		if err := internal.DecodeXMLRequest(r, &m); err != nil {
-			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: error parsing mkcol request: %s", err.Error())
-		}
-
-		prop := m.Set.Prop
-		if !prop.ResourceType.Is(internal.CollectionName) || !prop.ResourceType.Is(calendarName) {
-			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: unexpected resource type")
-		}
-		if err := setCalendarProps(&cal, &prop); err != nil {
-			return err
-		}
+	cal := Calendar{Path: r.URL.Path}
+	if err := setCalendarProps(&cal, &prop); err != nil {
+		return m.PropError(calendarTimezoneName, err)
 	}
-
 	return b.Backend.CreateCalendar(r.Context(), &cal)
 }
 
@@ -1507,7 +1507,7 @@ func (b *backend) Mkcol(r *http.Request) error {
 // MKCOL or a MKCALENDAR request. The properties it doesn't support are
 // ignored: clients set many which are only meaningful to them, such as
 // calendar-order, and refusing the request would leave them unable to create
-// calendars.
+// calendars. It only fails for an invalid calendar-timezone property.
 func setCalendarProps(cal *Calendar, prop *mkcolProp) error {
 	cal.Name = prop.DisplayName
 	cal.Description = prop.CalendarDescription

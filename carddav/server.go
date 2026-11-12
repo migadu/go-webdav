@@ -1076,30 +1076,34 @@ func (b *backend) Delete(r *http.Request) error {
 	return internal.HTTPErrorf(http.StatusForbidden, "carddav: cannot delete resource at given location")
 }
 
+// Mkcol handles extended MKCOL requests, which create address books (RFC 6352
+// section 6.3.1).
 func (b *backend) Mkcol(r *http.Request) error {
+	m, err := internal.DecodeMkcolRequest(r)
+	if err != nil {
+		return err
+	}
+	// The Backend only creates address books: not the ordinary collection of
+	// a MKCOL request without a body, for instance
+	if err := m.CheckResourceType(addressBookName); err != nil {
+		return err
+	}
 	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeAddressBook {
-		return internal.HTTPErrorf(http.StatusForbidden, "carddav: address book creation not allowed at given location")
+		// RFC 6352 defines no precondition for MKCOL: this is the one of
+		// COPY and MOVE for the same condition (section 6.3.2.1), as CalDAV
+		// uses calendar-collection-location-ok for MKCALENDAR
+		return newPreconditionError(http.StatusForbidden, PreconditionAddressBookCollectionLocationOk)
 	}
 
-	ab := AddressBook{
-		Path: r.URL.Path,
+	var prop mkcolProp
+	if err := m.DecodeProp(&prop); err != nil {
+		return err
 	}
-
-	if !internal.IsRequestBodyEmpty(r) {
-		var m mkcolReq
-		if err := internal.DecodeXMLRequest(r, &m); err != nil {
-			return internal.HTTPErrorf(http.StatusBadRequest, "carddav: error parsing mkcol request: %s", err.Error())
-		}
-
-		if !m.ResourceType.Is(internal.CollectionName) || !m.ResourceType.Is(addressBookName) {
-			return internal.HTTPErrorf(http.StatusBadRequest, "carddav: unexpected resource type")
-		}
-		ab.Name = m.DisplayName
-		ab.Description = m.Description.Description
-		// TODO ...
-	}
-
-	return b.Backend.CreateAddressBook(r.Context(), &ab)
+	return b.Backend.CreateAddressBook(r.Context(), &AddressBook{
+		Path:        r.URL.Path,
+		Name:        prop.DisplayName,
+		Description: prop.Description.Description,
+	})
 }
 
 // inPrefix reports whether p is under the prefix of the Handler.
@@ -1153,11 +1157,12 @@ func (b *backend) Move(r *http.Request, dest *internal.Href, overwrite bool) (cr
 type PreconditionType string
 
 const (
-	PreconditionNoUIDConflict        PreconditionType = "no-uid-conflict"
-	PreconditionSupportedAddressData PreconditionType = "supported-address-data"
-	PreconditionValidAddressData     PreconditionType = "valid-address-data"
-	PreconditionMaxResourceSize      PreconditionType = "max-resource-size"
-	PreconditionSupportedCollation   PreconditionType = "supported-collation"
+	PreconditionNoUIDConflict                   PreconditionType = "no-uid-conflict"
+	PreconditionSupportedAddressData            PreconditionType = "supported-address-data"
+	PreconditionValidAddressData                PreconditionType = "valid-address-data"
+	PreconditionAddressBookCollectionLocationOk PreconditionType = "addressbook-collection-location-ok"
+	PreconditionMaxResourceSize                 PreconditionType = "max-resource-size"
+	PreconditionSupportedCollation              PreconditionType = "supported-collation"
 )
 
 func NewPreconditionError(err PreconditionType) error {
