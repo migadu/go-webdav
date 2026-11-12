@@ -140,6 +140,75 @@ func TestLocalFileSystemOverwriteSourceAncestorThroughAlias(t *testing.T) {
 	}
 }
 
+// The same, for a source which resolves outside of the destination, but
+// through a directory entry inside it: removing the destination removes that
+// entry, through which the source is reached. Here a/x/mid is a symbolic link
+// to real, outside of a.
+func TestLocalFileSystemOverwriteSourcePathThroughDestination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symbolic links")
+	}
+	ctx := context.Background()
+	ops := []struct {
+		name string
+		do   func(fs webdav.LocalFileSystem, src, dst string) error
+	}{
+		{"Copy", func(fs webdav.LocalFileSystem, src, dst string) error {
+			_, err := fs.Copy(ctx, src, dst, &webdav.CopyOptions{})
+			return err
+		}},
+		{"Move", func(fs webdav.LocalFileSystem, src, dst string) error {
+			_, err := fs.Move(ctx, src, dst, &webdav.MoveOptions{})
+			return err
+		}},
+	}
+	newTestDir := func(t *testing.T) string {
+		dir := t.TempDir()
+		writeTestFile(t, filepath.Join(dir, "real", "file.txt"), "precious")
+		writeTestFile(t, filepath.Join(dir, "a", "x", "other.txt"), "other")
+		writeTestSymlink(t, filepath.Join(dir, "a", "x", "mid"), "../../real")
+		// The link to the file passes through a/x/mid
+		writeTestSymlink(t, filepath.Join(dir, "ilink"), "a/x/mid/file.txt")
+		// The source's path passes through dlink, a link to a/x/mid
+		writeTestSymlink(t, filepath.Join(dir, "dlink"), "a/x/mid")
+		// The link passes through a, if only to leave it with ".."
+		writeTestSymlink(t, filepath.Join(dir, "ulink"), "a/../real/file.txt")
+		writeTestSymlink(t, filepath.Join(dir, "rlink"), "real/file.txt")
+		return dir
+	}
+	for _, op := range ops {
+		for _, src := range []string{"/ilink", "/dlink/file.txt", "/ulink"} {
+			t.Run(op.name+" "+src+" to /a", func(t *testing.T) {
+				dir := newTestDir(t)
+				fs := webdav.LocalFileSystem(dir)
+
+				checkHTTPErrorCode(t, op.do(fs, src, "/a"), http.StatusForbidden)
+				checkTestFile(t, filepath.Join(dir, "real", "file.txt"), "precious")
+				checkTestFile(t, filepath.Join(dir, "a", "x", "other.txt"), "other")
+				for _, name := range []string{"a/x/mid", "ilink", "dlink", "ulink"} {
+					if fi, err := os.Lstat(filepath.Join(dir, name)); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+						t.Errorf("%v is gone (%v)", name, err)
+					}
+				}
+				checkTestFile(t, filepath.Join(dir, filepath.FromSlash(src)), "precious")
+			})
+		}
+
+		// A link which doesn't pass through the destination is copied
+		// or moved over it
+		t.Run(op.name+" /rlink to /a", func(t *testing.T) {
+			dir := newTestDir(t)
+			fs := webdav.LocalFileSystem(dir)
+
+			if err := op.do(fs, "/rlink", "/a"); err != nil {
+				t.Fatalf("%v() = %v", op.name, err)
+			}
+			checkTestFile(t, filepath.Join(dir, "real", "file.txt"), "precious")
+			checkTestFile(t, filepath.Join(dir, "a"), "precious")
+		})
+	}
+}
+
 // returnsWithin returns the result of do, or fails the test if do doesn't
 // return within a few seconds, as when copying a collection into itself
 // recurses without end.
