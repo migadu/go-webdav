@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
-	"errors"
-	"fmt"
 	"mime"
 	"net/http"
 	"path"
@@ -317,8 +315,9 @@ func decodeTextMatch(el *textMatch) (*TextMatch, error) {
 func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {
 	pf := &ParamFilter{Name: el.Name}
 	if el.IsNotDefined != nil {
+		// RFC 4791 section 9.7.3: (is-not-defined | text-match?)
 		if el.TextMatch != nil {
-			return nil, fmt.Errorf("caldav: failed to parse param-filter: if is-not-defined is provided, text-match can't be provided")
+			return nil, newPreconditionError(http.StatusForbidden, PreconditionValidFilter)
 		}
 		pf.IsNotDefined = true
 	}
@@ -335,8 +334,10 @@ func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {
 func decodePropFilter(el *propFilter) (*PropFilter, error) {
 	pf := &PropFilter{Name: el.Name}
 	if el.IsNotDefined != nil {
+		// RFC 4791 section 9.7.2: (is-not-defined | ((time-range |
+		// text-match)?, param-filter*))
 		if el.TextMatch != nil || el.TimeRange != nil || len(el.ParamFilter) > 0 {
-			return nil, fmt.Errorf("caldav: failed to parse prop-filter: if is-not-defined is provided, text-match, time-range, or param-filter can't be provided")
+			return nil, newPreconditionError(http.StatusForbidden, PreconditionValidFilter)
 		}
 		pf.IsNotDefined = true
 	}
@@ -363,8 +364,10 @@ func decodePropFilter(el *propFilter) (*PropFilter, error) {
 func decodeCompFilter(el *compFilter) (*CompFilter, error) {
 	cf := &CompFilter{Name: el.Name}
 	if el.IsNotDefined != nil {
+		// RFC 4791 section 9.7.1: (is-not-defined | (time-range?,
+		// prop-filter*, comp-filter*))
 		if el.TimeRange != nil || len(el.PropFilters) > 0 || len(el.CompFilters) > 0 {
-			return nil, fmt.Errorf("caldav: failed to parse comp-filter: if is-not-defined is provided, time-range, prop-filter, or comp-filter can't be provided")
+			return nil, newPreconditionError(http.StatusForbidden, PreconditionValidFilter)
 		}
 		cf.IsNotDefined = true
 	}
@@ -518,11 +521,7 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *cal
 	}
 	cf, err := decodeCompFilter(&query.Filter.CompFilter)
 	if err != nil {
-		var httpErr *internal.HTTPError
-		if errors.As(err, &httpErr) {
-			return err
-		}
-		return &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
+		return err
 	}
 	q.CompFilter = *cf
 
@@ -1533,6 +1532,12 @@ const (
 	PreconditionMaxInstances                 PreconditionType = "max-instances"
 	PreconditionMaxAttendeesPerInstance      PreconditionType = "max-attendees-per-instance"
 	PreconditionSupportedCollation           PreconditionType = "supported-collation"
+
+	// PreconditionValidFilter is the precondition of the calendar-query
+	// REPORT that its filter is valid (RFC 4791 section 7.8). The server
+	// reports a malformed filter with 403 Forbidden: repeating the request
+	// can't help (section 1.3).
+	PreconditionValidFilter PreconditionType = "valid-filter"
 )
 
 func NewPreconditionError(err PreconditionType) error {
