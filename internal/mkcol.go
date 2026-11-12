@@ -2,7 +2,6 @@ package internal
 
 import (
 	"encoding/xml"
-	"errors"
 	"net/http"
 	"slices"
 )
@@ -82,15 +81,35 @@ func (m *Mkcol) props() []RawXMLValue {
 	return props
 }
 
-// DecodeProp decodes the properties m sets into v, as a DAV:prop element
-// holding them: v is generally a struct with a field for each property the
-// server reads, tagged with its name.
-func (m *Mkcol) DecodeProp(v interface{}) error {
-	prop := NewRawXMLElement(xml.Name{Namespace, "prop"}, nil, m.props())
-	if err := prop.Decode(v); err != nil {
-		return &HTTPError{http.StatusBadRequest, err}
+// SetProps calls set for each property m sets, in document order, so that a
+// property set twice gets its last value. The properties are set all at once
+// or not at all (RFC 5689 section 3, RFC 4791 section 5.3.1): if set fails for
+// some of them, SetProps still calls it for the others, and returns the
+// propstat elements reporting each property which failed, with the status,
+// the DAV:error element and the description of its error, then 424 Failed
+// Dependency for the others. It returns nil if set succeeds for all of them.
+//
+// An extended MKCOL request reports the propstat elements with PropError, a
+// MKCALENDAR request with PropMultiStatus.
+func (m *Mkcol) SetProps(set func(raw *RawXMLValue) error) []PropStat {
+	props := m.props()
+	var failed []xml.Name
+	var propStats []PropStat
+	for i := range props {
+		name, ok := props[i].XMLName()
+		if !ok {
+			continue
+		}
+		// A property set twice is reported once, with its first error
+		if err := set(&props[i]); err != nil && !slices.Contains(failed, name) {
+			failed = append(failed, name)
+			propStats = append(propStats, failedPropStat(name, err))
+		}
 	}
-	return nil
+	if len(failed) == 0 {
+		return nil
+	}
+	return append(propStats, m.failedDependencies(failed)...)
 }
 
 // CheckResourceType checks that m creates a collection of the resource type
@@ -115,7 +134,12 @@ func (m *Mkcol) CheckResourceType(name xml.Name) error {
 		return &HTTPError{http.StatusBadRequest, err}
 	}
 	if !t.Is(CollectionName) || !t.Is(name) {
-		return m.PropError(ResourceTypeName, newValidResourceTypeError())
+		return m.PropError(m.SetProps(func(raw *RawXMLValue) error {
+			if n, _ := raw.XMLName(); n == ResourceTypeName {
+				return newValidResourceTypeError()
+			}
+			return nil
+		}))
 	}
 	return nil
 }
@@ -127,49 +151,98 @@ func newValidResourceTypeError() error {
 	return &HTTPError{Code: http.StatusForbidden, Err: &Error{Raw: []RawXMLValue{*elt}}}
 }
 
-// PropError returns the error of m when the property name it sets can't be
-// set, as err says. RFC 5689 section 3 requires a DAV:mkcol-response element
-// with the status of each property: the error has the status of err, and
-// wraps one reporting that status for the property, along with the DAV:error
-// element err wraps if any, and 424 Failed Dependency for the others.
-func (m *Mkcol) PropError(name xml.Name, err error) error {
-	resp := &MkcolResponse{PropStats: m.propStats(name, err)}
-	return &HTTPError{Code: HTTPErrorFromError(err).Code, Err: resp}
+// PropError returns the error of m, an extended MKCOL request, when some of
+// the properties it sets can't be, as propStats, returned by SetProps,
+// report. RFC 5689 section 3 requires a DAV:mkcol-response element with the
+// status of each property: the error has the status of the first property
+// which failed, and wraps that element, which ServeError serves as the body
+// of the response.
+func (m *Mkcol) PropError(propStats []PropStat) error {
+	return &HTTPError{Code: propStats[0].Status.Code, Err: &MkcolResponse{PropStats: propStats}}
 }
 
 // PropMultiStatus is PropError for a MKCALENDAR request for href, which
 // reports the properties in a 207 Multi-Status response instead (RFC 4791
-// section 5.3.1.1): it returns its body, with the same propstat elements in
-// the response element for href.
-func (m *Mkcol) PropMultiStatus(href string, name xml.Name, err error) *MultiStatus {
+// section 5.3.1.1): it returns its body, with propStats in the response
+// element for href.
+func (m *Mkcol) PropMultiStatus(href string, propStats []PropStat) *MultiStatus {
 	return NewMultiStatus(Response{
 		Hrefs:     []Href{{Path: href}},
-		PropStats: m.propStats(name, err),
+		PropStats: propStats,
 	})
 }
 
-// propStats returns the status of each property m sets when the property name
-// can't be set, as err says (see PropError).
-func (m *Mkcol) propStats(name xml.Name, err error) []PropStat {
-	var errElt *Error
-	errors.As(err, &errElt)
-	propStats := []PropStat{{
-		Prop:   Prop{Raw: xmlNamesToRaw([]xml.Name{name})},
-		Status: Status{Code: HTTPErrorFromError(err).Code},
-		Error:  errElt,
-	}}
+// failedPropStat returns the propstat element reporting that the property
+// name can't be set, as err says: with the status of err, and the DAV:error
+// element and the description it has, as NewErrorResponse finds them.
+func failedPropStat(name xml.Name, err error) PropStat {
+	resp := NewErrorResponse("", err)
+	return PropStat{
+		Prop:                Prop{Raw: xmlNamesToRaw([]xml.Name{name})},
+		Status:              *resp.Status,
+		Error:               resp.Error,
+		ResponseDescription: resp.ResponseDescription,
+	}
+}
 
+// failedDependencies returns the propstat element reporting 424 Failed
+// Dependency for the properties m sets other than those of failed, or nil if
+// there are none.
+func (m *Mkcol) failedDependencies(failed []xml.Name) []PropStat {
 	var others []xml.Name
 	for _, raw := range m.props() {
-		if n, ok := raw.XMLName(); ok && n != name && !slices.Contains(others, n) {
+		if n, ok := raw.XMLName(); ok && !slices.Contains(failed, n) && !slices.Contains(others, n) {
 			others = append(others, n)
 		}
 	}
-	if len(others) > 0 {
-		propStats = append(propStats, PropStat{
-			Prop:   Prop{Raw: xmlNamesToRaw(others)},
-			Status: Status{Code: http.StatusFailedDependency},
-		})
+	if len(others) == 0 {
+		return nil
 	}
-	return propStats
+	return []PropStat{{
+		Prop:   Prop{Raw: xmlNamesToRaw(others)},
+		Status: Status{Code: http.StatusFailedDependency},
+	}}
+}
+
+// cannotModifyProtectedPropertyName is the precondition of a request setting
+// a protected property (RFC 4918 section 16).
+var cannotModifyProtectedPropertyName = xml.Name{Namespace, "cannot-modify-protected-property"}
+
+// NewProtectedPropError returns the error of setting a protected property:
+// 403 Forbidden, with the DAV:cannot-modify-protected-property precondition
+// (RFC 4918 section 9.2.1).
+func NewProtectedPropError() error {
+	return NewConditionError(http.StatusForbidden, cannotModifyProtectedPropertyName)
+}
+
+// protectedProps lists the protected properties which the server maintains
+// on collections, or which the RFCs defining them require to be protected:
+// RFC 4918 section 15 (getetag, getlastmodified, getcontentlength,
+// lockdiscovery, supportedlock), RFC 3253 section 3.1.5
+// (supported-report-set), RFC 3744 sections 5.1, 5.3, 5.4 and 5.8 (owner,
+// which the server computes, supported-privilege-set,
+// current-user-privilege-set, principal-collection-set), RFC 5397 section 3
+// (current-user-principal) and RFC 6578 section 4 (sync-token), along with
+// CS:getctag, which the server computes.
+var protectedProps = []xml.Name{
+	GetETagName,
+	GetLastModifiedName,
+	GetContentLengthName,
+	LockDiscoveryName,
+	SupportedLockName,
+	SupportedReportSetName,
+	OwnerName,
+	SupportedPrivilegeSetName,
+	CurrentUserPrivilegeSetName,
+	PrincipalCollectionSetName,
+	CurrentUserPrincipalName,
+	SyncTokenName,
+	GetCTagName,
+}
+
+// IsProtectedProp reports whether name is a protected property of the
+// collections served by the caldav and carddav packages, which clients can't
+// set, as listed by protectedProps or in others.
+func IsProtectedProp(name xml.Name, others ...xml.Name) bool {
+	return slices.Contains(protectedProps, name) || slices.Contains(others, name)
 }

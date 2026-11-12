@@ -24,6 +24,10 @@ var (
 	supportedCalendarComponentSetName = xml.Name{namespace, "supported-calendar-component-set"}
 	supportedCollationSetName         = xml.Name{namespace, "supported-collation-set"}
 	maxResourceSizeName               = xml.Name{namespace, "max-resource-size"}
+	minDateTimeName                   = xml.Name{namespace, "min-date-time"}
+	maxDateTimeName                   = xml.Name{namespace, "max-date-time"}
+	maxInstancesName                  = xml.Name{namespace, "max-instances"}
+	maxAttendeesPerInstanceName       = xml.Name{namespace, "max-attendees-per-instance"}
 
 	calendarColorName = xml.Name{appleNamespace, "calendar-color"}
 
@@ -421,15 +425,4 @@ func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 type mkcalendarSetReq struct {
 	XMLName xml.Name     `xml:"urn:ietf:params:xml:ns:caldav mkcalendar"`
 	Set     internal.Set `xml:"DAV: set"`
-}
-
-// mkcolProp holds the properties of an extended MKCOL or a MKCALENDAR request
-// which the server reads. Extended MKCOL requests also set DAV:resourcetype,
-// which internal.Mkcol.CheckResourceType checks.
-type mkcolProp struct {
-	DisplayName                   string                        `xml:"DAV: displayname"`
-	CalendarDescription           string                        `xml:"urn:ietf:params:xml:ns:caldav calendar-description"`
-	CalendarTimezone              string                        `xml:"urn:ietf:params:xml:ns:caldav calendar-timezone"`
-	CalendarColor                 string                        `xml:"http://apple.com/ns/ical/ calendar-color"`
-	SupportedCalendarComponentSet supportedCalendarComponentSet `xml:"urn:ietf:params:xml:ns:caldav supported-calendar-component-set"`
 }

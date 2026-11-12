@@ -205,6 +205,62 @@ func TestMkcolErrors(t *testing.T) {
 			wantCode: http.StatusConflict,
 			wantBody: "mkcol-response 409 {urn:ietf:params:xml:ns:caldav}calendar-timezone error {urn:ietf:params:xml:ns:caldav}valid-calendar-data; 424 {DAV:}resourcetype,{DAV:}displayname",
 		},
+		{
+			// RFC 4918 section 9.2.1: "403 (Forbidden): The client has
+			// attempted to set a protected property, such as
+			// DAV:getetag."
+			name:     "protected property",
+			body:     mkcolBody(mkcolCalendarType + `<D:displayname>Work</D:displayname><D:getetag>"1"</D:getetag>`),
+			wantCode: http.StatusForbidden,
+			wantBody: "mkcol-response 403 {DAV:}getetag error {DAV:}cannot-modify-protected-property; 424 {DAV:}resourcetype,{DAV:}displayname",
+		},
+		{
+			// RFC 4791 section 5.2.4: "If defined, it MUST be protected"
+			name: "protected CalDAV property",
+			body: mkcolBody(mkcolCalendarType + `<C:supported-calendar-data>
+  <C:calendar-data content-type="text/calendar" version="2.0"/>
+</C:supported-calendar-data>`),
+			wantCode: http.StatusForbidden,
+			wantBody: "mkcol-response 403 {urn:ietf:params:xml:ns:caldav}supported-calendar-data error {DAV:}cannot-modify-protected-property; 424 {DAV:}resourcetype",
+		},
+		{
+			// Each property which can't be set is reported, the first
+			// one giving the status of the response
+			name: "protected property and invalid timezone",
+			body: mkcolBody(mkcolCalendarType + `<D:sync-token>http://example.com/ns/sync/1</D:sync-token>
+<C:calendar-timezone>Europe/Berlin</C:calendar-timezone>`),
+			wantCode: http.StatusForbidden,
+			wantBody: "mkcol-response 403 {DAV:}sync-token error {DAV:}cannot-modify-protected-property; " +
+				"409 {urn:ietf:params:xml:ns:caldav}calendar-timezone error {urn:ietf:params:xml:ns:caldav}valid-calendar-data; 424 {DAV:}resourcetype",
+		},
+		{
+			// <!ELEMENT supported-calendar-component-set (comp+)> (RFC
+			// 4791 section 5.2.3)
+			name:     "empty component set",
+			body:     mkcolBody(mkcolCalendarType + `<C:supported-calendar-component-set/>`),
+			wantCode: http.StatusConflict,
+			wantBody: "mkcol-response 409 {urn:ietf:params:xml:ns:caldav}supported-calendar-component-set; 424 {DAV:}resourcetype",
+		},
+		{
+			name:     "component without a name",
+			body:     mkcolBody(mkcolCalendarType + `<C:supported-calendar-component-set><C:comp name=""/></C:supported-calendar-component-set>`),
+			wantCode: http.StatusConflict,
+			wantBody: "mkcol-response 409 {urn:ietf:params:xml:ns:caldav}supported-calendar-component-set; 424 {DAV:}resourcetype",
+		},
+		{
+			name:     "unknown component",
+			body:     mkcolBody(mkcolCalendarType + `<C:supported-calendar-component-set><C:comp name="VEVENT"/><C:comp name="VFOO"/></C:supported-calendar-component-set>`),
+			wantCode: http.StatusConflict,
+			wantBody: "mkcol-response 409 {urn:ietf:params:xml:ns:caldav}supported-calendar-component-set; 424 {DAV:}resourcetype",
+		},
+		{
+			// VALARM is only found in VEVENT and VTODO components (RFC
+			// 5545 section 3.6.6), not in a calendar object resource
+			name:     "nested component",
+			body:     mkcolBody(mkcolCalendarType + `<C:supported-calendar-component-set><C:comp name="VALARM"/></C:supported-calendar-component-set>`),
+			wantCode: http.StatusConflict,
+			wantBody: "mkcol-response 409 {urn:ietf:params:xml:ns:caldav}supported-calendar-component-set; 424 {DAV:}resourcetype",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			backend := &createBackend{}

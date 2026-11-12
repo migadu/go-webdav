@@ -287,15 +287,13 @@ func (h *Handler) handleMkcalendar(w http.ResponseWriter, r *http.Request) error
 	if err != nil {
 		return err
 	}
-	var prop mkcolProp
-	if err := m.DecodeProp(&prop); err != nil {
-		return err
-	}
 	cal := Calendar{Path: r.URL.Path}
-	if err := setCalendarProps(&cal, &prop); err != nil {
-		// Unlike an extended MKCOL request, the property is reported in a
-		// 207 Multi-Status response (RFC 4791 section 5.3.1.1)
-		return internal.ServeMultiStatus(w, m.PropMultiStatus(r.URL.Path, calendarTimezoneName, err))
+	if propStats := m.SetProps(func(raw *internal.RawXMLValue) error {
+		return setCalendarProp(&cal, raw)
+	}); propStats != nil {
+		// Unlike an extended MKCOL request, the properties are reported in
+		// a 207 Multi-Status response (RFC 4791 section 5.3.1.1)
+		return internal.ServeMultiStatus(w, m.PropMultiStatus(r.URL.Path, propStats))
 	}
 
 	if err := h.Backend.CreateCalendar(r.Context(), &cal); err != nil {
@@ -1625,41 +1623,148 @@ func (b *backend) Mkcol(r *http.Request) error {
 		return newPreconditionError(http.StatusForbidden, PreconditionCalendarCollectionLocationOk)
 	}
 
-	var prop mkcolProp
-	if err := m.DecodeProp(&prop); err != nil {
-		return err
-	}
 	cal := Calendar{Path: r.URL.Path}
-	if err := setCalendarProps(&cal, &prop); err != nil {
-		return m.PropError(calendarTimezoneName, err)
+	if propStats := m.SetProps(func(raw *internal.RawXMLValue) error {
+		return setCalendarProp(&cal, raw)
+	}); propStats != nil {
+		return m.PropError(propStats)
 	}
 	return b.Backend.CreateCalendar(r.Context(), &cal)
 }
 
-// setCalendarProps sets the fields of cal from the properties of an extended
-// MKCOL or a MKCALENDAR request. The properties it doesn't support are
-// ignored: clients set many which are only meaningful to them, such as
-// calendar-order, and refusing the request would leave them unable to create
-// calendars. It only fails for an invalid calendar-timezone property.
-func setCalendarProps(cal *Calendar, prop *mkcolProp) error {
-	cal.Name = prop.DisplayName
-	cal.Description = prop.CalendarDescription
-	cal.Color = strings.TrimSpace(prop.CalendarColor)
-
-	if s := strings.TrimSpace(prop.CalendarTimezone); s != "" {
-		tz, err := decodeCalendarTimezone(s)
+// setCalendarProp sets the field of cal for raw, a property set by an
+// extended MKCOL or a MKCALENDAR request. A value the property can't have is
+// a 409 Conflict error, and a protected property, which the client can't set,
+// a 403 Forbidden one (RFC 4791 section 5.3.1.1, RFC 4918 section 9.2.1).
+//
+// The other properties the server doesn't store are ignored: clients set
+// many which are only meaningful to them, such as the calendar-order and
+// calendar-free-busy-set properties the iOS Calendar app sets, and refusing
+// the request would leave them unable to create calendars. DAV:resourcetype
+// is checked by internal.Mkcol.CheckResourceType for an extended MKCOL
+// request, and is that of a calendar for a MKCALENDAR one.
+func setCalendarProp(cal *Calendar, raw *internal.RawXMLValue) error {
+	name, _ := raw.XMLName()
+	switch name {
+	case internal.DisplayNameName:
+		var v internal.DisplayName
+		if err := raw.Decode(&v); err != nil {
+			return &internal.HTTPError{Code: http.StatusConflict, Err: err}
+		}
+		cal.Name = v.Name
+	case calendarDescriptionName:
+		var v calendarDescription
+		if err := raw.Decode(&v); err != nil {
+			return &internal.HTTPError{Code: http.StatusConflict, Err: err}
+		}
+		cal.Description = v.Description
+	case calendarColorName:
+		var v calendarColor
+		if err := raw.Decode(&v); err != nil {
+			return &internal.HTTPError{Code: http.StatusConflict, Err: err}
+		}
+		cal.Color = strings.TrimSpace(v.Color)
+	case calendarTimezoneName:
+		var v calendarTimezone
+		if err := raw.Decode(&v); err != nil {
+			return &internal.HTTPError{Code: http.StatusConflict, Err: err}
+		}
+		cal.Timezone = nil
+		if s := strings.TrimSpace(v.Timezone); s != "" {
+			tz, err := decodeCalendarTimezone(s)
+			if err != nil {
+				return err
+			}
+			cal.Timezone = tz
+		}
+	case supportedCalendarComponentSetName:
+		var v supportedCalendarComponentSet
+		if err := raw.Decode(&v); err != nil {
+			return &internal.HTTPError{Code: http.StatusConflict, Err: err}
+		}
+		names, err := decodeComponentSet(&v)
 		if err != nil {
 			return err
 		}
-		cal.Timezone = tz
-	}
-
-	// Leave the set nil when the request doesn't set it, so the default
-	// applies
-	for _, v := range prop.SupportedCalendarComponentSet.Comp {
-		cal.SupportedComponentSet = append(cal.SupportedComponentSet, v.Name)
+		cal.SupportedComponentSet = names
+	case internal.ResourceTypeName:
+	default:
+		if internal.IsProtectedProp(name, protectedCalendarProps...) {
+			return internal.NewProtectedPropError()
+		}
 	}
 	return nil
+}
+
+// protectedCalendarProps lists the protected properties of calendars besides
+// those of internal.IsProtectedProp: those RFC 4791 sections 5.2.4 to 5.2.9
+// and 7.5.1 say MUST be protected, and the WebDAV-Push properties, which the
+// server computes.
+var protectedCalendarProps = []xml.Name{
+	supportedCalendarDataName,
+	maxResourceSizeName,
+	minDateTimeName,
+	maxDateTimeName,
+	maxInstancesName,
+	maxAttendeesPerInstanceName,
+	supportedCollationSetName,
+	push.TransportsName,
+	push.TopicName,
+	push.SupportedTriggersName,
+}
+
+// calendarComponentTypes lists the types of the components of calendar
+// object resources: those of RFC 5545 section 3.6, and VAVAILABILITY (RFC
+// 7953 section 3.1). The other components, such as VALARM, are found inside
+// these.
+var calendarComponentTypes = []string{
+	ical.CompEvent,
+	ical.CompToDo,
+	ical.CompJournal,
+	ical.CompFreeBusy,
+	ical.CompTimezone,
+	"VAVAILABILITY",
+}
+
+// decodeComponentSet returns the component types of set, the
+// CALDAV:supported-calendar-component-set property of a request creating a
+// calendar. RFC 4791 section 5.2.3 requires at least one
+// (<!ELEMENT supported-calendar-component-set (comp+)>), and each must be a
+// component type of calendar object resources (calendarComponentTypes,
+// compared case-insensitively) or an experimental one (x-comp, RFC 5545
+// section 3.6). Otherwise the value isn't one the property can have: the
+// error is 409 Conflict (RFC 4791 section 5.3.1.1).
+func decodeComponentSet(set *supportedCalendarComponentSet) ([]string, error) {
+	if len(set.Comp) == 0 {
+		return nil, internal.HTTPErrorf(http.StatusConflict, "caldav: supported-calendar-component-set lists no component")
+	}
+	names := make([]string, len(set.Comp))
+	for i, c := range set.Comp {
+		known := slices.ContainsFunc(calendarComponentTypes, func(t string) bool {
+			return strings.EqualFold(t, c.Name)
+		})
+		if !known && !isXName(c.Name) {
+			return nil, internal.HTTPErrorf(http.StatusConflict, "caldav: unsupported component type %q in supported-calendar-component-set", c.Name)
+		}
+		names[i] = c.Name
+	}
+	return names, nil
+}
+
+// isXName reports whether name is an experimental iCalendar name (RFC 5545
+// section 3.1):
+//
+//	x-name = "X-" [vendorid "-"] 1*(ALPHA / DIGIT / "-")
+func isXName(name string) bool {
+	if len(name) <= 2 || !strings.EqualFold(name[:2], "X-") {
+		return false
+	}
+	for _, c := range name[2:] {
+		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func decodeCalendarTimezone(s string) (*ical.Calendar, error) {
