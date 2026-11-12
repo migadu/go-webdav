@@ -440,31 +440,40 @@ func TestClientRedirectBodyNotReplayable(t *testing.T) {
 	}
 }
 
-// TestClientRedirectCredentials checks that the Authorization header is sent
-// to the target of a 301 or 302 redirect as http.Client sends it to the target
-// of a 307 one: to the same domain or a subdomain, and not to another domain,
-// nor after a redirect to another domain. Credentials from the request URL are
-// kept for a relative redirect.
+// TestClientRedirectCredentials checks that the Authorization header is only
+// sent to the target of a 301 or 302 redirect on the origin of the request,
+// as the default client sends it to the target of a 307 one: not to another
+// port or scheme of the host, a subdomain or another domain, nor after a
+// redirect to another origin. The sensitive header fields bound to a domain,
+// such as Cookie, are sent as http.Client sends them: to the same domain or a
+// subdomain, and not to another domain, nor after a redirect to another
+// domain. Credentials from the request URL are kept for a relative redirect.
 func TestClientRedirectCredentials(t *testing.T) {
 	s := &redirectServer{routes: map[string]http.HandlerFunc{
 		"/new":                      davResource,
 		"other.test PROPFIND /back": redirectTo(http.StatusTemporaryRedirect, "http://dav.test/new"),
+		"/back-from-port":           redirectTo(http.StatusTemporaryRedirect, "http://dav.test/new"),
 	}}
 	hc := newRedirectServer(t, s)
+	hc.CheckRedirect = checkRedirect
 
 	for _, tc := range []struct {
 		name, endpoint, location string
-		wantAuth                 bool
+		wantAuth, wantCookie     bool
 	}{
-		{"same host", "http://dav.test/", "/new", true},
-		{"same host, absolute", "http://dav.test/", "http://dav.test/new", true},
-		{"other port", "http://dav.test/", "http://dav.test:8080/new", true},
-		{"subdomain", "http://dav.test/", "http://files.dav.test/new", true},
-		{"parent domain", "http://files.dav.test/", "http://dav.test/new", false},
-		{"other domain", "http://dav.test/", "http://other.test/new", false},
-		{"back from another domain", "http://dav.test/", "http://other.test/back", false},
-		{"URL credentials, relative", "http://user:pass@dav.test/", "/new", true},
-		{"URL credentials, other domain", "http://user:pass@dav.test/", "http://other.test/new", false},
+		{"same host", "http://dav.test/", "/new", true, true},
+		{"same host, absolute", "http://dav.test/", "http://dav.test/new", true, true},
+		{"same host, default port", "http://dav.test/", "http://dav.test:80/new", true, true},
+		{"other port", "http://dav.test/", "http://dav.test:8080/new", false, true},
+		{"other scheme", "http://dav.test/", "https://dav.test/new", false, true},
+		{"back from another port", "http://dav.test/", "http://dav.test:8080/back-from-port", false, true},
+		{"subdomain", "http://dav.test/", "http://files.dav.test/new", false, true},
+		{"parent domain", "http://files.dav.test/", "http://dav.test/new", false, false},
+		{"other domain", "http://dav.test/", "http://other.test/new", false, false},
+		{"back from another domain", "http://dav.test/", "http://other.test/back", false, false},
+		{"URL credentials, relative", "http://user:pass@dav.test/", "/new", true, true},
+		{"URL credentials, other port", "http://user:pass@dav.test/", "http://dav.test:8080/new", false, true},
+		{"URL credentials, other domain", "http://user:pass@dav.test/", "http://other.test/new", false, false},
 	} {
 		c, err := NewClient(hc, tc.endpoint)
 		if err != nil {
@@ -503,8 +512,8 @@ func TestClientRedirectCredentials(t *testing.T) {
 			if (auth != "") != tc.wantAuth {
 				t.Errorf("%v: Authorization at the target = %q, want it sent: %v", name, auth, tc.wantAuth)
 			}
-			if cookie := got.header.Get("Cookie"); (cookie != "") != tc.wantAuth {
-				t.Errorf("%v: Cookie at the target = %q, want it sent: %v", name, cookie, tc.wantAuth)
+			if cookie := got.header.Get("Cookie"); (cookie != "") != tc.wantCookie {
+				t.Errorf("%v: Cookie at the target = %q, want it sent: %v", name, cookie, tc.wantCookie)
 			}
 			if code == http.StatusTemporaryRedirect {
 				want307 = auth
@@ -515,8 +524,8 @@ func TestClientRedirectCredentials(t *testing.T) {
 	}
 }
 
-// basicAuthClient adds basic authentication to every request it's given, as
-// the HTTP client returned by webdav.HTTPClientWithBasicAuth does.
+// basicAuthClient adds basic authentication to every request it's given, in
+// place, as an HTTP client adding credentials to its requests may do.
 type basicAuthClient struct {
 	c HTTPClient
 }

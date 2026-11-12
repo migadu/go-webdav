@@ -167,7 +167,10 @@ type HTTPClient interface {
 // http.Client sends the request following a redirect with the header fields
 // of the first one, Authorization and Cookie included, if it's for the same
 // domain, whatever the scheme. The credentials, e.g. those added by
-// webdav.HTTPClientWithBasicAuth, would go in cleartext.
+// webdav.HTTPClientWithBasicAuth, would go in cleartext. The returned client
+// also leaves out the Authorization header field once a redirect leaves the
+// origin of the first request, which http.Client keeps for another port or
+// scheme of its host and for its subdomains.
 //
 // It's a copy, rather than a client of its own, so that the Transport, Jar
 // and Timeout of http.DefaultClient still apply, as in webdav.SendWebPush.
@@ -188,6 +191,17 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 			Err:  errors.New("webdav: won't follow a redirect from an https URL to an http one"),
 		}
 	}
+	// http.Client copies the Authorization header field of the first request
+	// to req if it's on the same domain or a subdomain, but credentials are
+	// for its origin (RFC 9110 section 11.5): they're left out once a
+	// redirect leaves it, as Do leaves them out
+	leftOrigin := !sameOrigin(req.URL, via[0].URL)
+	for _, r := range via[1:] {
+		leftOrigin = leftOrigin || !sameOrigin(r.URL, via[0].URL)
+	}
+	if leftOrigin {
+		req.Header.Del("Authorization")
+	}
 	return nil
 }
 
@@ -204,9 +218,9 @@ type endpointKey struct{}
 // Client sends to another origin doesn't get them: one for another host a
 // server lists resources on, as iCloud does for home sets, or for an http URL
 // with an https endpoint. Neither does a request Do sends again to another
-// origin to follow a redirect: it only keeps the Authorization header field
-// of the first one where http.Client would keep it (see Do). A request not
-// sent by a Client is the caller's own, and gets them.
+// origin to follow a redirect, which doesn't keep the Authorization header
+// field of the first one either (see Do). A request not sent by a Client is
+// the caller's own, and gets them.
 func CredentialsAllowed(req *http.Request) bool {
 	endpoint, ok := req.Context().Value(endpointKey{}).(*url.URL)
 	return !ok || sameOrigin(req.URL, endpoint)
@@ -489,19 +503,22 @@ func isDomainOrSubdomain(host, parent string) bool {
 // req.GetBody, which http.NewRequest sets for in-memory bodies: without it, Do
 // returns an *HTTPError with the redirect status, as http.Client does for a
 // 307 or 308 redirect. As with http.Client, at most 10 redirects are followed,
-// and the sensitive header fields, such as Authorization and Cookie, are left
-// out once a redirect leaves the domain of req and its subdomains; an HTTP
-// client adding credentials to every request adds them anyway, but
-// webdav.HTTPClientWithBasicAuth only adds them to a request for the
-// endpoint's origin (see CredentialsAllowed). For that reason, and
-// because of the body, a request for an https URL isn't sent again to an http
-// URL: Do returns an *HTTPError with the redirect status. The requests the HTTP
-// client sends itself to follow a redirect, such as that GET request, are up
-// to its CheckRedirect: http.Client sends them to an http URL on the same
-// domain with the sensitive header fields, but DefaultHTTPClient, used when
-// NewClient is given none, doesn't follow a redirect from https to http. A 303
-// See Other redirect, which asks for a GET request, and a POST request are
-// left to the HTTP client.
+// and the sensitive header fields, such as Cookie, are left out once a
+// redirect leaves the domain of req and its subdomains. The Authorization
+// header field is left out once a redirect leaves the origin of req, its
+// scheme, host and port (RFC 9110 section 11.5), which http.Client doesn't
+// check. An HTTP client adding credentials to every request adds them anyway,
+// but webdav.HTTPClientWithBasicAuth only adds them to a request for the
+// endpoint's origin (see CredentialsAllowed). For that reason, and because of
+// the body, a request for an https URL isn't sent again to an http URL: Do
+// returns an *HTTPError with the redirect status. The requests the HTTP client
+// sends itself to follow a redirect, such as that GET request, are up to its
+// CheckRedirect: http.Client sends them to another port or scheme of the host,
+// http included, and to its subdomains, with the sensitive header fields, but
+// DefaultHTTPClient, used when NewClient is given none, doesn't follow a
+// redirect from https to http, and leaves out the Authorization header field
+// on another origin. A 303 See Other redirect, which asks for a GET request,
+// and a POST request are left to the HTTP client.
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	resp, err := c.send(req)
 	if err != nil {
@@ -566,7 +583,7 @@ func (c *Client) send(req *http.Request) (*http.Response, error) {
 
 	r := req
 	redirects := 0
-	stripSensitive := false
+	stripSensitive, leftOrigin := false, false
 	for {
 		resp, err := c.http.Do(r)
 		if err != nil {
@@ -601,11 +618,19 @@ func (c *Client) send(req *http.Request) (*http.Response, error) {
 			if !isDomainOrSubdomain(h.URL.Hostname(), req.URL.Hostname()) {
 				stripSensitive = true
 			}
+			if !sameOrigin(h.URL, req.URL) {
+				leftOrigin = true
+			}
 		}
 
 		r, err = redirectedRequest(req, hop, stripSensitive)
 		if err != nil {
 			return nil, err
+		}
+		if leftOrigin {
+			// Credentials are for the origin of req (RFC 9110 section
+			// 11.5), not for its domain
+			r.Header.Del("Authorization")
 		}
 	}
 }
