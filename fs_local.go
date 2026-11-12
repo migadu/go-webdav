@@ -493,10 +493,38 @@ func errOverwriteSourceParent() error {
 	return NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: cannot overwrite a collection containing the source"))
 }
 
-// isSameDirEntry reports whether srcPath and dstPath refer to the same
-// directory entry (for example, a case-only rename on a case-insensitive file
-// system), rather than two distinct hard links to the same inode.
-func isSameDirEntry(root *os.Root, srcPath, dstPath string, srcInfo os.FileInfo) bool {
+// isSameFile reports whether srcPath and dstPath resolve to the same file,
+// following symbolic links, or name the same symbolic link, which may not
+// resolve.
+func isSameFile(root *os.Root, srcPath, dstPath string) bool {
+	srcInfo, srcErr := root.Lstat(srcPath)
+	dstInfo, dstErr := root.Lstat(dstPath)
+	if srcErr == nil && dstErr == nil && os.SameFile(srcInfo, dstInfo) {
+		return true
+	}
+	srcInfo, srcErr = root.Stat(srcPath)
+	dstInfo, dstErr = root.Stat(dstPath)
+	return srcErr == nil && dstErr == nil && os.SameFile(srcInfo, dstInfo)
+}
+
+// isSameDirEntry reports whether dstPath is the directory entry srcPath
+// names, under another name: an alias on a case-insensitive file system, for
+// instance. Renaming srcPath to dstPath then only changes the entry's name.
+// It returns false if both paths have the same name, through a symbolic link
+// to their directory: there's nothing to rename.
+func isSameDirEntry(root *os.Root, srcPath, dstPath string) bool {
+	srcInfo, err := root.Lstat(srcPath)
+	if err != nil {
+		return false
+	}
+	dstInfo, err := root.Lstat(dstPath)
+	if err != nil || !os.SameFile(srcInfo, dstInfo) {
+		return false
+	}
+	srcName, dstName := path.Base(srcPath), path.Base(dstPath)
+	if srcName == dstName {
+		return false
+	}
 	srcDir, dstDir := path.Dir(srcPath), path.Dir(dstPath)
 	srcDirInfo, err := root.Stat(srcDir)
 	if err != nil {
@@ -506,25 +534,24 @@ func isSameDirEntry(root *os.Root, srcPath, dstPath string, srcInfo os.FileInfo)
 	if err != nil || !os.SameFile(srcDirInfo, dstDirInfo) {
 		return false
 	}
+	// As in isSeparateLink, compare the names listed rather than count the
+	// entries for the file, which may have other hard links: dstName is an
+	// alias of srcName if only srcName is listed. If another name matching
+	// dstName ignoring case is listed, dstName may be an alias of that one,
+	// another hard link to the file, which renaming onto would leave alone.
 	entries, err := iofs.ReadDir(root.FS(), srcDir)
 	if err != nil {
 		return false
 	}
-	matches := 0
+	listed := false
 	for _, e := range entries {
-		entryPath := e.Name()
-		if srcDir != "." {
-			entryPath = path.Join(srcDir, entryPath)
-		}
-		info, err := root.Lstat(entryPath)
-		if err == nil && os.SameFile(srcInfo, info) {
-			matches++
-			if matches > 1 {
-				return false
-			}
+		if e.Name() == srcName {
+			listed = true
+		} else if strings.EqualFold(e.Name(), dstName) {
+			return false
 		}
 	}
-	return matches == 1
+	return listed
 }
 
 // isSeparateLink reports whether dstPath, which resolves to the same file as
@@ -566,8 +593,8 @@ func isSeparateLink(root *os.Root, srcPath, dstPath string) bool {
 	}
 	// In the same directory, the names are two entries only if both are
 	// listed: otherwise one is an alias of the other, the file system
-	// ignoring case for instance. Unlike isSameDirEntry, this doesn't count
-	// the entries for the file, which may have other hard links.
+	// ignoring case for instance. This doesn't count the entries for the
+	// file, which may have other hard links.
 	srcName, dstName := path.Base(srcPath), path.Base(dstPath)
 	if srcName == dstName {
 		return false
@@ -758,6 +785,18 @@ func (fs LocalFileSystem) Move(ctx context.Context, src, dst string, options *Mo
 		return false, err
 	}
 
+	// The destination is removed before moving (RFC 4918 section 9.9.3),
+	// which mustn't remove the source. If the destination is the source's
+	// entry under another name, as in a case-only rename, it's renamed in
+	// place. Otherwise, a destination which is the source, or what the
+	// source links to, can only be removed if it's a link of its own, as
+	// in Copy: anything else is moving a resource onto itself (RFC 4918
+	// section 9.9.4).
+	inPlace := isSameDirEntry(root, srcPath, dstPath)
+	if !inPlace && isSameFile(root, srcPath, dstPath) && !isSeparateLink(root, srcPath, dstPath) {
+		return false, NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: cannot move a resource onto itself"))
+	}
+
 	if _, err := root.Stat(dstPath); err != nil {
 		if !os.IsNotExist(err) {
 			return false, errFromOS(err)
@@ -766,8 +805,10 @@ func (fs LocalFileSystem) Move(ctx context.Context, src, dst string, options *Mo
 			if options.NoOverwrite {
 				return false, NewHTTPError(http.StatusPreconditionFailed, os.ErrExist)
 			}
-			if err := removeAll(root, dstPath); err != nil {
-				return false, err
+			if !inPlace {
+				if err := removeAll(root, dstPath); err != nil {
+					return false, err
+				}
 			}
 		} else {
 			created = true
@@ -779,8 +820,7 @@ func (fs LocalFileSystem) Move(ctx context.Context, src, dst string, options *Mo
 		if isSubPath(dstPath, srcPath) {
 			return false, errOverwriteSourceParent()
 		}
-		dstLstat, lerr := root.Lstat(dstPath)
-		if lerr != nil || !os.SameFile(srcInfo, dstLstat) || !isSameDirEntry(root, srcPath, dstPath, srcInfo) {
+		if !inPlace {
 			if err := removeAll(root, dstPath); err != nil {
 				return false, err
 			}
