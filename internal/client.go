@@ -158,14 +158,49 @@ type HTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
+// DefaultHTTPClient returns the HTTP client to use when none is given: a copy
+// of http.DefaultClient which doesn't follow a redirect from an https URL to
+// an http one, and otherwise follows 10 redirects at most, as http.Client does
+// by default. The error returned for such a redirect wraps an *HTTPError with
+// its status.
+//
+// http.Client sends the request following a redirect with the header fields
+// of the first one, Authorization and Cookie included, if it's for the same
+// domain, whatever the scheme. The credentials, e.g. those added by
+// webdav.HTTPClientWithBasicAuth, would go in cleartext.
+//
+// It's a copy, rather than a client of its own, so that the Transport, Jar
+// and Timeout of http.DefaultClient still apply, as in webdav.SendWebPush.
+func DefaultHTTPClient() *http.Client {
+	c := *http.DefaultClient
+	c.CheckRedirect = checkRedirect
+	return &c
+}
+
+// checkRedirect is the CheckRedirect function of DefaultHTTPClient.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %v redirects", maxRedirects)
+	}
+	if via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme == "http" {
+		return &HTTPError{
+			Code: req.Response.StatusCode,
+			Err:  errors.New("webdav: won't follow a redirect from an https URL to an http one"),
+		}
+	}
+	return nil
+}
+
 type Client struct {
 	http     HTTPClient
 	endpoint *url.URL
 }
 
+// NewClient returns a client for endpoint, sending its requests with c. If c
+// is nil, DefaultHTTPClient is used.
 func NewClient(c HTTPClient, endpoint string) (*Client, error) {
 	if c == nil {
-		c = http.DefaultClient
+		c = DefaultHTTPClient()
 	}
 
 	u, err := url.Parse(endpoint)
@@ -408,8 +443,10 @@ func isDomainOrSubdomain(host, parent string) bool {
 // URL: Do returns an *HTTPError with the redirect status. The requests the HTTP
 // client sends itself to follow a redirect, such as that GET request, are up
 // to its CheckRedirect: http.Client sends them to an http URL on the same
-// domain with the sensitive header fields. A 303 See Other redirect, which asks
-// for a GET request, and a POST request are left to the HTTP client.
+// domain with the sensitive header fields, but DefaultHTTPClient, used when
+// NewClient is given none, doesn't follow a redirect from https to http. A 303
+// See Other redirect, which asks for a GET request, and a POST request are
+// left to the HTTP client.
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	resp, err := c.send(req)
 	if err != nil {
