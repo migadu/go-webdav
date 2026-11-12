@@ -152,6 +152,77 @@ func TestCalendarQueryValidFilterPrecondition(t *testing.T) {
 	}
 }
 
+// RFC 4791 section 9.9 defines a time-range for the VEVENT, VTODO, VJOURNAL,
+// VFREEBUSY and VALARM components and for seven properties only: "The
+// semantic of CALDAV:time-range is not defined for any other calendar
+// components and properties." Section 7.8 gives a time-range in a SUMMARY
+// prop-filter as an example of a filter which fails CALDAV:valid-filter.
+func TestCalendarQueryTimeRangeUndefined(t *testing.T) {
+	const calPath = "/user/calendars/work/"
+	co := calendarObject(t, "BEGIN:VEVENT\r\nDTSTAMP:20060206T001102Z\r\nUID:event\r\nSUMMARY:Meeting\r\n"+
+		"DTSTART:20060104T100000Z\r\nRECURRENCE-ID:20060104T100000Z\r\nEND:VEVENT\r\n")
+	co.Path = calPath + "event.ics"
+	h := &Handler{Backend: queryBackend{testBackend{
+		calendars: []Calendar{{Path: calPath}},
+		objectMap: map[string][]CalendarObject{calPath: {co}},
+	}}}
+
+	const timeRange = `<C:time-range start="20060104T000000Z" end="20060105T000000Z"/>`
+	for _, tc := range []struct {
+		name string
+		// The content of the VCALENDAR comp-filter
+		filter string
+	}{
+		{"VCALENDAR", timeRange},
+		{"VTIMEZONE", `<C:comp-filter name="VTIMEZONE">` + timeRange + `</C:comp-filter>`},
+		{"STANDARD", `<C:comp-filter name="VTIMEZONE"><C:comp-filter name="STANDARD">` + timeRange + `</C:comp-filter></C:comp-filter>`},
+		{"SUMMARY", `<C:comp-filter name="VEVENT"><C:prop-filter name="SUMMARY">` + timeRange + `</C:prop-filter></C:comp-filter>`},
+		{"RECURRENCE-ID", `<C:comp-filter name="VEVENT"><C:prop-filter name="RECURRENCE-ID">` + timeRange + `</C:prop-filter></C:comp-filter>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `<?xml version="1.0" encoding="utf-8"?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop><D:getetag/></D:prop>
+  <C:filter><C:comp-filter name="VCALENDAR">` + tc.filter + `</C:comp-filter></C:filter>
+</C:calendar-query>`
+			req := httptest.NewRequest("REPORT", calPath, strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/xml")
+			req.Header.Set("Depth", "1")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			if w.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want 403 Forbidden", w.Code)
+			}
+			if !hasCalDAVPrecondition(t, w, PreconditionValidFilter) {
+				t.Errorf("body isn't a DAV:error with CALDAV:valid-filter:\n%s", w.Body.String())
+			}
+		})
+	}
+}
+
+// A time-range whose start has a fraction of a second isn't in the "date
+// with UTC time" format, so the request is malformed, as for any other value
+// that isn't one.
+func TestCalendarQueryTimeRangeFraction(t *testing.T) {
+	h := &Handler{Backend: queryBackend{testBackend{calendars: []Calendar{{Path: "/user/calendars/work/"}}}}}
+	body := `<?xml version="1.0" encoding="utf-8"?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop><D:getetag/></D:prop>
+  <C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT">
+    <C:time-range start="20060104T000000.5Z"/>
+  </C:comp-filter></C:comp-filter></C:filter>
+</C:calendar-query>`
+	req := httptest.NewRequest("REPORT", "/user/calendars/work/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/xml")
+	req.Header.Set("Depth", "1")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 Bad Request", w.Code)
+	}
+}
+
 // RFC 4791 section 9.5 requires a filter in calendar-query, and section 9.7
 // makes it hold a single comp-filter. Section 9.7.1 sets the scope of that
 // comp-filter to the calendar object, a VCALENDAR, and requires its name

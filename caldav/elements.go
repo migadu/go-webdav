@@ -258,6 +258,11 @@ const dateWithUTCTimeLayout = "20060102T150405Z"
 type dateWithUTCTime time.Time
 
 func (t *dateWithUTCTime) UnmarshalText(b []byte) error {
+	// time.Parse accepts a fraction of a second after the seconds, which
+	// the RFC 5545 section 3.3.5 form doesn't have: it's always 16 octets
+	if len(b) != len(dateWithUTCTimeLayout) {
+		return fmt.Errorf("caldav: invalid date with UTC time: %q", b)
+	}
 	tt, err := time.Parse(dateWithUTCTimeLayout, string(b))
 	if err != nil {
 		return err

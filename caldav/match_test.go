@@ -705,8 +705,8 @@ func TestMatchTodoTimeRange(t *testing.T) {
 	}
 }
 
-// Time ranges are not evaluated for VJOURNAL, VFREEBUSY and VALARM yet. A range
-// with only an end used to be ignored for them, so they must still match it.
+// A range with only an end matches a VALARM which triggers before it and a
+// VJOURNAL which starts before it.
 func TestMatchOtherCompTimeRangeWithoutStart(t *testing.T) {
 	cal, err := ical.NewDecoder(strings.NewReader("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example Corp.//CalDAV Client//EN\r\n" +
 		"BEGIN:VEVENT\r\nDTSTAMP:20060206T001102Z\r\nUID:alarm\r\nSUMMARY:Alarm\r\n" +

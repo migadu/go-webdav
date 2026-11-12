@@ -111,74 +111,12 @@ func TestQueryCalendarIsNotDefined(t *testing.T) {
 	}
 }
 
-// RFC 4791 sections 9.7.1 to 9.7.3: an is-not-defined element can't have
-// siblings.
-func TestQueryCalendarIsNotDefinedAlone(t *testing.T) {
-	start := time.Date(2006, 1, 4, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2006, 1, 5, 0, 0, 0, 0, time.UTC)
-
-	cq := queryCalendarRequest(t, &CalendarQuery{
-		CompFilter: CompFilter{
-			Name: "VCALENDAR",
-			Comps: []CompFilter{{
-				Name: "VEVENT",
-				Props: []PropFilter{{
-					Name:         "LOCATION",
-					IsNotDefined: true,
-					TextMatch:    &TextMatch{Text: "Office"},
-					ParamFilter:  []ParamFilter{{Name: "ALTREP"}},
-				}, {
-					Name:         "DTEND",
-					IsNotDefined: true,
-					Start:        start,
-					End:          end,
-				}, {
-					Name: "ATTENDEE",
-					ParamFilter: []ParamFilter{{
-						Name:         "PARTSTAT",
-						IsNotDefined: true,
-						TextMatch:    &TextMatch{Text: "NEEDS-ACTION"},
-					}},
-				}},
-				Comps: []CompFilter{{
-					Name:         "VALARM",
-					IsNotDefined: true,
-					Start:        start,
-					End:          end,
-					Props:        []PropFilter{{Name: "ACTION"}},
-					Comps:        []CompFilter{{Name: "X-CHILD"}},
-				}},
-			}},
-		},
-	})
-
-	vevent := cq.Filter.CompFilters[0].CompFilters[0]
-
-	valarm := vevent.CompFilters[0]
-	if valarm.IsNotDefined == nil || valarm.TimeRange != nil || len(valarm.PropFilters) != 0 || len(valarm.CompFilters) != 0 {
-		t.Errorf("VALARM comp-filter = %+v, want only is-not-defined", valarm)
-	}
-
-	for _, pf := range vevent.PropFilters[:2] {
-		if pf.IsNotDefined == nil || pf.TimeRange != nil || pf.TextMatch != nil || len(pf.ParamFilter) != 0 {
-			t.Errorf("%v prop-filter = %+v, want only is-not-defined", pf.Name, pf)
-		}
-	}
-
-	partstat := vevent.PropFilters[2].ParamFilter[0]
-	if partstat.IsNotDefined == nil || partstat.TextMatch != nil {
-		t.Errorf("PARTSTAT param-filter = %+v, want only is-not-defined", partstat)
-	}
-
-	if _, err := decodeFilter(cq.Filter); err != nil {
-		t.Errorf("decodeFilter() = %v", err)
-	}
-}
-
 // The client refuses, without sending it, a filter the server would answer
 // with CALDAV:valid-filter: one which breaks the grammar of RFC 4791 sections
-// 9.7 to 9.7.3, or with a time range whose end isn't after its start once
-// both are truncated to the second, as section 9.9 requires.
+// 9.7 to 9.7.3, such as an is-not-defined with siblings, or with a time range
+// section 9.9 doesn't define, or whose end isn't after its start once both
+// are truncated to the second. It also refuses an outer is-not-defined,
+// which no calendar object can match.
 func TestQueryCalendarInvalidFilter(t *testing.T) {
 	var sent bool
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -227,6 +165,36 @@ func TestQueryCalendarInvalidFilter(t *testing.T) {
 			Name:        "ATTENDEE",
 			ParamFilter: []ParamFilter{{IsNotDefined: true}},
 		}}})},
+		{"comp-filter is-not-defined with a time range", vevent(CompFilter{IsNotDefined: true, Start: jan2006(3)})},
+		{"comp-filter is-not-defined with a prop-filter", vevent(CompFilter{IsNotDefined: true, Props: []PropFilter{{Name: "SUMMARY"}}})},
+		{"comp-filter is-not-defined with a comp-filter", vevent(CompFilter{IsNotDefined: true, Comps: []CompFilter{{Name: "VALARM"}}})},
+		{"prop-filter is-not-defined with a time range", vevent(CompFilter{Props: []PropFilter{{
+			Name:         "DTEND",
+			IsNotDefined: true,
+			End:          jan2006(5),
+		}}})},
+		{"prop-filter is-not-defined with a text match", vevent(CompFilter{Props: []PropFilter{{
+			Name:         "LOCATION",
+			IsNotDefined: true,
+			TextMatch:    &TextMatch{Text: "Office"},
+		}}})},
+		{"prop-filter is-not-defined with a param-filter", vevent(CompFilter{Props: []PropFilter{{
+			Name:         "LOCATION",
+			IsNotDefined: true,
+			ParamFilter:  []ParamFilter{{Name: "ALTREP"}},
+		}}})},
+		{"param-filter is-not-defined with a text match", vevent(CompFilter{Props: []PropFilter{{
+			Name: "ATTENDEE",
+			ParamFilter: []ParamFilter{{
+				Name:         "PARTSTAT",
+				IsNotDefined: true,
+				TextMatch:    &TextMatch{Text: "NEEDS-ACTION"},
+			}},
+		}}})},
+		{"outer is-not-defined", CompFilter{Name: "VCALENDAR", IsNotDefined: true}},
+		{"time range on VCALENDAR", CompFilter{Name: "VCALENDAR", Start: jan2006(3)}},
+		{"time range on VTIMEZONE", CompFilter{Name: "VCALENDAR", Comps: []CompFilter{{Name: "VTIMEZONE", Start: jan2006(3)}}}},
+		{"time range on SUMMARY", vevent(CompFilter{Props: []PropFilter{{Name: "SUMMARY", Start: jan2006(3)}}})},
 	} {
 		sent = false
 		_, err := c.QueryCalendar(context.Background(), "/user/calendars/cal/", &CalendarQuery{CompFilter: tc.filter})

@@ -93,3 +93,29 @@ func TestDateWithUTCTimeMarshalNonUTC(t *testing.T) {
 		t.Errorf("Expand.End = %v, want %v (UTC %v)", rec.got.CompRequest.Expand.End, expandEnd, expandEnd.UTC())
 	}
 }
+
+// The start and end of a time range are "date with UTC time" values (RFC
+// 4791 section 9.9), the RFC 5545 section 3.3.5 form YYYYMMDDTHHMMSSZ.
+// time.Parse also accepts a fraction of a second after the seconds, which
+// that form doesn't have.
+func TestDateWithUTCTimeUnmarshal(t *testing.T) {
+	for _, tc := range []struct {
+		s  string
+		ok bool
+	}{
+		{"20060104T100000Z", true},
+		{"20060104T100000.5Z", false},
+		{"20060104T100000,5Z", false},
+		{"20060104T100000.000Z", false},
+		{"20060104T100000", false},
+		{"20060104", false},
+	} {
+		var dt dateWithUTCTime
+		err := dt.UnmarshalText([]byte(tc.s))
+		if tc.ok && err != nil {
+			t.Errorf("UnmarshalText(%q) = %v", tc.s, err)
+		} else if !tc.ok && err == nil {
+			t.Errorf("UnmarshalText(%q) = %v, want an error", tc.s, time.Time(dt))
+		}
+	}
+}

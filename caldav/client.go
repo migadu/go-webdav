@@ -503,6 +503,10 @@ func encodeFilter(cf *CompFilter) (*filter, error) {
 	} else if !strings.EqualFold(cf.Name, ical.CompCalendar) {
 		return nil, fmt.Errorf("caldav: the outer CompFilter must be %v, not %q", ical.CompCalendar, cf.Name)
 	}
+	if cf.IsNotDefined {
+		// Every calendar object is a VCALENDAR, so it can't match
+		return nil, fmt.Errorf("caldav: the outer CompFilter can't be IsNotDefined")
+	}
 	encoded, err := encodeCompFilter(cf)
 	if err != nil {
 		return nil, err
@@ -512,19 +516,27 @@ func encodeFilter(cf *CompFilter) (*filter, error) {
 
 // encodeCompFilter returns the comp-filter element for filter. Like its
 // prop-filter and param-filter elements, it's checked as the server checks
-// it: RFC 4791 sections 9.7.1 to 9.7.3 require a name, and section 9.9 a
-// time range whose end is after its start.
+// it: RFC 4791 sections 9.7.1 to 9.7.3 require a name and don't let
+// is-not-defined have siblings, and section 9.9 defines a time range for some
+// components and properties only, and requires its end to be after its
+// start.
 func encodeCompFilter(filter *CompFilter) (*compFilter, error) {
 	if filter.Name == "" {
 		return nil, fmt.Errorf("caldav: a CompFilter requires a Name")
 	}
+	hasTimeRange := !filter.Start.IsZero() || !filter.End.IsZero()
 	encoded := compFilter{Name: filter.Name}
 	if filter.IsNotDefined {
-		// is-not-defined can't have siblings, see RFC 4791 section 9.7.1
+		if hasTimeRange || len(filter.Props) > 0 || len(filter.Comps) > 0 {
+			return nil, fmt.Errorf("caldav: CompFilter %v can't have a time range, Props or Comps with IsNotDefined", filter.Name)
+		}
 		encoded.IsNotDefined = []struct{}{{}}
 		return &encoded, nil
 	}
-	if !filter.Start.IsZero() || !filter.End.IsZero() {
+	if hasTimeRange {
+		if !timeRangeComps[strings.ToUpper(filter.Name)] {
+			return nil, fmt.Errorf("caldav: CompFilter %v can't have a time range", filter.Name)
+		}
 		tr := newTimeRange(filter.Start, filter.End)
 		if err := tr.check(); err != nil {
 			return nil, err
@@ -552,16 +564,22 @@ func encodePropFilter(filter *PropFilter) (*propFilter, error) {
 	if filter.Name == "" {
 		return nil, fmt.Errorf("caldav: a PropFilter requires a Name")
 	}
+	hasTimeRange := !filter.Start.IsZero() || !filter.End.IsZero()
 	encoded := propFilter{Name: filter.Name}
 	if filter.IsNotDefined {
-		// is-not-defined can't have siblings, see RFC 4791 section 9.7.2
+		if hasTimeRange || filter.TextMatch != nil || len(filter.ParamFilter) > 0 {
+			return nil, fmt.Errorf("caldav: PropFilter %v can't have a time range, a TextMatch or ParamFilter with IsNotDefined", filter.Name)
+		}
 		encoded.IsNotDefined = []struct{}{{}}
 		return &encoded, nil
 	}
-	if !filter.Start.IsZero() || !filter.End.IsZero() {
+	if hasTimeRange {
 		// (time-range | text-match)?, see RFC 4791 section 9.7.2
 		if filter.TextMatch != nil {
 			return nil, fmt.Errorf("caldav: PropFilter %v can't have both a time range and a TextMatch", filter.Name)
+		}
+		if !timeRangeProps[strings.ToUpper(filter.Name)] {
+			return nil, fmt.Errorf("caldav: PropFilter %v can't have a time range", filter.Name)
 		}
 		tr := newTimeRange(filter.Start, filter.End)
 		if err := tr.check(); err != nil {
@@ -586,7 +604,9 @@ func encodeParamFilter(pf ParamFilter) (paramFilter, error) {
 	}
 	encoded := paramFilter{Name: pf.Name}
 	if pf.IsNotDefined {
-		// is-not-defined can't have siblings, see RFC 4791 section 9.7.3
+		if pf.TextMatch != nil {
+			return paramFilter{}, fmt.Errorf("caldav: ParamFilter %v can't have a TextMatch with IsNotDefined", pf.Name)
+		}
 		encoded.IsNotDefined = []struct{}{{}}
 		return encoded, nil
 	}

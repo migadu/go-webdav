@@ -211,29 +211,37 @@ type CalendarLimitRequest struct {
 }
 
 type CompFilter struct {
-	Name         string
+	Name string
+	// IsNotDefined matches when there's no such component. Start, End,
+	// Props and Comps must then be zero (RFC 4791 section 9.7.1).
 	IsNotDefined bool
 	// Start and End are the time range of the filter (RFC 4791 section 9.9),
 	// open on the side of a zero time. Start is inclusive, End is exclusive.
 	// A client sends whole seconds, so if both are set, End must still be
-	// after Start once both are truncated to the second.
+	// after Start once both are truncated to the second. Only VEVENT, VTODO,
+	// VJOURNAL, VFREEBUSY and VALARM have a time range.
 	Start, End time.Time
 	Props      []PropFilter
 	Comps      []CompFilter
 }
 
 type ParamFilter struct {
-	Name         string
+	Name string
+	// IsNotDefined matches when there's no such parameter. TextMatch must
+	// then be nil (RFC 4791 section 9.7.3).
 	IsNotDefined bool
 	TextMatch    *TextMatch
 }
 
 type PropFilter struct {
-	Name         string
+	Name string
+	// IsNotDefined matches when there's no such property. Start, End,
+	// TextMatch and ParamFilter must then be zero (RFC 4791 section 9.7.2).
 	IsNotDefined bool
 	// Start and End are the time range of the filter, as in CompFilter. A
 	// filter can't have both a time range and a TextMatch (RFC 4791 section
-	// 9.7.2).
+	// 9.7.2). Only COMPLETED, CREATED, DTEND, DTSTAMP, DTSTART, DUE and
+	// LAST-MODIFIED have a time range (section 9.9).
 	Start, End  time.Time
 	TextMatch   *TextMatch
 	ParamFilter []ParamFilter
@@ -248,7 +256,8 @@ type TextMatch struct {
 type CalendarQuery struct {
 	CompRequest CalendarCompRequest
 	// CompFilter is the filter on the calendar object, a VCALENDAR (RFC 4791
-	// section 9.7.1). A client sends an empty Name as VCALENDAR.
+	// section 9.7.1). A client sends an empty Name as VCALENDAR, and refuses
+	// IsNotDefined, which no calendar object matches.
 	CompFilter CompFilter
 }
 
