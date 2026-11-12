@@ -272,6 +272,15 @@ func newPropError(name xml.Name, err error) error {
 	return fmt.Errorf("property <%v %v>: %w", name.Space, name.Local, err)
 }
 
+// NoHrefError returns the error of the property name received without any
+// DAV:href, for a property which may hold none, such as an empty
+// CALDAV:calendar-home-set (RFC 4791 section 6.2.1): a 404 Not Found error, as
+// DecodeProp returns for a property the response doesn't have, since there's
+// no href to return either way.
+func NoHrefError(name xml.Name) error {
+	return newPropError(name, &HTTPError{Code: http.StatusNotFound, Err: fmt.Errorf("no href")})
+}
+
 func (resp *Response) EncodeProp(code int, v interface{}) error {
 	raw, err := EncodeRawXMLElement(v)
 	if err != nil {
@@ -516,24 +525,14 @@ type DisplayName struct {
 }
 
 // https://tools.ietf.org/html/rfc5397#section-3
+//
+// The property holds either an href or DAV:unauthenticated. Href is a pointer
+// so that a property received without an href can be told from one with an
+// empty href, which refers to the request URL (RFC 3986 section 4.4).
 type CurrentUserPrincipal struct {
 	XMLName         xml.Name  `xml:"DAV: current-user-principal"`
-	Href            Href      `xml:"href,omitempty"`
+	Href            *Href     `xml:"href,omitempty"`
 	Unauthenticated *struct{} `xml:"unauthenticated,omitempty"`
-}
-
-// MarshalXML implements xml.Marshaler. The property holds either an href or
-// DAV:unauthenticated, so Href is left out if Unauthenticated is set:
-// omitempty doesn't leave out a struct.
-func (p *CurrentUserPrincipal) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
-	if p.Unauthenticated == nil {
-		type currentUserPrincipal CurrentUserPrincipal // without the methods
-		return e.Encode((*currentUserPrincipal)(p))
-	}
-	return e.Encode(&struct {
-		XMLName         xml.Name `xml:"DAV: current-user-principal"`
-		Unauthenticated struct{} `xml:"unauthenticated"`
-	}{})
 }
 
 // NewCurrentUserPrincipal returns the DAV:current-user-principal of a request
@@ -544,7 +543,7 @@ func NewCurrentUserPrincipal(principalPath string) *CurrentUserPrincipal {
 	if principalPath == "" {
 		return &CurrentUserPrincipal{Unauthenticated: &struct{}{}}
 	}
-	return &CurrentUserPrincipal{Href: Href{Path: principalPath}}
+	return &CurrentUserPrincipal{Href: &Href{Path: principalPath}}
 }
 
 // https://tools.ietf.org/html/rfc4918#section-14.19

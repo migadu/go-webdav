@@ -71,6 +71,13 @@ func (c *Client) HasSupport(ctx context.Context) error {
 	return nil
 }
 
+// FindAddressBookHomeSet returns the path of the address book home set of the
+// principal at principal, the collection holding its address books.
+//
+// If the principal has no address book home set, because the server doesn't
+// define the CARDDAV:addressbook-home-set property for it or defines it
+// without any href (RFC 6352 section 7.1.1), the returned error wraps a
+// *webdav.HTTPError with the status 404 Not Found.
 func (c *Client) FindAddressBookHomeSet(ctx context.Context, principal string) (string, error) {
 	propfind := internal.NewPropNamePropFind(addressBookHomeSetName)
 	resp, err := c.ic.PropFindFlat(ctx, principal, propfind)
@@ -82,8 +89,11 @@ func (c *Client) FindAddressBookHomeSet(ctx context.Context, principal string) (
 	if err := resp.DecodeProp(&prop); err != nil {
 		return "", err
 	}
+	if prop.Href == nil {
+		return "", internal.NoHrefError(addressBookHomeSetName)
+	}
 
-	return resp.HrefPath(&prop.Href), nil
+	return resp.HrefPath(prop.Href), nil
 }
 
 // FindMeCard returns the path of the address object holding the user's own
@@ -108,10 +118,12 @@ func (c *Client) FindMeCard(ctx context.Context, addressBookHomeSet string) (str
 	} else if err != nil {
 		return "", err
 	}
-	if prop.Href == (internal.Href{}) {
+	// Without an href, there's no me card. An empty href is a reference to
+	// the request URL (RFC 3986 section 4.4), as any other.
+	if prop.Href == nil {
 		return "", nil
 	}
-	return resp.HrefPath(&prop.Href), nil
+	return resp.HrefPath(prop.Href), nil
 }
 
 func decodeSupportedAddressData(supported *supportedAddressData) []AddressDataType {

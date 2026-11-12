@@ -268,3 +268,23 @@ func TestETagWeak(t *testing.T) {
 		t.Errorf("UnmarshalText(W/\"xyzzy) = %q, want an error", string(etag))
 	}
 }
+
+// TestNewCurrentUserPrincipal checks the DAV:current-user-principal servers
+// report: an href, or DAV:unauthenticated without an href (RFC 5397 section
+// 3).
+func TestNewCurrentUserPrincipal(t *testing.T) {
+	for _, tc := range []struct {
+		principalPath, want string
+	}{
+		{"/principals/me/", `<current-user-principal xmlns="DAV:"><href>/principals/me/</href></current-user-principal>`},
+		{"", `<current-user-principal xmlns="DAV:"><unauthenticated></unauthenticated></current-user-principal>`},
+	} {
+		b, err := xml.Marshal(NewCurrentUserPrincipal(tc.principalPath))
+		if err != nil {
+			t.Fatalf("NewCurrentUserPrincipal(%q): %v", tc.principalPath, err)
+		}
+		if string(b) != tc.want {
+			t.Errorf("NewCurrentUserPrincipal(%q) = %s, want %s", tc.principalPath, b, tc.want)
+		}
+	}
+}

@@ -56,6 +56,13 @@ func TestClientFindMeCard(t *testing.T) {
 			propstats: `<D:propstat><D:prop><CS:me-card/></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>`,
 			want:      "",
 		},
+		{
+			// A reference to the request URL (RFC 3986 section 4.4), unlike
+			// a me-card without an href
+			name:      "empty href",
+			propstats: `<D:propstat><D:prop><CS:me-card><D:href></D:href></CS:me-card></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>`,
+			want:      meCardHomeSet,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var ts *httptest.Server

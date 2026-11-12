@@ -14,7 +14,7 @@ func TestNewPropFindResponseAllProp(t *testing.T) {
 	props := func() map[xml.Name]PropFindFunc {
 		return map[xml.Name]PropFindFunc{
 			DisplayNameName:          PropFindValue(&DisplayName{Name: "Work"}),
-			CurrentUserPrincipalName: PropFindValue(&CurrentUserPrincipal{Href: Href{Path: "/user/"}}),
+			CurrentUserPrincipalName: PropFindValue(&CurrentUserPrincipal{Href: &Href{Path: "/user/"}}),
 			calendarDescriptionName:  PropFindValue(NewRawXMLElement(calendarDescriptionName, nil, nil)),
 			maxResourceSizeName:      PropFindValue(NewRawXMLElement(maxResourceSizeName, nil, nil)),
 		}

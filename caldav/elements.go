@@ -35,9 +35,12 @@ var (
 )
 
 // https://tools.ietf.org/html/rfc4791#section-6.2.1
+//
+// The property may hold no href: Href is then nil, unlike for an empty href,
+// which refers to the request URL (RFC 3986 section 4.4).
 type calendarHomeSet struct {
-	XMLName xml.Name      `xml:"urn:ietf:params:xml:ns:caldav calendar-home-set"`
-	Href    internal.Href `xml:"DAV: href"`
+	XMLName xml.Name       `xml:"urn:ietf:params:xml:ns:caldav calendar-home-set"`
+	Href    *internal.Href `xml:"DAV: href"`
 }
 
 func (a *calendarHomeSet) GetXMLName() xml.Name {
