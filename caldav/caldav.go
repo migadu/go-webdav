@@ -145,14 +145,17 @@ type CalendarCompRequest struct {
 
 // CalendarExpandRequest is the time range of an expand request. Start is
 // inclusive, End is exclusive and after Start. Both are required: a client
-// returns an error for a zero time.
+// returns an error for a zero time. A client sends whole seconds, so End must
+// still be after Start once both are truncated to the second.
 type CalendarExpandRequest struct {
 	Start, End time.Time
 }
 
 // CalendarLimitRequest is the time range of a limit-recurrence-set or
 // limit-freebusy-set request. Start is inclusive, End is exclusive and after
-// Start. Both are required: a client returns an error for a zero time.
+// Start. Both are required: a client returns an error for a zero time. A
+// client sends whole seconds, so End must still be after Start once both are
+// truncated to the second.
 type CalendarLimitRequest struct {
 	Start, End time.Time
 }

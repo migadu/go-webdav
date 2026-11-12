@@ -274,7 +274,8 @@ func TestQueryCalendarExpandAndLimitRecurrenceSet(t *testing.T) {
 // The client checks the time ranges of expand, limit-recurrence-set and
 // limit-freebusy-set as the server does, a zero time being a missing
 // attribute, rather than sending e.g. 00010101T000000Z (RFC 4791 sections
-// 9.6.5 to 9.6.7).
+// 9.6.5 to 9.6.7). A range shorter than a second within one second is sent as
+// start == end, the format having no fraction of a second.
 func TestQueryCalendarInvalidTimeRange(t *testing.T) {
 	var sent bool
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -287,6 +288,9 @@ func TestQueryCalendarInvalidTimeRange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Both are 20060103T000000Z on the wire
+	subStart := jan2006(3).Add(100 * time.Millisecond)
+	subEnd := subStart.Add(500 * time.Millisecond)
 	for _, tc := range []struct {
 		name string
 		req  CalendarCompRequest
@@ -302,6 +306,13 @@ func TestQueryCalendarInvalidTimeRange(t *testing.T) {
 			Expand:           &CalendarExpandRequest{Start: jan2006(3), End: jan2006(5)},
 			LimitFreeBusySet: &CalendarLimitRequest{Start: jan2006(3), End: jan2006(2)},
 		}},
+		{"expand shorter than a second", CalendarCompRequest{Expand: &CalendarExpandRequest{Start: subStart, End: subEnd}}},
+		{"expand shorter than a second, in another zone", CalendarCompRequest{Expand: &CalendarExpandRequest{
+			Start: subStart,
+			End:   subEnd.In(time.FixedZone("UTC+1", 3600)),
+		}}},
+		{"limit-recurrence-set shorter than a second", CalendarCompRequest{LimitRecurrenceSet: &CalendarLimitRequest{Start: subStart, End: subEnd}}},
+		{"limit-freebusy-set shorter than a second", CalendarCompRequest{LimitFreeBusySet: &CalendarLimitRequest{Start: subStart, End: subEnd}}},
 	} {
 		sent = false
 		_, err := c.QueryCalendar(context.Background(), "/user/calendars/cal/", &CalendarQuery{
@@ -314,5 +325,36 @@ func TestQueryCalendarInvalidTimeRange(t *testing.T) {
 		if sent {
 			t.Errorf("%v: QueryCalendar() sent the request, and got: %v", tc.name, err)
 		}
+	}
+}
+
+// A range shorter than a second which crosses a second boundary is valid on
+// the wire, and goes out with each bound truncated to the second.
+func TestQueryCalendarSubSecondLimits(t *testing.T) {
+	start := jan2006(3).Add(900 * time.Millisecond)
+	end := start.Add(200 * time.Millisecond)
+	cq := queryCalendarRequest(t, &CalendarQuery{
+		CompRequest: CalendarCompRequest{
+			Name:             "VCALENDAR",
+			AllProps:         true,
+			AllComps:         true,
+			Expand:           &CalendarExpandRequest{Start: start, End: end},
+			LimitFreeBusySet: &CalendarLimitRequest{Start: start, End: end},
+		},
+		CompFilter: CompFilter{Name: "VCALENDAR"},
+	})
+	if cq.Prop == nil {
+		t.Fatalf("calendar-query without a prop element")
+	}
+	got, err := decodeCalendarDataProp(cq.Prop)
+	if err != nil {
+		t.Fatalf("failed to decode the calendar-data request: %v", err)
+	}
+	wantStart, wantEnd := jan2006(3), jan2006(3).Add(time.Second)
+	if e := got.Expand; e == nil || !e.Start.Equal(wantStart) || !e.End.Equal(wantEnd) {
+		t.Errorf("sent expand = %+v, want %v to %v", e, wantStart, wantEnd)
+	}
+	if l := got.LimitFreeBusySet; l == nil || !l.Start.Equal(wantStart) || !l.End.Equal(wantEnd) {
+		t.Errorf("sent limit-freebusy-set = %+v, want %v to %v", l, wantStart, wantEnd)
 	}
 }

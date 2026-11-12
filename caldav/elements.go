@@ -269,14 +269,18 @@ type requiredTimeRange struct {
 
 // newRequiredTimeRange returns the time range from start to end, without the
 // attribute of a zero time.
+//
+// The times are truncated to the second, as the "date with UTC time" format
+// is, so that check sees the range that is sent: a range shorter than a
+// second would otherwise pass it and go out with the end equal to the start.
 func newRequiredTimeRange(start, end time.Time) requiredTimeRange {
 	var tr requiredTimeRange
 	if !start.IsZero() {
-		s := dateWithUTCTime(start)
+		s := dateWithUTCTime(start.UTC().Truncate(time.Second))
 		tr.Start = &s
 	}
 	if !end.IsZero() {
-		e := dateWithUTCTime(end)
+		e := dateWithUTCTime(end.UTC().Truncate(time.Second))
 		tr.End = &e
 	}
 	return tr
