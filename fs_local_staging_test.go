@@ -4,8 +4,10 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -134,5 +136,62 @@ func TestLocalFileSystemReadDirDuringCreate(t *testing.T) {
 				t.Fatalf("ReadDir() lists %v during an upload (listing %d)", fi.Path, i)
 			}
 		}
+	}
+}
+
+// Overwriting a file keeps its permissions, including those the process
+// umask would clear from the staging file.
+func TestLocalFileSystemCreateKeepsPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permissions")
+	}
+	ctx := context.Background()
+	for _, perm := range []os.FileMode{0666, 0640, 0755} {
+		t.Run(perm.String(), func(t *testing.T) {
+			dir := t.TempDir()
+			target := filepath.Join(dir, "shared.txt")
+			writeTestFile(t, target, "old")
+			if err := os.Chmod(target, perm); err != nil {
+				t.Fatal(err)
+			}
+			fs := webdav.LocalFileSystem(dir)
+
+			if _, _, err := fs.Create(ctx, "/shared.txt", io.NopCloser(strings.NewReader("new")), &webdav.CreateOptions{}); err != nil {
+				t.Fatalf("Create() = %v", err)
+			}
+			checkTestFile(t, target, "new")
+			fi, err := os.Stat(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := fi.Mode().Perm(); got != perm {
+				t.Errorf("permissions after overwrite = %v, want %v", got, perm)
+			}
+		})
+	}
+}
+
+// Overwriting a file needs write access to its directory, where the upload
+// is staged: without it, the request is refused with 403 Forbidden, even if
+// the file itself is writable, and the file is left alone.
+func TestLocalFileSystemCreateInReadOnlyDir(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("POSIX permissions, not as root")
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+	roDir := filepath.Join(dir, "ro")
+	writeTestFile(t, filepath.Join(roDir, "doc.txt"), "old")
+	if err := os.Chmod(roDir, 0555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(roDir, 0755) })
+	fs := webdav.LocalFileSystem(dir)
+
+	_, _, err := fs.Create(ctx, "/ro/doc.txt", io.NopCloser(strings.NewReader("new")), &webdav.CreateOptions{})
+	checkHTTPErrorCode(t, err, http.StatusForbidden)
+	checkTestFile(t, filepath.Join(roDir, "doc.txt"), "old")
+	if entries, err := os.ReadDir(roDir); err != nil || len(entries) != 1 {
+		t.Errorf("directory holds %v (%v), want only doc.txt", entries, err)
 	}
 }

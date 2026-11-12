@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/emersion/go-webdav/internal"
 )
@@ -23,6 +24,13 @@ import (
 // only followed if they are relative and resolve to a location inside the
 // directory. Copying a collection copies the symbolic links it contains as
 // links.
+//
+// Create writes an upload to a temporary file in the destination's
+// directory, renamed to the destination once complete, so that a failed
+// upload leaves an existing file alone. Overwriting a file thus needs write
+// access to its directory, not only to the file: the file is replaced with a
+// new one, which gets the permissions of the old one, but not its owner, and
+// other hard links to the old file keep its old contents.
 type LocalFileSystem string
 
 var _ FileSystem = LocalFileSystem("")
@@ -124,7 +132,7 @@ func errFromOS(err error) error {
 		err = fmt.Errorf("%s: %w", perr.Op, perr.Err)
 	}
 
-	if errors.Is(err, iofs.ErrNotExist) {
+	if isNotExist(err) {
 		return NewHTTPError(http.StatusNotFound, err)
 	} else if errors.Is(err, iofs.ErrPermission) || isPathEscapesError(err) {
 		return NewHTTPError(http.StatusForbidden, err)
@@ -133,6 +141,13 @@ func errFromOS(err error) error {
 	} else {
 		return err
 	}
+}
+
+// isNotExist reports whether err means that a path names no file: either it
+// doesn't exist, or a component of its parent path isn't a directory but a
+// file (ENOTDIR), which iofs.ErrNotExist doesn't match.
+func isNotExist(err error) bool {
+	return errors.Is(err, iofs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
 
 // isPathEscapesError reports whether an os.Root method failed because the path
@@ -267,7 +282,7 @@ func checkParentDir(root *os.Root, p string) error {
 	}
 	fi, err := root.Stat(parent)
 	if err != nil {
-		if errors.Is(err, iofs.ErrNotExist) {
+		if isNotExist(err) {
 			return NewHTTPError(http.StatusConflict, err)
 		}
 		return errFromOS(err)
@@ -344,6 +359,13 @@ func (fs LocalFileSystem) Create(ctx context.Context, name string, body io.ReadC
 		return nil, false, err
 	}
 	defer wc.Close()
+	if origStat != nil {
+		// Unlike the mode a file is created with, Chmod isn't masked by
+		// the umask: the new file gets all of the old one's permissions.
+		// Some file systems don't support it, but their files have no
+		// permissions of their own to keep.
+		wc.Chmod(perm)
+	}
 
 	if _, err := io.Copy(wc, body); err != nil {
 		wc.Close()
