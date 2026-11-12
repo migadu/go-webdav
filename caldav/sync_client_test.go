@@ -120,4 +120,69 @@ END:VCALENDAR&#13;
 			t.Errorf("expected Truncated=false on member 507 response, got true")
 		}
 	})
+
+	// RFC 6578 section 3.2 doesn't allow a DAV:status for changed members:
+	// a server reports one it failed to retrieve with failed propstats.
+	t.Run("changed member with failed propstats is an HrefError", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.WriteHeader(http.StatusMultiStatus)
+			w.Write([]byte(`<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:response>
+    <D:href>/cal/ok.ics</D:href>
+    <D:propstat>
+      <D:prop><D:getetag>"e1"</D:getetag></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+    <D:propstat>
+      <D:prop><C:calendar-data/></D:prop>
+      <D:status>HTTP/1.1 404 Not Found</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/cal/corrupt.ics</D:href>
+    <D:propstat>
+      <D:prop><D:getetag/><C:calendar-data/></D:prop>
+      <D:status>HTTP/1.1 500 Internal Server Error</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/cal/denied.ics</D:href>
+    <D:propstat>
+      <D:prop><D:getetag>"e2"</D:getetag></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+    <D:propstat>
+      <D:prop><C:calendar-data/></D:prop>
+      <D:status>HTTP/1.1 403 Forbidden</D:status>
+    </D:propstat>
+  </D:response>
+  <D:sync-token>urn:sync:cal4</D:sync-token>
+</D:multistatus>`))
+		}))
+		defer srv.Close()
+
+		c, err := NewClient(srv.Client(), srv.URL)
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+
+		res, err := c.SyncCollection(context.Background(), "/cal/", &SyncQuery{
+			CompRequest: CalendarCompRequest{Name: "VCALENDAR", AllProps: true, AllComps: true},
+		})
+		if res == nil {
+			t.Fatalf("SyncCollection() = %v, want a partial result", err)
+		}
+		if res.SyncToken != "urn:sync:cal4" {
+			t.Errorf("got SyncToken %q, want %q", res.SyncToken, "urn:sync:cal4")
+		}
+		if len(res.Updated) != 1 || res.Updated[0].Path != "/cal/ok.ics" || res.Updated[0].ETag != "e1" {
+			t.Errorf("got Updated %+v, want only /cal/ok.ics", res.Updated)
+		}
+		checkStatusCodes(t, hrefErrorCodes(err), map[string]int{
+			"/cal/corrupt.ics": http.StatusInternalServerError,
+			"/cal/denied.ics":  http.StatusForbidden,
+		})
+	})
 }

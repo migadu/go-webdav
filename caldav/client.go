@@ -773,6 +773,12 @@ func (c *Client) PutCalendarObject(ctx context.Context, path string, cal *ical.C
 
 // SyncCollection performs a collection synchronization operation on the
 // specified resource, as defined in RFC 6578.
+//
+// Members the server couldn't report, such as changed calendar objects it
+// failed to retrieve, are returned as an error made of HrefErrors, along
+// with the SyncResponse holding the other changes. The new SyncToken covers
+// their changes too, so a caller keeping it should fetch them otherwise, for
+// instance with MultiGetCalendar.
 func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQuery) (*SyncResponse, error) {
 	var limit *internal.Limit
 	if query.Limit > 0 {
@@ -813,6 +819,15 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 		}
 
 		if internal.SamePath(p, collectionPath) {
+			return nil
+		}
+
+		// A changed member can't have an error status (RFC 6578 section
+		// 3.2): the server reports one it failed to retrieve with failed
+		// propstats instead. Report it as an error too, rather than as
+		// updated without its data.
+		if err := resp.PropStatErr(); err != nil {
+			errs = append(errs, err)
 			return nil
 		}
 

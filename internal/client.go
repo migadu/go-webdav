@@ -868,6 +868,33 @@ func PropStatError(raw *RawXMLValue, propstat *PropStat) error {
 	return fmt.Errorf("webdav: property <%v %v>: %w", name.Space, name.Local, err)
 }
 
+// PropStatErr returns the error of resp if the server failed to retrieve some
+// of its properties: those of the propstat elements with a status outside
+// 2xx, other than 404 Not Found, which only means that the resource doesn't
+// have the property. Like Err, it returns an HrefError for each href of resp,
+// wrapping the errors of these properties as built by PropStatError, or nil.
+func (resp *Response) PropStatErr() error {
+	var propErrs []error
+	for i := range resp.PropStats {
+		propstat := &resp.PropStats[i]
+		if code := propstat.Status.Code; code/100 == 2 || code == http.StatusNotFound {
+			continue
+		}
+		for j := range propstat.Prop.Raw {
+			propErrs = append(propErrs, PropStatError(&propstat.Prop.Raw[j], propstat))
+		}
+	}
+	if len(propErrs) == 0 {
+		return nil
+	}
+	err := errors.Join(propErrs...)
+	hrefErrs := make([]error, len(resp.Hrefs))
+	for i, href := range resp.Hrefs {
+		hrefErrs[i] = &HrefError{Href: url.URL(href), Err: err}
+	}
+	return errors.Join(hrefErrs...)
+}
+
 func (c *Client) PropFind(ctx context.Context, path string, depth Depth, propfind *PropFind) (*MultiStatus, error) {
 	var resps []Response
 	ms, err := c.PropFindFunc(ctx, path, depth, propfind, func(resp *Response) error {
