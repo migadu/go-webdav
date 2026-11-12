@@ -23,6 +23,14 @@ func NewCalendarHomeSet(path string) webdav.BackendSuppliedHomeSet {
 // RFC 5545 and to the constraints laid out in RFC 4791 section 4.1, and
 // returns the only event type and UID occurring in this calendar, or an error
 // if the calendar could not be validated.
+//
+// A calendar object with only VTIMEZONE components is valid (RFC 5545 section
+// 3.6): its event type is VTIMEZONE, and its UID is empty, since VTIMEZONE has
+// no UID property. Such an object specifies no UID, so it can't conflict with
+// another one (CALDAV:no-uid-conflict). Only calendars whose
+// SupportedComponentSet lists VTIMEZONE hold such objects (RFC 4791 section
+// 5.2.3): Handler checks it for PUT, and CalendarObjectCopyMover must check it
+// for COPY and MOVE.
 func ValidateCalendarObject(cal *ical.Calendar) (eventType string, uid string, err error) {
 	// The encoder checks the components and properties required or allowed
 	// by RFC 5545. A calendar it rejects couldn't be served back to clients
@@ -80,18 +88,25 @@ func ValidateCalendarObject(cal *ical.Calendar) (eventType string, uid string, e
 		}
 	}
 	if eventType == "" {
-		return "", "", fmt.Errorf("calendar resource must contain at least one calendar component")
+		// The encoder checked there is a component: they're all VTIMEZONE
+		return ical.CompTimezone, "", nil
 	}
 	return eventType, uid, nil
 }
 
 type Calendar struct {
-	Path                  string
-	Name                  string
-	Description           string
-	Color                 string
-	MaxResourceSize       int64
-	SyncToken             string // the current DAV:sync-token, see SyncBackend
+	Path            string
+	Name            string
+	Description     string
+	Color           string
+	MaxResourceSize int64
+	SyncToken       string // the current DAV:sync-token, see SyncBackend
+	// SupportedComponentSet lists the component types of the calendar
+	// objects the calendar holds, reported as the
+	// CALDAV:supported-calendar-component-set property (RFC 4791 section
+	// 5.2.3). If nil, the server reports VEVENT only. Calendar objects with
+	// only VTIMEZONE components can only be stored in calendars listing
+	// VTIMEZONE.
 	SupportedComponentSet []string
 	Timezone              *ical.Calendar
 	// ReadOnly reports that the current user may only read this calendar. It

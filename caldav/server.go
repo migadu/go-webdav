@@ -1395,6 +1395,12 @@ func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 		return internal.HTTPErrorf(http.StatusBadRequest, "caldav: failed to parse iCalendar: %v", err)
 	}
 
+	if isTimezoneOnly(cal) {
+		if err := b.checkTimezoneOnly(r.Context(), r.URL.Path); err != nil {
+			return err
+		}
+	}
+
 	co, err := b.Backend.PutCalendarObject(r.Context(), r.URL.Path, cal, &opts)
 	if err != nil {
 		return err
@@ -1414,6 +1420,45 @@ func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 	w.WriteHeader(http.StatusCreated)
 
 	return nil
+}
+
+// isTimezoneOnly reports whether cal holds VTIMEZONE components only.
+func isTimezoneOnly(cal *ical.Calendar) bool {
+	for _, comp := range cal.Children {
+		if comp.Name != ical.CompTimezone {
+			return false
+		}
+	}
+	return len(cal.Children) > 0
+}
+
+// checkTimezoneOnly checks that the calendar of the calendar object at p can
+// hold a calendar object with only VTIMEZONE components. RFC 4791 section
+// 5.2.3 only lets calendars listing VTIMEZONE in their
+// supported-calendar-component-set hold them. The server always reports this
+// property, with VEVENT only if Calendar.SupportedComponentSet is nil.
+//
+// The other component types are left to the backend. These objects aren't:
+// ValidateCalendarObject used to refuse them, so backends could rely on it not
+// to store them.
+func (b *backend) checkTimezoneOnly(ctx context.Context, p string) error {
+	// Leave the members of the scheduling Inbox, which are scheduling
+	// messages, and the paths which aren't calendar objects to the backend
+	if b.resourceTypeAtPath(ctx, p) != resourceTypeCalendarObject || b.inScheduleInbox(ctx, p) {
+		return nil
+	}
+	// With a trailing slash, the form RFC 4918 section 5.2 asks clients to
+	// use for collections
+	cal, err := b.Backend.GetCalendar(ctx, path.Dir(path.Clean(p))+"/")
+	if err != nil {
+		return err
+	}
+	for _, name := range cal.SupportedComponentSet {
+		if strings.EqualFold(name, ical.CompTimezone) {
+			return nil
+		}
+	}
+	return newPreconditionError(http.StatusForbidden, PreconditionSupportedCalendarComponent)
 }
 
 func (b *backend) Delete(r *http.Request) error {
