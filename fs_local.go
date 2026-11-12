@@ -556,10 +556,12 @@ const maxLinks = 40
 // containsSource reports whether removing dstPath, an existing destination,
 // would remove srcPath with it: whether dstPath is an ancestor of srcPath, or
 // the same directory as one under another name, through a symbolic link to
-// it or an alias on a case-insensitive file system. If srcPath is a symbolic
-// link, it also reports whether removing dstPath would remove what srcPath
-// resolves to. A destination which is a symbolic link to such a directory is
-// a link of its own (see isSeparateLink), removed without the source.
+// it or an alias on a case-insensitive file system. It also reports whether
+// removing dstPath would remove what srcPath resolves to, or a directory
+// entry srcPath is resolved through, such as a symbolic link inside dstPath
+// pointing outside of it. A destination which is a symbolic link to such a
+// directory is a link of its own (see isSeparateLink), removed without the
+// source.
 func containsSource(root *os.Root, srcPath, dstPath string) bool {
 	if isSubPath(dstPath, srcPath) {
 		return true
@@ -579,36 +581,51 @@ func containsSource(root *os.Root, srcPath, dstPath string) bool {
 	if fi, err := root.Lstat(dstPath); err != nil || fi.Mode()&os.ModeSymlink != 0 {
 		return false
 	}
-	// Removing a directory removes what it really contains: the source,
-	// and if it's a symbolic link, each link it resolves through and the
-	// file it resolves to, each in the directory its path is relative to
-	p := srcPath
-	for i := 0; ; i++ {
-		dir := "."
-		if j := strings.LastIndex(p, "/"); j >= 0 {
-			dir = p[:j]
-		}
-		if isWithin(root, dir, dstInfo) {
-			return true
-		}
-		if i == maxLinks {
-			return false
-		}
-		fi, err := root.Lstat(p)
-		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
-			return false
-		}
-		target, err := root.Readlink(p)
-		if err != nil {
-			return false
-		}
-		// Not path.Join: ".." in the target applies after following
-		// the links in dir, as os.Root does
-		p = target
-		if dir != "." {
-			p = dir + "/" + target
+	// Removing a directory removes what it really contains. Resolving the
+	// source's path goes through a directory entry for each component of
+	// the path, and of the target of each symbolic link met, in the
+	// directory the components before it resolve to: if one of these
+	// directories is within the destination, removing the destination
+	// removes the source, or the way to it.
+	paths := []string{srcPath}
+	links := 0
+	for len(paths) > 0 {
+		parts := strings.Split(paths[0], "/")
+		paths = paths[1:]
+		for i := range parts {
+			dir := "."
+			if i > 0 {
+				dir = strings.Join(parts[:i], "/")
+				if isWithin(root, dir, dstInfo) {
+					return true
+				}
+			}
+			entry := strings.Join(parts[:i+1], "/")
+			fi, err := root.Lstat(entry)
+			if err != nil {
+				// The rest of the path names no entries
+				break
+			}
+			if fi.Mode()&os.ModeSymlink == 0 {
+				continue
+			}
+			if links == maxLinks {
+				return false
+			}
+			links++
+			target, err := root.Readlink(entry)
+			if err != nil {
+				break
+			}
+			// Not path.Join: ".." in the target applies after following
+			// the links in dir, as os.Root does
+			if dir != "." {
+				target = dir + "/" + target
+			}
+			paths = append(paths, target)
 		}
 	}
+	return false
 }
 
 // isSameFile reports whether srcPath and dstPath resolve to the same file,
