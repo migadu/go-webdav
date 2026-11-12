@@ -45,6 +45,10 @@ func TestClientHrefPath(t *testing.T) {
 		{endpoint, "http://contacts.icloud.com:8080/a", "/a"},
 		{other, "https://contacts.icloud.com/a", "/a"},
 		{endpoint, "mailto:alice@example.org", ""},
+		// A network-path reference names its host (RFC 3986 section 4.2),
+		// and takes the scheme of the request URL
+		{other, "//contacts.icloud.com/1234567/principal/", "/1234567/principal/"},
+		{endpoint, "//Contacts.iCloud.com:443/a%20b", "/a b"},
 
 		// On another host
 		{endpoint, "https://p37-contacts.icloud.com:443/1234567/carddavhome/", other},
@@ -54,11 +58,15 @@ func TestClientHrefPath(t *testing.T) {
 		{other, "/1234567/carddavhome/card/", other + "card/"},
 		{other, "card/a%20b.vcf", other + "card/a%20b.vcf"},
 		{other, "", other},
+		{endpoint, "//p37-contacts.icloud.com/1234567/carddavhome/", other},
+		{endpoint, "//user:pass@p37-contacts.icloud.com:443/a#frag", "https://p37-contacts.icloud.com/a"},
+		{"http://contacts.icloud.com/", "//p37-contacts.icloud.com/a", "http://p37-contacts.icloud.com/a"},
 
 		// With a query
 		{endpoint, "/a?x=1", "https://contacts.icloud.com/a?x=1"},
 		{endpoint, "http://contacts.icloud.com/a?x=1", "https://contacts.icloud.com/a?x=1"},
 		{other, "card/?x=1", other + "card/?x=1"},
+		{other, "//contacts.icloud.com/a?x=1", "https://contacts.icloud.com/a?x=1"},
 	} {
 		got := c.HrefPath(mustParseURL(t, tc.base), mustParseURL(t, tc.href))
 		if got != tc.want {
@@ -66,8 +74,15 @@ func TestClientHrefPath(t *testing.T) {
 		}
 	}
 
-	if got, want := c.HrefPath(nil, mustParseURL(t, "card/")), "card/"; got != want {
-		t.Errorf("HrefPath(nil, %q) = %q, want %q", "card/", got, want)
+	for _, tc := range []struct {
+		href, want string
+	}{
+		{"card/", "card/"},
+		{"//p37-contacts.icloud.com/1234567/carddavhome/", other},
+	} {
+		if got := c.HrefPath(nil, mustParseURL(t, tc.href)); got != tc.want {
+			t.Errorf("HrefPath(nil, %q) = %q, want %q", tc.href, got, tc.want)
+		}
 	}
 }
 

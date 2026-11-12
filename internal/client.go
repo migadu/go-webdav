@@ -251,14 +251,15 @@ func (c *Client) normalizeHref(base *url.URL, href Href) Href {
 	}
 
 	u := url.URL(href)
-	if u.Scheme == "" && u.Host == "" {
+	if u.Scheme == "" {
 		// A path on the endpoint's host is already in the form returned by
 		// clients. Other relative references are resolved against base (RFC
 		// 3986 section 5.2), the URL of the request: "a.vcf" is a member of
-		// a collection, and an empty reference is base itself (section 4.4).
-		// Without base, a reference is kept as is, as clients resolve paths
-		// against the endpoint (see ResolveHref).
-		if u.RawQuery == "" && c.onEndpointHost(base) && (strings.HasPrefix(u.Path, "/") || !known) {
+		// a collection, an empty reference is base itself (section 4.4), and
+		// "//host/a.vcf" is on host, not on the host of base (section 4.2).
+		// Without base, a reference without a host is kept as is, as clients
+		// resolve paths against the endpoint (see ResolveHref).
+		if u.Host == "" && u.RawQuery == "" && c.onEndpointHost(base) && (strings.HasPrefix(u.Path, "/") || !known) {
 			return href
 		}
 		u = *base.ResolveReference(&u)
