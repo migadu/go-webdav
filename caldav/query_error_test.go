@@ -201,6 +201,80 @@ func TestCalendarQueryTimeRangeUndefined(t *testing.T) {
 	}
 }
 
+// RFC 4791 section 7.8: "a CALDAV:filter cannot nest a <C:comp
+// name="VEVENT"> element in a <C:comp name="VTODO"> element". Each component
+// of RFC 5545 has its place: VEVENT, VTODO, VJOURNAL, VFREEBUSY and VTIMEZONE
+// in VCALENDAR (section 3.6), VALARM in VEVENT or VTODO, STANDARD and
+// DAYLIGHT in VTIMEZONE.
+func TestCalendarQueryCompFilterNesting(t *testing.T) {
+	h := &Handler{Backend: queryBackend{testBackend{calendars: []Calendar{{Path: "/user/calendars/work/"}}}}}
+
+	for _, tc := range []struct {
+		name string
+		// The content of the VCALENDAR comp-filter
+		filter string
+	}{
+		{"VEVENT in VTODO", `<C:comp-filter name="VTODO"><C:comp-filter name="VEVENT"/></C:comp-filter>`},
+		{"VTIMEZONE in VEVENT", `<C:comp-filter name="VEVENT"><C:comp-filter name="VTIMEZONE"/></C:comp-filter>`},
+		{"VCALENDAR in VCALENDAR", `<C:comp-filter name="VCALENDAR"/>`},
+		{"VALARM in VCALENDAR", `<C:comp-filter name="VALARM"/>`},
+		{"VALARM in VJOURNAL", `<C:comp-filter name="VJOURNAL"><C:comp-filter name="VALARM"/></C:comp-filter>`},
+		{"VALARM in VALARM", `<C:comp-filter name="VEVENT"><C:comp-filter name="VALARM"><C:comp-filter name="VALARM"/></C:comp-filter></C:comp-filter>`},
+		{"STANDARD in VCALENDAR", `<C:comp-filter name="STANDARD"/>`},
+		{"DAYLIGHT in VEVENT", `<C:comp-filter name="VEVENT"><C:comp-filter name="DAYLIGHT"/></C:comp-filter>`},
+		{"VEVENT in an X- component", `<C:comp-filter name="X-WRAPPER"><C:comp-filter name="VEVENT"/></C:comp-filter>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `<?xml version="1.0" encoding="utf-8"?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop><D:getetag/></D:prop>
+  <C:filter><C:comp-filter name="VCALENDAR">` + tc.filter + `</C:comp-filter></C:filter>
+</C:calendar-query>`
+			req := httptest.NewRequest("REPORT", "/user/calendars/work/", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/xml")
+			req.Header.Set("Depth", "1")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			if w.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want 403 Forbidden", w.Code)
+			}
+			if !hasCalDAVPrecondition(t, w, PreconditionValidFilter) {
+				t.Errorf("body isn't a DAV:error with CALDAV:valid-filter:\n%s", w.Body.String())
+			}
+		})
+	}
+}
+
+// No precondition of calendar-query fits a server which can't afford to
+// expand a recurring component up to the time range (RFC 4791 section 7.8):
+// it's a 500, which names the component, rather than a wrong answer.
+func TestCalendarQueryTooManyOccurrences(t *testing.T) {
+	const calPath = "/user/calendars/work/"
+	co := calendarObject(t, "BEGIN:VEVENT\r\nDTSTAMP:20060206T001102Z\r\nUID:secondly\r\n"+
+		"DTSTART:20060101T000000Z\r\nDURATION:PT1S\r\nRRULE:FREQ=SECONDLY\r\nEND:VEVENT\r\n")
+	co.Path = calPath + "secondly.ics"
+	h := &Handler{Backend: queryBackend{testBackend{
+		calendars: []Calendar{{Path: calPath}},
+		objectMap: map[string][]CalendarObject{calPath: {co}},
+	}}}
+	body := `<?xml version="1.0" encoding="utf-8"?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop><D:getetag/></D:prop>
+  <C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT">
+    <C:time-range start="22500101T000000Z" end="22500102T000000Z"/>
+  </C:comp-filter></C:comp-filter></C:filter>
+</C:calendar-query>`
+	req := httptest.NewRequest("REPORT", calPath, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/xml")
+	req.Header.Set("Depth", "1")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), `"secondly"`) {
+		t.Errorf("status = %d, want 500 Internal Server Error naming the event; body:\n%s", w.Code, w.Body.String())
+	}
+}
+
 // A time-range whose start has a fraction of a second isn't in the "date
 // with UTC time" format, so the request is malformed, as for any other value
 // that isn't one.

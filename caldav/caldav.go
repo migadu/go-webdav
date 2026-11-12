@@ -230,7 +230,10 @@ type CompFilter struct {
 	// VJOURNAL, VFREEBUSY and VALARM have a time range.
 	Start, End time.Time
 	Props      []PropFilter
-	Comps      []CompFilter
+	// Comps are the filters on the components in this one. A component of
+	// RFC 5545 can only be where it belongs, such as VALARM in VEVENT or
+	// VTODO (RFC 4791 section 7.8). X- components can be anywhere.
+	Comps []CompFilter
 }
 
 type ParamFilter struct {

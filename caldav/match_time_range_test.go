@@ -228,3 +228,157 @@ func TestMatchUndefinedTimeRange(t *testing.T) {
 		}
 	}
 }
+
+// matchWithin returns what Match returns for filter, nested in the VCALENDAR
+// one, and co, failing the test if it takes more than 10 seconds.
+func matchWithin(t *testing.T, filter CompFilter, co CalendarObject) (bool, error) {
+	t.Helper()
+	type result struct {
+		ok  bool
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		ok, err := Match(CompFilter{Name: "VCALENDAR", Comps: []CompFilter{filter}}, &co)
+		done <- result{ok, err}
+	}()
+	select {
+	case r := <-done:
+		return r.ok, r.err
+	case <-time.After(10 * time.Second):
+		t.Fatalf("Match() didn't return within 10 seconds")
+		return false, nil
+	}
+}
+
+// rrule-go generates the occurrences of a rule one by one from its DTSTART.
+// A rule every second or minute without COUNT or UNTIL takes billions of them
+// to reach a time range centuries later, so Match gives up with an error once
+// it has looked at maxOccurrences of them.
+func TestMatchRecurringTimeRangeBounded(t *testing.T) {
+	start, end := toDate(t, "22500101T000000Z"), toDate(t, "22500102T000000Z")
+	for _, tc := range []struct {
+		name   string
+		body   string
+		filter CompFilter
+	}{
+		{
+			"VEVENT every second",
+			"BEGIN:VEVENT\r\nDTSTAMP:20060206T001102Z\r\nUID:secondly\r\nDTSTART:20060101T000000Z\r\n" +
+				"DURATION:PT1S\r\nRRULE:FREQ=SECONDLY\r\nEND:VEVENT\r\n",
+			CompFilter{Name: "VEVENT", Start: start, End: end},
+		},
+		{
+			"VTODO every minute",
+			"BEGIN:VTODO\r\nDTSTAMP:20060206T001102Z\r\nUID:minutely\r\nDTSTART:20060101T000000Z\r\n" +
+				"DUE:20060101T000030Z\r\nRRULE:FREQ=MINUTELY\r\nEND:VTODO\r\n",
+			CompFilter{Name: "VTODO", Start: start, End: end},
+		},
+		{
+			"VJOURNAL every second",
+			"BEGIN:VJOURNAL\r\nDTSTAMP:20060206T001102Z\r\nUID:journal\r\nDTSTART:20060101T000000Z\r\n" +
+				"RRULE:FREQ=SECONDLY\r\nEND:VJOURNAL\r\n",
+			CompFilter{Name: "VJOURNAL", Start: start, End: end},
+		},
+		{
+			"VALARM of an event every second",
+			"BEGIN:VEVENT\r\nDTSTAMP:20060206T001102Z\r\nUID:alarm\r\nDTSTART:20060101T000000Z\r\n" +
+				"RRULE:FREQ=SECONDLY\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Now\r\n" +
+				"TRIGGER:PT0S\r\nEND:VALARM\r\nEND:VEVENT\r\n",
+			CompFilter{Name: "VEVENT", Comps: []CompFilter{{Name: "VALARM", Start: start, End: end}}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, err := matchWithin(t, tc.filter, calendarObject(t, tc.body))
+			if err == nil {
+				t.Errorf("Match() = %v, want an error", ok)
+			}
+		})
+	}
+
+	// A daily event is far from the limit two centuries later
+	daily := calendarObject(t, "BEGIN:VEVENT\r\nDTSTAMP:20060206T001102Z\r\nUID:daily\r\n"+
+		"DTSTART:20060101T100000Z\r\nDURATION:PT1H\r\nRRULE:FREQ=DAILY\r\nEND:VEVENT\r\n")
+	ok, err := matchWithin(t, CompFilter{Name: "VEVENT", Start: toDate(t, "22000101T103000Z"), End: toDate(t, "22000101T110000Z")}, daily)
+	if err != nil || !ok {
+		t.Errorf("daily event: Match() = %v, %v, want true, nil", ok, err)
+	}
+}
+
+// RFC 5545 section 3.3.9: a period is a start and either an end after it or
+// "a positive duration of time". The duration can be written in lower case,
+// as RFC 5234 section 2.3 makes ABNF strings case-insensitive.
+func TestMatchFreeBusyPeriods(t *testing.T) {
+	freeBusy := func(period string) CalendarObject {
+		return calendarObject(t, "BEGIN:VFREEBUSY\r\nDTSTAMP:20060206T001102Z\r\nUID:freebusy\r\n"+
+			"FREEBUSY:"+period+"\r\nEND:VFREEBUSY\r\n")
+	}
+	filter := CompFilter{Name: "VFREEBUSY", End: toDate(t, "20060102T103000Z")}
+
+	for _, period := range []string{"20060102T100000Z/pt1h", "20060102T100000Z/+PT1H"} {
+		if ok, err := matchWithin(t, filter, freeBusy(period)); err != nil || !ok {
+			t.Errorf("%v: Match() = %v, %v, want true, nil", period, ok, err)
+		}
+	}
+	for _, period := range []string{
+		"20060102T100000Z/-PT1H",
+		"20060102T100000Z/PT0S",
+		"20060102T100000Z/20060102T100000Z",
+		"20060102T100000Z/20060102T090000Z",
+	} {
+		if ok, err := matchWithin(t, filter, freeBusy(period)); err == nil {
+			t.Errorf("%v: Match() = %v, want an error", period, ok)
+		}
+	}
+}
+
+// RFC 4791 section 9.9: "if DTEND is not present in a VEVENT, but DURATION
+// is, then the test should instead operate on the 'effective' DTEND, i.e.,
+// DTSTART+DURATION. Similarly, if DUE is not present in a VTODO, but DTSTART
+// and DURATION are, then the test should instead operate on the 'effective'
+// DUE, i.e., DTSTART+DURATION."
+func TestMatchPropTimeRangeEffectiveEnd(t *testing.T) {
+	comp := func(name, props string) CalendarObject {
+		return calendarObject(t, "BEGIN:"+name+"\r\nDTSTAMP:20060206T001102Z\r\nUID:effective\r\n"+
+			props+"END:"+name+"\r\n")
+	}
+	propFilter := func(comp, prop string) func(start, end time.Time) CompFilter {
+		return func(start, end time.Time) CompFilter {
+			return CompFilter{Name: comp, Props: []PropFilter{{Name: prop, Start: start, End: end}}}
+		}
+	}
+
+	testTimeRange(t, comp("VEVENT", "DTSTART:20060102T100000Z\r\nDURATION:PT2H\r\n"), propFilter("VEVENT", "DTEND"), []timeRangeCase{
+		{"VEVENT DTSTART+DURATION, range at the effective DTEND", "20060102T120000Z", "20060102T120001Z", true},
+		{"VEVENT DTSTART+DURATION, range ends at the effective DTEND", "20060102T110000Z", "20060102T120000Z", false},
+	})
+	testTimeRange(t, comp("VEVENT", "DTSTART:20060102T100000Z\r\nDTEND:20060102T110000Z\r\n"), propFilter("VEVENT", "DTEND"), []timeRangeCase{
+		{"VEVENT with DTEND", "20060102T110000Z", "20060102T110001Z", true},
+	})
+	testTimeRange(t, comp("VEVENT", "DTSTART;VALUE=DATE:20060102\r\nDURATION:P2D\r\n"), propFilter("VEVENT", "DTEND"), []timeRangeCase{
+		{"VEVENT DATE DTSTART+DURATION, range in the day of the effective DTEND", "20060104T120000Z", "20060104T130000Z", true},
+	})
+	testTimeRange(t, comp("VEVENT", "DTSTART:20060102T100000Z\r\n"), propFilter("VEVENT", "DTEND"), []timeRangeCase{
+		{"VEVENT without DURATION", "", "20070101T000000Z", false},
+	})
+	testTimeRange(t, comp("VTODO", "DTSTART:20060102T100000Z\r\nDURATION:P1D\r\n"), propFilter("VTODO", "DUE"), []timeRangeCase{
+		{"VTODO DTSTART+DURATION, range at the effective DUE", "20060103T100000Z", "20060103T100001Z", true},
+		{"VTODO DTSTART+DURATION, range at DTSTART", "20060102T100000Z", "20060102T100001Z", false},
+	})
+	testTimeRange(t, comp("VTODO", "DURATION:P1D\r\n"), propFilter("VTODO", "DUE"), []timeRangeCase{
+		{"VTODO without DTSTART", "", "20070101T000000Z", false},
+	})
+	testTimeRange(t, comp("VTODO", "DTSTART:20060102T100000Z\r\nDURATION:P1D\r\n"), propFilter("VTODO", "DTEND"), []timeRangeCase{
+		{"DTEND of a VTODO", "", "20070101T000000Z", false},
+	})
+
+	// The property is still not defined
+	notDefined := CompFilter{Name: "VCALENDAR", Comps: []CompFilter{{
+		Name:  "VEVENT",
+		Props: []PropFilter{{Name: "DTEND", IsNotDefined: true}},
+	}}}
+	co := comp("VEVENT", "DTSTART:20060102T100000Z\r\nDURATION:PT2H\r\n")
+	if ok, err := Match(notDefined, &co); err != nil || !ok {
+		t.Errorf("DTEND is-not-defined: Match() = %v, %v, want true, nil", ok, err)
+	}
+}

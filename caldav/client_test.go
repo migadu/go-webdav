@@ -113,10 +113,11 @@ func TestQueryCalendarIsNotDefined(t *testing.T) {
 
 // The client refuses, without sending it, a filter the server would answer
 // with CALDAV:valid-filter: one which breaks the grammar of RFC 4791 sections
-// 9.7 to 9.7.3, such as an is-not-defined with siblings, or with a time range
-// section 9.9 doesn't define, or whose end isn't after its start once both
-// are truncated to the second. It also refuses an outer is-not-defined,
-// which no calendar object can match.
+// 9.7 to 9.7.3, such as an is-not-defined with siblings, one which nests a
+// component where it can't be (section 7.8), or with a time range section
+// 9.9 doesn't define, or whose end isn't after its start once both are
+// truncated to the second. It also refuses an outer is-not-defined, which no
+// calendar object can match.
 func TestQueryCalendarInvalidFilter(t *testing.T) {
 	var sent bool
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -195,6 +196,8 @@ func TestQueryCalendarInvalidFilter(t *testing.T) {
 		{"time range on VCALENDAR", CompFilter{Name: "VCALENDAR", Start: jan2006(3)}},
 		{"time range on VTIMEZONE", CompFilter{Name: "VCALENDAR", Comps: []CompFilter{{Name: "VTIMEZONE", Start: jan2006(3)}}}},
 		{"time range on SUMMARY", vevent(CompFilter{Props: []PropFilter{{Name: "SUMMARY", Start: jan2006(3)}}})},
+		{"VEVENT in VTODO", CompFilter{Name: "VCALENDAR", Comps: []CompFilter{{Name: "VTODO", Comps: []CompFilter{{Name: "VEVENT"}}}}}},
+		{"VALARM in VCALENDAR", CompFilter{Name: "VCALENDAR", Comps: []CompFilter{{Name: "VALARM"}}}},
 	} {
 		sent = false
 		_, err := c.QueryCalendar(context.Background(), "/user/calendars/cal/", &CalendarQuery{CompFilter: tc.filter})
