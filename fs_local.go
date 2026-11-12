@@ -43,6 +43,33 @@ func (fs LocalFileSystem) relPath(name string) (string, error) {
 	return name[1:], nil
 }
 
+// stagingPrefix starts the names of the temporary files Create writes uploads
+// to, before renaming them to their destination. Those names aren't part of
+// the file system served: files with such names aren't listed or copied,
+// can't be accessed, and can't be created by clients.
+const stagingPrefix = ".webdav-tmp-"
+
+// isStagingPath reports whether p, a slash-separated path relative to the
+// root directory, names a file with a staging name, or a file beneath one.
+func isStagingPath(p string) bool {
+	for _, name := range strings.Split(p, "/") {
+		if strings.HasPrefix(name, stagingPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkStagingPath returns an error with code if p is a staging path (see
+// isStagingPath): 404 Not Found for a file which is to exist, 403 Forbidden
+// for one which is to be created.
+func checkStagingPath(p string, code int) error {
+	if isStagingPath(p) {
+		return NewHTTPError(code, fmt.Errorf("webdav: names starting with %q are reserved", stagingPrefix))
+	}
+	return nil
+}
+
 // openRoot opens the root directory. The caller must close it.
 func (fs LocalFileSystem) openRoot() (*os.Root, error) {
 	root, err := os.OpenRoot(string(fs))
@@ -55,6 +82,9 @@ func (fs LocalFileSystem) openRoot() (*os.Root, error) {
 func (fs LocalFileSystem) Open(ctx context.Context, name string) (io.ReadCloser, error) {
 	p, err := fs.relPath(name)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkStagingPath(p, http.StatusNotFound); err != nil {
 		return nil, err
 	}
 	root, err := fs.openRoot()
@@ -130,6 +160,9 @@ func (fs LocalFileSystem) Stat(ctx context.Context, name string) (*FileInfo, err
 	if err != nil {
 		return nil, err
 	}
+	if err := checkStagingPath(p, http.StatusNotFound); err != nil {
+		return nil, err
+	}
 	root, err := fs.openRoot()
 	if err != nil {
 		return nil, err
@@ -155,6 +188,9 @@ func (fs LocalFileSystem) ReadDir(ctx context.Context, name string, recursive bo
 	if err != nil {
 		return nil, err
 	}
+	if err := checkStagingPath(dir, http.StatusNotFound); err != nil {
+		return nil, err
+	}
 	root, err := fs.openRoot()
 	if err != nil {
 		return nil, err
@@ -163,6 +199,14 @@ func (fs LocalFileSystem) ReadDir(ctx context.Context, name string, recursive bo
 
 	var l []FileInfo
 	err = iofs.WalkDir(root.FS(), dir, func(p string, d iofs.DirEntry, err error) error {
+		// Skipped before it's stat'ed: once the upload is done, it's gone
+		if p != dir && strings.HasPrefix(d.Name(), stagingPrefix) {
+			if d.IsDir() {
+				return iofs.SkipDir
+			}
+			return nil
+		}
+
 		var fi os.FileInfo
 		if err == nil {
 			fi, err = walkDirInfo(root, dir, p, d)
@@ -236,7 +280,7 @@ func checkParentDir(root *os.Root, p string) error {
 
 func createTempInRoot(root *os.Root, dir string, perm os.FileMode) (*os.File, string, error) {
 	for i := 0; i < 16; i++ {
-		tmpName := ".webdav-tmp-" + rand.Text()
+		tmpName := stagingPrefix + rand.Text()
 		tmpPath := tmpName
 		if dir != "." {
 			tmpPath = path.Join(dir, tmpName)
@@ -260,6 +304,9 @@ func (fs LocalFileSystem) Create(ctx context.Context, name string, body io.ReadC
 	}
 	if p == "." {
 		return nil, false, NewHTTPError(http.StatusMethodNotAllowed, fmt.Errorf("webdav: cannot overwrite root collection with a file"))
+	}
+	if err := checkStagingPath(p, http.StatusForbidden); err != nil {
+		return nil, false, err
 	}
 	root, err := fs.openRoot()
 	if err != nil {
@@ -334,6 +381,9 @@ func (fs LocalFileSystem) RemoveAll(ctx context.Context, name string, opts *Remo
 	if err != nil {
 		return err
 	}
+	if err := checkStagingPath(p, http.StatusNotFound); err != nil {
+		return err
+	}
 	root, err := fs.openRoot()
 	if err != nil {
 		return err
@@ -357,6 +407,9 @@ func (fs LocalFileSystem) RemoveAll(ctx context.Context, name string, opts *Remo
 func (fs LocalFileSystem) Mkdir(ctx context.Context, name string) error {
 	p, err := fs.relPath(name)
 	if err != nil {
+		return err
+	}
+	if err := checkStagingPath(p, http.StatusForbidden); err != nil {
 		return err
 	}
 	root, err := fs.openRoot()
@@ -433,6 +486,13 @@ func isSubPath(dir, p string) bool {
 	return strings.HasPrefix(p, dir+"/")
 }
 
+// errOverwriteSourceParent is the error of a COPY or MOVE request overwriting
+// a collection which contains the source. The destination is removed first
+// (RFC 4918 sections 9.8.4 and 9.9.3), which would remove the source with it.
+func errOverwriteSourceParent() error {
+	return NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: cannot overwrite a collection containing the source"))
+}
+
 // isSameDirEntry reports whether srcPath and dstPath refer to the same
 // directory entry (for example, a case-only rename on a case-insensitive file
 // system), rather than two distinct hard links to the same inode.
@@ -467,6 +527,64 @@ func isSameDirEntry(root *os.Root, srcPath, dstPath string, srcInfo os.FileInfo)
 	return matches == 1
 }
 
+// isSeparateLink reports whether dstPath, which resolves to the same file as
+// srcPath, is a directory entry of its own, which can be removed without
+// removing srcPath: a symbolic link, or another hard link to a regular file.
+// It returns false if it can't tell, such as if srcPath is a symbolic link,
+// which may resolve through dstPath, or if both paths may name the same
+// entry: aliases on a case-insensitive file system, or paths through a
+// symbolic link to their directory.
+func isSeparateLink(root *os.Root, srcPath, dstPath string) bool {
+	srcInfo, err := root.Lstat(srcPath)
+	if err != nil || srcInfo.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	dstInfo, err := root.Lstat(dstPath)
+	if err != nil {
+		return false
+	}
+	if dstInfo.Mode()&os.ModeSymlink != 0 {
+		// Removing a symbolic link leaves what it points to alone
+		return true
+	}
+	if !srcInfo.Mode().IsRegular() || !os.SameFile(srcInfo, dstInfo) {
+		return false
+	}
+
+	srcDir, dstDir := path.Dir(srcPath), path.Dir(dstPath)
+	srcDirInfo, err := root.Stat(srcDir)
+	if err != nil {
+		return false
+	}
+	dstDirInfo, err := root.Stat(dstDir)
+	if err != nil {
+		return false
+	}
+	if !os.SameFile(srcDirInfo, dstDirInfo) {
+		// Each entry belongs to a single directory
+		return true
+	}
+	// In the same directory, the names are two entries only if both are
+	// listed: otherwise one is an alias of the other, the file system
+	// ignoring case for instance. Unlike isSameDirEntry, this doesn't count
+	// the entries for the file, which may have other hard links.
+	srcName, dstName := path.Base(srcPath), path.Base(dstPath)
+	if srcName == dstName {
+		return false
+	}
+	entries, err := iofs.ReadDir(root.FS(), srcDir)
+	if err != nil {
+		return false
+	}
+	found := 0
+	for _, e := range entries {
+		if e.Name() == srcName || e.Name() == dstName {
+			found++
+		}
+	}
+	return found == 2
+}
+
 func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *CopyOptions) (created bool, err error) {
 	srcPath, err := fs.relPath(src)
 	if err != nil {
@@ -474,6 +592,12 @@ func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *Co
 	}
 	dstPath, err := fs.relPath(dst)
 	if err != nil {
+		return false, err
+	}
+	if err := checkStagingPath(srcPath, http.StatusNotFound); err != nil {
+		return false, err
+	}
+	if err := checkStagingPath(dstPath, http.StatusForbidden); err != nil {
 		return false, err
 	}
 	root, err := fs.openRoot()
@@ -512,11 +636,17 @@ func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *Co
 			created = true
 		}
 	} else {
-		if os.SameFile(srcInfo, dstInfo) {
+		// A destination which is another link to the source file is
+		// removed like any other (RFC 4918 section 9.8.4), leaving the
+		// source alone: overwriting it in place would truncate the source
+		if os.SameFile(srcInfo, dstInfo) && !isSeparateLink(root, srcPath, dstPath) {
 			return false, NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: cannot copy a resource onto itself"))
 		}
 		if options.NoOverwrite {
 			return false, NewHTTPError(http.StatusPreconditionFailed, os.ErrExist)
+		}
+		if isSubPath(dstPath, srcPath) {
+			return false, errOverwriteSourceParent()
 		}
 		if err := removeAll(root, dstPath); err != nil {
 			return false, err
@@ -533,6 +663,12 @@ func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *Co
 	var dirPerms []dirPerm
 
 	err = iofs.WalkDir(root.FS(), srcPath, func(p string, d iofs.DirEntry, err error) error {
+		if p != srcPath && strings.HasPrefix(d.Name(), stagingPrefix) {
+			if d.IsDir() {
+				return iofs.SkipDir
+			}
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -594,6 +730,12 @@ func (fs LocalFileSystem) Move(ctx context.Context, src, dst string, options *Mo
 	if err != nil {
 		return false, err
 	}
+	if err := checkStagingPath(srcPath, http.StatusNotFound); err != nil {
+		return false, err
+	}
+	if err := checkStagingPath(dstPath, http.StatusForbidden); err != nil {
+		return false, err
+	}
 	root, err := fs.openRoot()
 	if err != nil {
 		return false, err
@@ -633,6 +775,9 @@ func (fs LocalFileSystem) Move(ctx context.Context, src, dst string, options *Mo
 	} else {
 		if options.NoOverwrite {
 			return false, NewHTTPError(http.StatusPreconditionFailed, os.ErrExist)
+		}
+		if isSubPath(dstPath, srcPath) {
+			return false, errOverwriteSourceParent()
 		}
 		dstLstat, lerr := root.Lstat(dstPath)
 		if lerr != nil || !os.SameFile(srcInfo, dstLstat) || !isSameDirEntry(root, srcPath, dstPath, srcInfo) {
