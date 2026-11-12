@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/xml"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -457,6 +458,46 @@ func TestPushPropNameError(t *testing.T) {
 		if code := propStatus(t, resp, name); code != http.StatusServiceUnavailable {
 			t.Errorf("%v: got status %v, want 503", name.Local, code)
 		}
+	}
+}
+
+// With push information the server can't serve as the draft requires, here
+// a VAPID key off the P-256 curve, push isn't supported: OPTIONS doesn't
+// advertise it (draft section 2), and the push properties and registrations
+// fail as when PushInfo fails.
+func TestPushInvalidInfo(t *testing.T) {
+	b := newPushTestBackend(t)
+	b.info[pushCalendarPath].VAPIDPublicKey = &ecdsa.PublicKey{Curve: elliptic.P256(), X: big.NewInt(1), Y: big.NewInt(1)}
+	h := &Handler{Backend: b}
+
+	dav, allow := options(t, b, pushCalendarPath)
+	if containsString(dav, "webdav-push") || allow["POST"] {
+		t.Errorf("OPTIONS: DAV = %v, Allow = %v, want no push", dav, allow)
+	}
+	if !allow["PROPFIND"] {
+		t.Errorf("OPTIONS: Allow = %v, want PROPFIND", allow)
+	}
+
+	resp := propFindResponse(t, h, pushCalendarPath, "0", `<propfind xmlns="DAV:"><propname/></propfind>`, pushCalendarPath)
+	for _, propstat := range resp.PropStats {
+		for _, name := range pushPropNames {
+			if propstat.Prop.Get(name) != nil {
+				t.Errorf("propname lists %v with status %v", name.Local, propstat.Status.Code)
+			}
+		}
+	}
+	resp = propFindResponse(t, h, pushCalendarPath, "0", propFindPushProps, pushCalendarPath)
+	for _, name := range pushPropNames {
+		if code := propStatus(t, resp, name); code != http.StatusInternalServerError {
+			t.Errorf("%v: got status %v, want 500", name.Local, code)
+		}
+	}
+
+	if w := serveCalDAV(b, http.MethodPost, pushCalendarPath, "", pushRegisterRequest); w.Code != http.StatusInternalServerError {
+		t.Errorf("POST: status = %v, want 500", w.Code)
+	}
+	if len(b.registers) != 0 {
+		t.Errorf("RegisterPush called %d times, want none", len(b.registers))
 	}
 }
 

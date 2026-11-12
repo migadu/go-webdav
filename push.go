@@ -64,6 +64,10 @@ const (
 //     At least one must be set. Clients requesting a trigger with a larger
 //     depth get it with this depth, and a trigger which isn't supported is
 //     ignored.
+//
+// Information which doesn't meet these requirements can't be served: the
+// collection isn't advertised as supporting WebDAV-Push, and requests for
+// its push properties and registrations fail with an internal server error.
 type PushInfo = push.PushInfo
 
 // PushTrigger is a trigger of push notifications for a collection

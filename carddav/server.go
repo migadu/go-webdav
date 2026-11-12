@@ -15,6 +15,7 @@ import (
 	"github.com/emersion/go-vcard"
 	"github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/internal"
+	"github.com/emersion/go-webdav/internal/push"
 )
 
 type PutAddressObjectOptions struct {
@@ -533,8 +534,10 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 			allow = append(allow, "PROPPATCH")
 		}
 		// Advertise WebDAV-Push for the collections supporting it
-		// (draft-bitfire-webdav-push section 2)
-		if info, err := b.pushInfo(r.Context(), r.URL.Path); err != nil {
+		// (draft-bitfire-webdav-push section 2). With push information
+		// that can't be served as the draft requires, they don't: the
+		// push properties and registrations get the error.
+		if info, err := b.pushInfo(r.Context(), r.URL.Path); err != nil && !errors.Is(err, push.ErrInvalidInfo) {
 			return nil, nil, err
 		} else if info != nil {
 			caps = append(caps, string(webdav.CapabilityPush))

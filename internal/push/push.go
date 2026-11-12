@@ -10,6 +10,7 @@ import (
 	"crypto/elliptic"
 	"encoding/base64"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -86,21 +87,37 @@ func requested(propfind *internal.PropFind) bool {
 	return false
 }
 
+// ErrInvalidInfo is wrapped by the error Info returns for push information
+// which can't be served as the draft requires. The server can't meet the
+// requirements of the draft for the collection then, so OPTIONS doesn't
+// advertise WebDAV-Push for it (draft-bitfire-webdav-push section 2), while
+// the push properties and registrations fail with the error.
+var ErrInvalidInfo = errors.New("webdav: invalid push information")
+
 // Info returns the push information of the collection at path, or nil if push
 // isn't available for it. Backends may return a 404 error for a path where
-// there's no collection: push isn't available there either.
+// there's no collection: push isn't available there either. Information
+// which can't be served as the draft requires is reported with an error
+// wrapping ErrInvalidInfo.
 func Info(ctx context.Context, b Backend, path string) (*PushInfo, error) {
 	info, err := b.PushInfo(ctx, path)
 	if internal.IsNotFound(err) {
 		return nil, nil
+	} else if err != nil {
+		return nil, err
 	}
-	return info, err
+	if info != nil {
+		if err := checkInfo(info); err != nil {
+			return nil, err
+		}
+	}
+	return info, nil
 }
 
 // AddProps adds the push properties of the collection at path to props, if
 // the PROPFIND request may return them and push is available for the
 // collection: they mustn't be served for other resources
-// (draft-bitfire-webdav-push section 2.1). If b fails, the properties are
+// (draft-bitfire-webdav-push section 2.1). If Info fails, the properties are
 // reported with its error, except for a propname request, which doesn't list
 // them.
 func AddProps(ctx context.Context, b Backend, propfind *internal.PropFind, path string, props map[xml.Name]internal.PropFindFunc) {
@@ -110,9 +127,6 @@ func AddProps(ctx context.Context, b Backend, propfind *internal.PropFind, path 
 	info, err := Info(ctx, b, path)
 	if err == nil && info == nil {
 		return
-	}
-	if err == nil {
-		err = checkInfo(info)
 	}
 	if err != nil {
 		// A propname response lists names without calling the PropFindFuncs,
@@ -132,7 +146,7 @@ func AddProps(ctx context.Context, b Backend, propfind *internal.PropFind, path 
 
 	var vapidKey *vapidPublicKey
 	if info.VAPIDPublicKey != nil {
-		// checkInfo checked the key
+		// Info checked the key
 		b, _ := info.VAPIDPublicKey.Bytes()
 		vapidKey = &vapidPublicKey{Type: "p256ecdsa", Key: base64.RawURLEncoding.EncodeToString(b)}
 	}
@@ -152,30 +166,30 @@ func AddProps(ctx context.Context, b Backend, propfind *internal.PropFind, path 
 }
 
 // checkInfo checks that the push information returned by a backend can be
-// served as the draft requires.
+// served as the draft requires. Its errors wrap ErrInvalidInfo.
 func checkInfo(info *PushInfo) error {
 	if info.Topic == "" {
-		return fmt.Errorf("webdav: push information without a topic")
+		return fmt.Errorf("%w: no topic", ErrInvalidInfo)
 	}
 	if info.ContentUpdate == nil && info.PropertyUpdate == nil {
-		return fmt.Errorf("webdav: push information without a supported trigger")
+		return fmt.Errorf("%w: no supported trigger", ErrInvalidInfo)
 	}
 	for _, t := range []*PushTrigger{info.ContentUpdate, info.PropertyUpdate} {
 		if t != nil && !validDepth(t.Depth) {
-			return fmt.Errorf("webdav: push trigger with an invalid depth %d", int(t.Depth))
+			return fmt.Errorf("%w: trigger with an invalid depth %d", ErrInvalidInfo, int(t.Depth))
 		}
 	}
 	if k := info.VAPIDPublicKey; k != nil {
 		if k.Curve != elliptic.P256() {
-			return fmt.Errorf("webdav: VAPID public key isn't on the P-256 curve")
+			return fmt.Errorf("%w: VAPID public key isn't on the P-256 curve", ErrInvalidInfo)
 		}
 		// Bytes panics if a coordinate is missing, and fails if the point
 		// isn't on the curve
 		if k.X == nil || k.Y == nil {
-			return fmt.Errorf("webdav: invalid VAPID public key: missing coordinates")
+			return fmt.Errorf("%w: VAPID public key without coordinates", ErrInvalidInfo)
 		}
 		if _, err := k.Bytes(); err != nil {
-			return fmt.Errorf("webdav: invalid VAPID public key: %v", err)
+			return fmt.Errorf("%w: VAPID public key: %v", ErrInvalidInfo, err)
 		}
 	}
 	return nil
@@ -234,7 +248,7 @@ var (
 // ServeRegister serves a push subscription registration, a POST request with
 // a push-register body (draft-bitfire-webdav-push section 3.1), for the
 // collection at r.URL.Path. info is the push information of the collection,
-// nil if push isn't available for it.
+// as returned by Info: nil if push isn't available for it.
 func ServeRegister(w http.ResponseWriter, r *http.Request, b Backend, info *PushInfo) error {
 	var req pushRegister
 	if err := internal.DecodeXMLRequest(r, &req); err != nil {
@@ -243,9 +257,6 @@ func ServeRegister(w http.ResponseWriter, r *http.Request, b Backend, info *Push
 
 	if info == nil {
 		return errPushNotAvailable
-	}
-	if err := checkInfo(info); err != nil {
-		return err
 	}
 
 	sub := PushSubscription{}

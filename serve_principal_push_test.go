@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/xml"
 	"errors"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -418,6 +419,52 @@ func TestServePrincipalPushUnregister(t *testing.T) {
 	}
 	if allow := splitHeader(w.Header(), "Allow"); !allow[http.MethodPost] || allow[http.MethodDelete] {
 		t.Errorf("DELETE principal: Allow: %q, want POST but not DELETE", w.Header().Values("Allow"))
+	}
+}
+
+// With push information the server can't serve as the draft requires, here
+// a VAPID key off the P-256 curve, the principal doesn't support WebDAV-Push:
+// OPTIONS and 405 responses don't advertise it (draft-bitfire-webdav-push
+// section 2), and the push properties and registrations fail as when
+// PushInfo fails.
+func TestServePrincipalPushInvalidInfo(t *testing.T) {
+	b := newPrincipalPushBackend(t)
+	b.info[testPrincipalPath].VAPIDPublicKey = &ecdsa.PublicKey{Curve: elliptic.P256(), X: big.NewInt(1), Y: big.NewInt(1)}
+	opts := newPushPrincipalOptions(b)
+
+	w := servePrincipalAt(opts, http.MethodOptions, testPrincipalPath, "")
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("OPTIONS: status = %v, want 204", w.Code)
+	}
+	if splitHeader(w.Header(), "DAV")["webdav-push"] || splitHeader(w.Header(), "Allow")[http.MethodPost] {
+		t.Errorf("OPTIONS: DAV: %q, Allow: %q, want neither webdav-push nor POST", w.Header().Values("DAV"), w.Header().Values("Allow"))
+	}
+	w = servePrincipalAt(opts, http.MethodPut, testPrincipalPath, "")
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("PUT: status = %v, want 405", w.Code)
+	}
+	if got, want := w.Header().Get("Allow"), "OPTIONS, PROPFIND"; got != want {
+		t.Errorf("PUT: Allow: %q, want %q", got, want)
+	}
+
+	status := propStatus(t, servePrincipalAt(opts, "PROPFIND", testPrincipalPath, propFindPushProps))
+	for _, name := range testPushPropNames {
+		if status[name] != http.StatusInternalServerError {
+			t.Errorf("%v has status %v, want 500", name.Local, status[name])
+		}
+	}
+	status = propStatus(t, servePrincipalAt(opts, "PROPFIND", testPrincipalPath, `<d:propfind xmlns:d="DAV:"><d:propname/></d:propfind>`))
+	for _, name := range testPushPropNames {
+		if _, ok := status[name]; ok {
+			t.Errorf("propname lists %v", name.Local)
+		}
+	}
+
+	if w := servePrincipalAt(opts, http.MethodPost, testPrincipalPath, testPushRegister); w.Code != http.StatusInternalServerError {
+		t.Errorf("POST: status = %v, want 500", w.Code)
+	}
+	if len(b.registers) != 0 {
+		t.Errorf("RegisterPush called %d times, want none", len(b.registers))
 	}
 }
 

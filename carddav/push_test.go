@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/xml"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -439,6 +440,56 @@ func TestPushPropNameError(t *testing.T) {
 		if !found {
 			t.Errorf("%v not in the response", name.Local)
 		}
+	}
+}
+
+// With push information the server can't serve as the draft requires, here
+// a VAPID key off the P-256 curve, push isn't supported: OPTIONS doesn't
+// advertise it (draft section 2), and the push properties and registrations
+// fail as when PushInfo fails.
+func TestPushInvalidInfo(t *testing.T) {
+	b := newPushTestBackend(t)
+	b.info[syncAddressBookPath].VAPIDPublicKey = &ecdsa.PublicKey{Curve: elliptic.P256(), X: big.NewInt(1), Y: big.NewInt(1)}
+
+	dav, allow := pushOptions(t, b, syncAddressBookPath)
+	for _, v := range dav {
+		if v == "webdav-push" {
+			t.Errorf("OPTIONS: DAV = %v, want no webdav-push", dav)
+		}
+	}
+	if allow["POST"] || !allow["PROPFIND"] {
+		t.Errorf("OPTIONS: Allow = %v, want PROPFIND but not POST", allow)
+	}
+
+	resp := pushPropFind(t, b, syncAddressBookPath, "0", `<propfind xmlns="DAV:"><propname/></propfind>`, syncAddressBookPath)
+	for _, propstat := range resp.PropStats {
+		for _, name := range pushPropNames {
+			if propstat.Prop.Get(name) != nil {
+				t.Errorf("propname lists %v with status %v", name.Local, propstat.Status.Code)
+			}
+		}
+	}
+	resp = pushPropFind(t, b, syncAddressBookPath, "0", propFindPushProps, syncAddressBookPath)
+	for _, name := range pushPropNames {
+		found := false
+		for _, propstat := range resp.PropStats {
+			if propstat.Prop.Get(name) != nil {
+				found = true
+				if propstat.Status.Code != http.StatusInternalServerError {
+					t.Errorf("%v: got status %v, want 500", name.Local, propstat.Status.Code)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%v not in the response", name.Local)
+		}
+	}
+
+	if w := serveCardDAV(b, http.MethodPost, syncAddressBookPath, "", pushRegisterRequest); w.Code != http.StatusInternalServerError {
+		t.Errorf("POST: status = %v, want 500", w.Code)
+	}
+	if len(b.registers) != 0 {
+		t.Errorf("RegisterPush called %d times, want none", len(b.registers))
 	}
 }
 
