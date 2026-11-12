@@ -3,6 +3,7 @@ package carddav
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/emersion/go-vcard"
@@ -21,12 +22,14 @@ func filterProperties(req AddressDataRequest, ao AddressObject) AddressObject {
 		result.Card[vcard.FieldVersion] = version
 	}
 	for _, prop := range req.Props {
-		if value, ok := ao.Card[prop]; ok {
-			result.Card[prop] = value
-			continue
-		}
-		if fields := cardFields(ao.Card, prop); len(fields) > 0 {
-			result.Card[strings.ToUpper(prop)] = fields
+		_, name := splitGroup(prop)
+		key := strings.ToUpper(name)
+		for _, field := range cardFields(ao.Card, prop) {
+			// The same field may be requested twice, such as with
+			// and without its group
+			if !slices.Contains(result.Card[key], field) {
+				result.Card[key] = append(result.Card[key], field)
+			}
 		}
 	}
 
@@ -102,7 +105,38 @@ func Match(query *AddressBookQuery, ao *AddressObject) (matched bool, err error)
 	}
 }
 
+// splitGroup splits a CardDAV property name into its vCard group prefix, if
+// any, and the vCard property name. Neither contains a dot (RFC 6350 section
+// 3.3).
+func splitGroup(name string) (group, prop string) {
+	if group, prop, ok := strings.Cut(name, "."); ok {
+		return group, prop
+	}
+	return "", name
+}
+
+// cardFields returns the fields of card named by name, a CardDAV property
+// name (RFC 6352 sections 10.4.2 and 10.5.1): without a group prefix, it
+// names the properties with any group prefix or none; with a group prefix,
+// only the properties with that group prefix. Names are case-insensitive.
 func cardFields(card vcard.Card, name string) []*vcard.Field {
+	group, name := splitGroup(name)
+	fields := cardFieldsByName(card, name)
+	if group == "" {
+		return fields
+	}
+	var out []*vcard.Field
+	for _, field := range fields {
+		if strings.EqualFold(field.Group, group) {
+			out = append(out, field)
+		}
+	}
+	return out
+}
+
+// cardFieldsByName returns the fields of card named name, whatever their
+// group.
+func cardFieldsByName(card vcard.Card, name string) []*vcard.Field {
 	if len(card) == 0 {
 		return nil
 	}
