@@ -94,7 +94,9 @@ func CheckSyncCollection(q *SyncCollectionQuery) (syncToken string, err error) {
 // member already reported, in updated, deleted or an earlier error, is left
 // out; a 404 Not Found error reports the member as removed; and any other
 // error reports the requested properties of a changed member in a propstat
-// with the status, DAV:error and description of the error.
+// with the status, DAV:error and description of the error. If prop is empty,
+// so is the prop element of that propstat, which RFC 4918 section 14.22
+// allows.
 func SyncErrorResponses(errResps []Response, prop *Prop, updated, deleted []string) []Response {
 	var names []RawXMLValue
 	for _, raw := range prop.Raw {
@@ -132,6 +134,19 @@ func SyncErrorResponses(errResps []Response, prop *Prop, updated, deleted []stri
 		resps = append(resps, resp)
 	}
 	return resps
+}
+
+// SyncChangedResponse returns resp, the response built by NewPropFindResponse
+// for a changed member in a sync-collection REPORT, in the form RFC 6578
+// section 3.2 requires: with at least one propstat and no status. The 200 OK
+// status of a request for no property, with an empty prop element, is moved
+// to a propstat with an empty prop element.
+func SyncChangedResponse(resp *Response) *Response {
+	if resp.Status != nil && len(resp.PropStats) == 0 {
+		resp.PropStats = []PropStat{{Status: *resp.Status}}
+		resp.Status = nil
+	}
+	return resp
 }
 
 // ServeSyncCollection serves the response to a sync-collection REPORT on the

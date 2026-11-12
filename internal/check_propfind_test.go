@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"encoding/xml"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -65,4 +66,78 @@ func TestHandlerPropFindWithoutProp(t *testing.T) {
 			t.Errorf("Backend.PropFind calls = %v, want one allprop request", b.propfinds)
 		}
 	})
+}
+
+// A propfind element holds either a propname, an allprop optionally followed
+// by an include, or a prop element (RFC 4918 section 14.20). Any other
+// combination is refused before the backend is asked for any resource,
+// rather than served as whichever of them is checked first.
+func TestHandlerPropFindExclusiveElements(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{"allprop and prop", `<D:allprop/><D:prop><D:getetag/></D:prop>`, http.StatusBadRequest},
+		{"propname and allprop", `<D:propname/><D:allprop/>`, http.StatusBadRequest},
+		{"propname and prop", `<D:propname/><D:prop><D:getetag/></D:prop>`, http.StatusBadRequest},
+		{"all three", `<D:propname/><D:allprop/><D:prop><D:getetag/></D:prop>`, http.StatusBadRequest},
+		{"prop and include", `<D:prop><D:getetag/></D:prop><D:include><D:getetag/></D:include>`, http.StatusBadRequest},
+		{"propname and include", `<D:propname/><D:include><D:getetag/></D:include>`, http.StatusBadRequest},
+		{"allprop and include", `<D:allprop/><D:include><D:getetag/></D:include>`, http.StatusMultiStatus},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &propFindRecorder{}
+			h := Handler{Backend: b}
+			body := `<D:propfind xmlns:D="DAV:">` + tc.body + `</D:propfind>`
+			req := httptest.NewRequest("PROPFIND", "/dir/", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/xml")
+			req.Header.Set("Depth", "1")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			if w.Code != tc.want {
+				t.Errorf("PROPFIND returned %v, want %v: %s", w.Code, tc.want, w.Body.String())
+			}
+			calls := 0
+			if tc.want == http.StatusMultiStatus {
+				calls = 1
+			}
+			if len(b.propfinds) != calls {
+				t.Errorf("Backend.PropFind called %d times, want %d", len(b.propfinds), calls)
+			}
+		})
+	}
+}
+
+// An empty prop element is valid (RFC 4918 section 14.18: <!ELEMENT prop
+// ANY >) and asks for no property. Since a response holds either a status or
+// at least one propstat (section 14.24), the resource gets a 200 OK status,
+// as for a REPORT without a prop element.
+func TestNewPropFindResponseEmptyProp(t *testing.T) {
+	deadName := xml.Name{Space: "urn:example", Local: "dead"}
+	for _, body := range []string{
+		`<D:propfind xmlns:D="DAV:"><D:prop/></D:propfind>`,
+		`<D:propfind xmlns:D="DAV:"><D:prop>
+		</D:prop></D:propfind>`,
+	} {
+		var propfind PropFind
+		if err := xml.Unmarshal([]byte(body), &propfind); err != nil {
+			t.Fatal(err)
+		}
+		props := map[xml.Name]PropFindFunc{
+			GetETagName: PropFindValue(&GetETag{ETag: "1"}),
+		}
+		deadProps := map[xml.Name]PropFindFunc{
+			deadName: PropFindValue(NewRawXMLElement(deadName, nil, nil)),
+		}
+		resp, err := NewPropFindResponseWithDeadProps("/dir/a", &propfind, props, deadProps)
+		if err != nil {
+			t.Fatalf("%v: %v", body, err)
+		}
+		if resp.Status == nil || resp.Status.Code != http.StatusOK || len(resp.PropStats) != 0 {
+			b, _ := xml.Marshal(resp)
+			t.Errorf("%v: got response %s, want a 200 OK status without propstat", body, b)
+		}
+	}
 }

@@ -101,7 +101,7 @@ func (h *Handler) handleSyncCollection(r *http.Request, w http.ResponseWriter, s
 			if err != nil {
 				return err
 			}
-			if err := mw.WriteResponse(resp); err != nil {
+			if err := mw.WriteResponse(internal.SyncChangedResponse(resp)); err != nil {
 				return err
 			}
 		}
