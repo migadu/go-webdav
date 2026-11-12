@@ -182,16 +182,6 @@ type addressbookMultiget struct {
 	PropName *struct{}       `xml:"DAV: propname,omitempty"`
 }
 
-func newProp(name string, noValue bool) *internal.RawXMLValue {
-	attrs := []xml.Attr{{Name: xml.Name{namespace, "name"}, Value: name}}
-	if noValue {
-		attrs = append(attrs, xml.Attr{Name: xml.Name{namespace, "novalue"}, Value: "yes"})
-	}
-
-	xmlName := xml.Name{namespace, "prop"}
-	return internal.NewRawXMLElement(xmlName, attrs, nil)
-}
-
 // https://tools.ietf.org/html/rfc6352#section-10.4
 type addressDataReq struct {
 	XMLName xml.Name  `xml:"urn:ietf:params:xml:ns:carddav address-data"`
@@ -203,7 +193,29 @@ type addressDataReq struct {
 type prop struct {
 	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:carddav prop"`
 	Name    string   `xml:"name,attr"`
-	// TODO: novalue
+	NoValue noValue  `xml:"novalue,attr,omitempty"`
+}
+
+// noValue is the novalue attribute of CARDDAV:prop, "yes" or "no".
+type noValue bool
+
+func (nv *noValue) UnmarshalText(b []byte) error {
+	switch s := string(b); s {
+	case "yes":
+		*nv = true
+	case "no":
+		*nv = false
+	default:
+		return fmt.Errorf("carddav: invalid novalue value: %q", s)
+	}
+	return nil
+}
+
+func (nv noValue) MarshalText() ([]byte, error) {
+	if nv {
+		return []byte("yes"), nil
+	}
+	return []byte("no"), nil
 }
 
 // https://tools.ietf.org/html/rfc6352#section-10.4

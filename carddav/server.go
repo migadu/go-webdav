@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -313,6 +314,17 @@ func decodeAddressDataReq(addressData *addressDataReq) (*AddressDataRequest, err
 	req := &AddressDataRequest{AllProp: addressData.Allprop != nil || len(addressData.Props) == 0}
 	for _, p := range addressData.Props {
 		req.Props = append(req.Props, p.Name)
+		if !p.NoValue {
+			continue
+		}
+		// A property requested both with and without novalue is returned
+		// with its value
+		withValue := slices.ContainsFunc(addressData.Props, func(q prop) bool {
+			return !bool(q.NoValue) && strings.EqualFold(q.Name, p.Name)
+		})
+		if !withValue {
+			req.NoValue = append(req.NoValue, p.Name)
+		}
 	}
 	return req, nil
 }
@@ -372,7 +384,7 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *add
 	b := h.newBackend()
 	return internal.StreamMultiStatus(w, r, func(mw *internal.MultiStatusWriter) error {
 		for i := range aos {
-			resp, err := b.propFindAddressObject(r.Context(), &propfind, true, &aos[i])
+			resp, err := b.propFindAddressObject(r.Context(), &propfind, &q.DataRequest, &aos[i])
 			if err != nil {
 				return err
 			}
@@ -475,7 +487,7 @@ func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multige
 			var resp *internal.Response
 			if err != nil {
 				resp = internal.NewErrorResponse(href.Path, err)
-			} else if resp, err = b.propFindAddressObject(ctx, &propfind, true, ao); err != nil {
+			} else if resp, err = b.propFindAddressObject(ctx, &propfind, &dataReq, ao); err != nil {
 				return err
 			}
 			if err := mw.WriteResponse(resp); err != nil {
@@ -675,7 +687,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		if err != nil {
 			return err
 		}
-		resp, err := b.propFindAddressObject(ctx, propfind, false, ao)
+		resp, err := b.propFindAddressObject(ctx, propfind, nil, ao)
 		if err != nil {
 			return err
 		}
@@ -885,12 +897,14 @@ func (b *backend) propFindAllAddressBooks(ctx context.Context, mw *internal.Mult
 	return mw.WriteResponses(errResps)
 }
 
-func (b *backend) propFindAddressObject(ctx context.Context, propfind *internal.PropFind, report bool, ao *AddressObject) (*internal.Response, error) {
+// propFindAddressObject returns the response for ao. dataReq is the
+// address-data of a REPORT request, or nil for a PROPFIND request.
+func (b *backend) propFindAddressObject(ctx context.Context, propfind *internal.PropFind, dataReq *AddressDataRequest, ao *AddressObject) (*internal.Response, error) {
 	// Unlike a PROPFIND request, an addressbook-query or addressbook-multiget
 	// REPORT doesn't have to ask for properties (RFC 6352 sections 10.3 and
 	// 10.7). Each object found still gets a response, with only a status
 	// (RFC 4918 section 14.24).
-	if report && !propfind.AsksForProps() {
+	if dataReq != nil && !propfind.AsksForProps() {
 		return internal.NewOKResponse(ao.Path), nil
 	}
 
@@ -910,10 +924,14 @@ func (b *backend) propFindAddressObject(ctx context.Context, propfind *internal.
 
 	// address-data is not a property: it is only returned by REPORT
 	// requests, not by PROPFIND (RFC 6352 section 10.4)
-	if report {
+	if dataReq != nil {
 		props[addressDataName] = func(*internal.RawXMLValue) (interface{}, error) {
+			// Only the requested properties are returned (RFC 6352
+			// section 10.4), whatever the backend returned. Filtering
+			// again what Filter already filtered changes nothing.
+			card := filterProperties(*dataReq, *ao).Card
 			var buf bytes.Buffer
-			if err := vcard.NewEncoder(&buf).Encode(ao.Card); err != nil {
+			if err := vcard.NewEncoder(&buf).Encode(card); err != nil {
 				return nil, err
 			}
 
@@ -957,7 +975,7 @@ func (b *backend) propFindAllAddressObjects(ctx context.Context, mw *internal.Mu
 		return err
 	}
 	for i := range aos {
-		resp, err := b.propFindAddressObject(ctx, propfind, false, &aos[i])
+		resp, err := b.propFindAddressObject(ctx, propfind, nil, &aos[i])
 		if err != nil {
 			return err
 		}
