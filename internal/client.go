@@ -191,6 +191,40 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
+// endpointKey is the key of the context value holding the endpoint of the
+// Client sending a request.
+type endpointKey struct{}
+
+// CredentialsAllowed reports whether an HTTP client adding credentials for a
+// Client's endpoint to its requests, such as webdav.HTTPClientWithBasicAuth,
+// may add them to req.
+//
+// The protection space of the endpoint's credentials doesn't extend outside
+// its origin (RFC 9110 section 11.5, RFC 7617 section 2.2), so a request a
+// Client sends to another origin doesn't get them: one for another host a
+// server lists resources on, as iCloud does for home sets, or for an http URL
+// with an https endpoint. Neither does a request Do sends again to another
+// origin to follow a redirect: it only keeps the Authorization header field
+// of the first one where http.Client would keep it (see Do). A request not
+// sent by a Client is the caller's own, and gets them.
+func CredentialsAllowed(req *http.Request) bool {
+	endpoint, ok := req.Context().Value(endpointKey{}).(*url.URL)
+	return !ok || sameOrigin(req.URL, endpoint)
+}
+
+// sameOrigin reports whether a and b have the same origin (RFC 9110 section
+// 4.3.1): the same scheme, host and port, a URL without a port having the
+// default one of its scheme.
+func sameOrigin(a, b *url.URL) bool {
+	port := func(u *url.URL) string {
+		if p := u.Port(); p != "" {
+			return p
+		}
+		return defaultPort(strings.ToLower(u.Scheme))
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Hostname(), b.Hostname()) && port(a) == port(b)
+}
+
 type Client struct {
 	http     HTTPClient
 	endpoint *url.URL
@@ -229,9 +263,10 @@ func isHTTPURL(s string) bool {
 // p can also be an absolute http or https URL, which clients return for the
 // resources on another host than the endpoint's (see HrefPath). It's used
 // as is: requests for it are sent to its host. The credentials of the endpoint
-// URL are only added to a URL with the same scheme and host; an HTTPClient
-// adding credentials to its requests, such as the one returned by
-// webdav.HTTPClientWithBasicAuth, adds them for any host.
+// URL are only added to a URL with the same scheme and host, and
+// webdav.HTTPClientWithBasicAuth only adds its own to the endpoint's origin
+// (see CredentialsAllowed); another HTTPClient adding credentials to its
+// requests adds them for any host.
 func (c *Client) ResolveHref(p string) (*url.URL, error) {
 	if isHTTPURL(p) {
 		u, err := url.Parse(p)
@@ -437,8 +472,9 @@ func isDomainOrSubdomain(host, parent string) bool {
 // 307 or 308 redirect. As with http.Client, at most 10 redirects are followed,
 // and the sensitive header fields, such as Authorization and Cookie, are left
 // out once a redirect leaves the domain of req and its subdomains; an HTTP
-// client adding credentials to every request, such as the one returned by
-// webdav.HTTPClientWithBasicAuth, adds them anyway. For that reason, and
+// client adding credentials to every request adds them anyway, but
+// webdav.HTTPClientWithBasicAuth only adds them to a request for the
+// endpoint's origin (see CredentialsAllowed). For that reason, and
 // because of the body, a request for an https URL isn't sent again to an http
 // URL: Do returns an *HTTPError with the redirect status. The requests the HTTP
 // client sends itself to follow a redirect, such as that GET request, are up
@@ -500,6 +536,10 @@ func responseError(resp *http.Response) error {
 // send sends req with the HTTP client, keeping its method across 301 and 302
 // redirects (see Do).
 func (c *Client) send(req *http.Request) (*http.Response, error) {
+	// The HTTP client may add credentials for the endpoint, but only to the
+	// requests for its origin (see CredentialsAllowed)
+	req = req.WithContext(context.WithValue(req.Context(), endpointKey{}, c.endpoint))
+
 	switch req.Method {
 	case "", http.MethodGet, http.MethodHead, http.MethodPost:
 		return c.http.Do(req)

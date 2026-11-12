@@ -23,14 +23,27 @@ type basicAuthHTTPClient struct {
 }
 
 func (c *basicAuthHTTPClient) Do(req *http.Request) (*http.Response, error) {
-	req.SetBasicAuth(c.username, c.password)
+	if internal.CredentialsAllowed(req) {
+		req.SetBasicAuth(c.username, c.password)
+	}
 	return c.c.Do(req)
 }
 
 // HTTPClientWithBasicAuth returns an HTTP client that adds basic
-// authentication to all outgoing requests. If c is nil, a copy of
-// http.DefaultClient is used, which doesn't follow a redirect from an https
-// URL to an http one (see NewClient).
+// authentication to the requests a Client sends for the origin of its
+// endpoint, i.e. its scheme, host and port, and to the requests it's given
+// directly.
+//
+// The credentials are for the endpoint (RFC 7617 section 2.2): a Client doesn't
+// send them to the other hosts a server lists resources on, such as the
+// iCloud host of a home set, nor to an http URL with an https endpoint. To
+// send them to another host, create a Client with an endpoint on it, e.g. the
+// URL of the home set. The request a Client sends again to follow a 301 or 302
+// redirect keeps them as http.Client keeps them for a 307 one: if the target
+// is on the same domain as the request, or on one of its subdomains.
+//
+// If c is nil, a copy of http.DefaultClient is used, which doesn't follow a
+// redirect from an https URL to an http one (see NewClient).
 func HTTPClientWithBasicAuth(c HTTPClient, username, password string) HTTPClient {
 	if c == nil {
 		c = internal.DefaultHTTPClient()
@@ -62,9 +75,10 @@ type Client struct {
 // whose href has a query, which a path can't carry. The methods taking a path
 // also take such a URL, and send the requests for it to its host: join it with
 // url.JoinPath rather than path.Join, which would mangle its "//". Credentials
-// in the endpoint URL are only sent to the endpoint's scheme and host, but an
-// HTTPClient adding credentials to its requests, such as the one returned by
-// HTTPClientWithBasicAuth, adds them for any host.
+// in the endpoint URL are only sent to the endpoint's scheme and host, and
+// those of HTTPClientWithBasicAuth to its origin: to send them to another
+// host, create a Client with an endpoint on it. Another HTTPClient adding
+// credentials to its requests adds them for any host.
 //
 // http.Client follows a 301 Moved Permanently or 302 Found redirect with a GET
 // request, which RFC 9110 only allows for a POST request. A request of the

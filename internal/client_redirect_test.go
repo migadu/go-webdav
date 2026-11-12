@@ -653,3 +653,70 @@ func TestClientRedirectCount(t *testing.T) {
 		}
 	}
 }
+
+// credentialsClient records whether CredentialsAllowed holds for each request
+// it's given, and answers it with 200 OK.
+type credentialsClient struct {
+	allowed []bool
+}
+
+func (c *credentialsClient) Do(req *http.Request) (*http.Response, error) {
+	c.allowed = append(c.allowed, CredentialsAllowed(req))
+	return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+}
+
+// TestCredentialsAllowed checks that the requests a Client sends may get the
+// credentials of its endpoint if they have the same origin: the same scheme,
+// host name and port, the default port of the scheme being implied.
+func TestCredentialsAllowed(t *testing.T) {
+	for _, tc := range []struct {
+		endpoint, target string
+		want             bool
+	}{
+		{"https://dav.test/dav/", "a.txt", true},
+		{"https://dav.test/dav/", "/other/", true},
+		{"https://dav.test/dav/", "https://dav.test/other/", true},
+		{"https://dav.test/dav/", "https://DAV.test:443/other/", true},
+		{"https://dav.test:443/dav/", "https://dav.test/other/", true},
+		{"http://dav.test:8080/", "http://dav.test:8080/a", true},
+		{"https://[::1]/", "https://[::1]:443/a", true},
+		{"https://dav.test/dav/", "http://dav.test/other/", false},
+		{"https://dav.test/dav/", "http://dav.test:443/other/", false},
+		{"http://dav.test/", "https://dav.test/a", false},
+		{"https://dav.test/dav/", "https://dav.test:8443/other/", false},
+		{"https://dav.test:8443/dav/", "https://dav.test/other/", false},
+		{"https://dav.test/dav/", "https://files.test/other/", false},
+		{"https://dav.test/dav/", "https://files.dav.test/other/", false},
+	} {
+		hc := &credentialsClient{}
+		c, err := NewClient(hc, tc.endpoint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Do sends a GET request as is, and a PROPFIND one so that it can
+		// follow a redirect with its method
+		for _, method := range []string{http.MethodGet, "PROPFIND"} {
+			req, err := c.NewRequest(method, tc.target, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.Do(req); err != nil {
+				t.Errorf("%v %v with endpoint %v: Do() = %v", method, tc.target, tc.endpoint, err)
+			}
+		}
+		for _, got := range hc.allowed {
+			if got != tc.want {
+				t.Errorf("%v with endpoint %v: CredentialsAllowed() = %v, want %v", tc.target, tc.endpoint, got, tc.want)
+			}
+		}
+	}
+
+	// A request not sent by a Client is the caller's own
+	req, err := http.NewRequest(http.MethodGet, "https://other.test/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !CredentialsAllowed(req) {
+		t.Errorf("CredentialsAllowed() = false for a request not sent by a Client, want true")
+	}
+}
