@@ -185,55 +185,50 @@ func decodeCalendar(path string, resp *internal.Response) (*Calendar, error) {
 		compNames = append(compNames, comp.Name)
 	}
 
-	var color calendarColor
-	if err := resp.DecodeProp(&color); err != nil && !internal.IsNotFound(err) {
-		return nil, err
-	}
-
-	var tz *ical.Calendar
-	var calTZ calendarTimezone
-	if err := resp.DecodeProp(&calTZ); err == nil {
-		if s := strings.TrimSpace(calTZ.Timezone); s != "" {
-			decoded, err := ical.NewDecoder(strings.NewReader(s)).Decode()
-			if err != nil {
-				return nil, fmt.Errorf("caldav: failed to decode calendar-timezone: %w", err)
-			}
-			tz = decoded
-		}
-	} else if !internal.IsNotFound(err) {
-		return nil, err
-	}
-
-	var syncToken internal.SyncToken
-	if err := resp.DecodeProp(&syncToken); err != nil && !internal.IsNotFound(err) {
-		return nil, err
-	}
-
-	var ctag internal.GetCTag
-	if err := resp.DecodeProp(&ctag); err != nil && !internal.IsNotFound(err) {
-		return nil, err
-	}
-
-	var readOnly bool
-	var privSet internal.CurrentUserPrivilegeSet
-	if err := resp.DecodeProp(&privSet); err == nil {
-		readOnly = !privSet.HasWrite()
-	} else if !internal.IsNotFound(err) {
-		return nil, err
-	}
-
-	return &Calendar{
+	cal := &Calendar{
 		Path:                  path,
 		Name:                  dispName.Name,
 		Description:           desc.Description,
-		Color:                 strings.TrimSpace(color.Color),
-		Timezone:              tz,
 		MaxResourceSize:       maxResSize.Size,
-		SyncToken:             syncToken.Token,
 		SupportedComponentSet: compNames,
-		ReadOnly:              readOnly,
-		CTag:                  ctag.CTag,
-	}, nil
+	}
+
+	// The other properties only fill in optional fields. Clients should be
+	// prepared for any status for a property (RFC 4918 section 9.1.2), e.g.
+	// 403 Forbidden for current-user-privilege-set, which needs its own
+	// privilege (RFC 3744 section 3.7): if the server fails to return one,
+	// or returns a value which can't be decoded, its field is left empty
+	// rather than failing the whole request.
+	var color calendarColor
+	if resp.DecodeProp(&color) == nil {
+		cal.Color = strings.TrimSpace(color.Color)
+	}
+
+	var calTZ calendarTimezone
+	if resp.DecodeProp(&calTZ) == nil {
+		if s := strings.TrimSpace(calTZ.Timezone); s != "" {
+			if tz, err := ical.NewDecoder(strings.NewReader(s)).Decode(); err == nil {
+				cal.Timezone = tz
+			}
+		}
+	}
+
+	var syncToken internal.SyncToken
+	if resp.DecodeProp(&syncToken) == nil {
+		cal.SyncToken = syncToken.Token
+	}
+
+	var ctag internal.GetCTag
+	if resp.DecodeProp(&ctag) == nil {
+		cal.CTag = ctag.CTag
+	}
+
+	var privSet internal.CurrentUserPrivilegeSet
+	if resp.DecodeProp(&privSet) == nil {
+		cal.ReadOnly = !privSet.HasWrite()
+	}
+
+	return cal, nil
 }
 
 // CreateCalendar creates a calendar at calendar.Path with a MKCALENDAR

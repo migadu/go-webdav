@@ -111,6 +111,8 @@ type Calendar struct {
 	Timezone              *ical.Calendar
 	// ReadOnly reports that the current user may only read this calendar. It
 	// controls the DAV:current-user-privilege-set reported by the server.
+	// Clients set it from that property, and leave it false if the server
+	// doesn't return it.
 	ReadOnly bool
 
 	// CTag, when set, is reported as the CalendarServer getctag property: an
