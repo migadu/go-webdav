@@ -97,28 +97,49 @@ func (c *Client) FindCalendar(ctx context.Context, path string) (*Calendar, erro
 }
 
 // FindCalendarHomeSet returns the path of the calendar home set of the
-// principal at principal, the collection holding its calendars.
+// principal at principal, the collection holding its calendars. If the
+// principal has several, it returns the first one the server lists: see
+// FindCalendarHomeSets.
 //
 // If the principal has no calendar home set, because the server doesn't
 // define the CALDAV:calendar-home-set property for it or defines it without
 // any href (RFC 4791 section 6.2.1), the returned error wraps a
 // *webdav.HTTPError with the status 404 Not Found.
 func (c *Client) FindCalendarHomeSet(ctx context.Context, principal string) (string, error) {
+	homeSets, err := c.FindCalendarHomeSets(ctx, principal)
+	if err != nil {
+		return "", err
+	}
+	return homeSets[0], nil
+}
+
+// FindCalendarHomeSets returns the paths of the calendar home sets of the
+// principal at principal, in the order the server lists them: the
+// CALDAV:calendar-home-set property may hold several hrefs (RFC 4791 section
+// 6.2.1).
+//
+// If the principal has no calendar home set, it returns the same error as
+// FindCalendarHomeSet, so the list is never empty.
+func (c *Client) FindCalendarHomeSets(ctx context.Context, principal string) ([]string, error) {
 	propfind := internal.NewPropNamePropFind(calendarHomeSetName)
 	resp, err := c.ic.PropFindFlat(ctx, principal, propfind)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	var prop calendarHomeSet
 	if err := resp.DecodeProp(&prop); err != nil {
-		return "", err
+		return nil, err
 	}
-	if prop.Href == nil {
-		return "", internal.NoHrefError(calendarHomeSetName)
+	if len(prop.Hrefs) == 0 {
+		return nil, internal.NoHrefError(calendarHomeSetName)
 	}
 
-	return resp.HrefPath(prop.Href), nil
+	homeSets := make([]string, len(prop.Hrefs))
+	for i := range prop.Hrefs {
+		homeSets[i] = resp.HrefPath(&prop.Hrefs[i])
+	}
+	return homeSets, nil
 }
 
 func (c *Client) FindCalendars(ctx context.Context, calendarHomeSet string) ([]Calendar, error) {

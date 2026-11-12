@@ -72,28 +72,49 @@ func (c *Client) HasSupport(ctx context.Context) error {
 }
 
 // FindAddressBookHomeSet returns the path of the address book home set of the
-// principal at principal, the collection holding its address books.
+// principal at principal, the collection holding its address books. If the
+// principal has several, it returns the first one the server lists: see
+// FindAddressBookHomeSets.
 //
 // If the principal has no address book home set, because the server doesn't
 // define the CARDDAV:addressbook-home-set property for it or defines it
 // without any href (RFC 6352 section 7.1.1), the returned error wraps a
 // *webdav.HTTPError with the status 404 Not Found.
 func (c *Client) FindAddressBookHomeSet(ctx context.Context, principal string) (string, error) {
+	homeSets, err := c.FindAddressBookHomeSets(ctx, principal)
+	if err != nil {
+		return "", err
+	}
+	return homeSets[0], nil
+}
+
+// FindAddressBookHomeSets returns the paths of the address book home sets of
+// the principal at principal, in the order the server lists them: the
+// CARDDAV:addressbook-home-set property may hold several hrefs (RFC 6352
+// section 7.1.1).
+//
+// If the principal has no address book home set, it returns the same error
+// as FindAddressBookHomeSet, so the list is never empty.
+func (c *Client) FindAddressBookHomeSets(ctx context.Context, principal string) ([]string, error) {
 	propfind := internal.NewPropNamePropFind(addressBookHomeSetName)
 	resp, err := c.ic.PropFindFlat(ctx, principal, propfind)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	var prop addressbookHomeSet
 	if err := resp.DecodeProp(&prop); err != nil {
-		return "", err
+		return nil, err
 	}
-	if prop.Href == nil {
-		return "", internal.NoHrefError(addressBookHomeSetName)
+	if len(prop.Hrefs) == 0 {
+		return nil, internal.NoHrefError(addressBookHomeSetName)
 	}
 
-	return resp.HrefPath(prop.Href), nil
+	homeSets := make([]string, len(prop.Hrefs))
+	for i := range prop.Hrefs {
+		homeSets[i] = resp.HrefPath(&prop.Hrefs[i])
+	}
+	return homeSets, nil
 }
 
 // FindMeCard returns the path of the address object holding the user's own

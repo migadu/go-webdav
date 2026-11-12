@@ -16,7 +16,7 @@ import (
 var CapabilityCalendar = webdav.Capability("calendar-access")
 
 func NewCalendarHomeSet(path string) webdav.BackendSuppliedHomeSet {
-	return &calendarHomeSet{Href: &internal.Href{Path: path}}
+	return &calendarHomeSet{Hrefs: []internal.Href{{Path: path}}}
 }
 
 // ValidateCalendarObject checks the validity of a calendar object according to

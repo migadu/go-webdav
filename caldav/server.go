@@ -971,7 +971,7 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 	props := map[xml.Name]internal.PropFindFunc{
 		internal.CurrentUserPrincipalName: internal.PropFindValue(internal.NewCurrentUserPrincipal(principalPath)),
 		calendarHomeSetName: internal.PropFindValue(&calendarHomeSet{
-			Href: &internal.Href{Path: homeSetPath},
+			Hrefs: []internal.Href{{Path: homeSetPath}},
 		}),
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, internal.PrincipalName)),
 	}

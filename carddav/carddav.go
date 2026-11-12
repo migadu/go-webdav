@@ -14,7 +14,7 @@ import (
 var CapabilityAddressBook = webdav.Capability("addressbook")
 
 func NewAddressBookHomeSet(path string) webdav.BackendSuppliedHomeSet {
-	return &addressbookHomeSet{Href: &internal.Href{Path: path}}
+	return &addressbookHomeSet{Hrefs: []internal.Href{{Path: path}}}
 }
 
 type AddressDataType struct {

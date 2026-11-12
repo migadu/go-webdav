@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/emersion/go-webdav"
@@ -13,19 +14,28 @@ import (
 // TestClientFindCurrentUserPrincipalHref checks that FindCurrentUserPrincipal
 // tells an empty href, which refers to the request URL (RFC 3986 section
 // 4.4), from a DAV:current-user-principal without any href or
-// DAV:unauthenticated, which RFC 5397 section 3 doesn't allow.
+// DAV:unauthenticated, or with both, which RFC 5397 section 3 doesn't allow:
+// <!ELEMENT current-user-principal (unauthenticated | href)>.
 func TestClientFindCurrentUserPrincipalHref(t *testing.T) {
-	const endpoint = "/dav/"
+	const (
+		endpoint        = "/dav/"
+		malformed       = "webdav: malformed current-user-principal property"
+		unauthenticated = "webdav: unauthenticated"
+	)
 	for _, tc := range []struct {
 		name string
 		prop string
 		want string // empty if an error is expected
+		// The start of the expected error
+		wantErr string
 	}{
-		{"href", `<D:current-user-principal><D:href>/principals/me/</D:href></D:current-user-principal>`, "/principals/me/"},
-		{"empty href", `<D:current-user-principal><D:href></D:href></D:current-user-principal>`, endpoint},
-		{"no href", `<D:current-user-principal/>`, ""},
-		{"no href, other element", `<D:current-user-principal><D:foo/></D:current-user-principal>`, ""},
-		{"unauthenticated", `<D:current-user-principal><D:unauthenticated/></D:current-user-principal>`, ""},
+		{"href", `<D:current-user-principal><D:href>/principals/me/</D:href></D:current-user-principal>`, "/principals/me/", ""},
+		{"empty href", `<D:current-user-principal><D:href></D:href></D:current-user-principal>`, endpoint, ""},
+		{"no href", `<D:current-user-principal/>`, "", malformed},
+		{"no href, other element", `<D:current-user-principal><D:foo/></D:current-user-principal>`, "", malformed},
+		{"unauthenticated", `<D:current-user-principal><D:unauthenticated/></D:current-user-principal>`, "", unauthenticated},
+		{"unauthenticated and href", `<D:current-user-principal><D:unauthenticated/><D:href>/principals/me/</D:href></D:current-user-principal>`, "", malformed},
+		{"href and unauthenticated", `<D:current-user-principal><D:href>/principals/me/</D:href><D:unauthenticated/></D:current-user-principal>`, "", malformed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -50,8 +60,8 @@ func TestClientFindCurrentUserPrincipalHref(t *testing.T) {
 			}
 			got, err := c.FindCurrentUserPrincipal(context.Background())
 			if tc.want == "" {
-				if err == nil {
-					t.Errorf("got %q, want an error", got)
+				if err == nil || !strings.HasPrefix(err.Error(), tc.wantErr) {
+					t.Errorf("got %q, %v, want an error starting with %q", got, err, tc.wantErr)
 				}
 				return
 			}
