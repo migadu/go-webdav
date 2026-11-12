@@ -1,7 +1,7 @@
 // Package push implements the server side of WebDAV-Push
-// (draft-bitfire-webdav-push-00) for the CalDAV and CardDAV servers: the push
-// properties of collections, and the registration and removal of push
-// subscriptions.
+// (draft-bitfire-webdav-push-00) for the CalDAV and CardDAV servers and
+// webdav.ServePrincipal: the push properties of collections and principals,
+// and the registration and removal of push subscriptions.
 package push
 
 import (
@@ -28,8 +28,8 @@ var (
 	SupportedTriggersName = xml.Name{Space: Namespace, Local: "supported-triggers"}
 )
 
-// Backend is the WebDAV-Push part of a backend: caldav.PushBackend and
-// carddav.PushBackend.
+// Backend is the WebDAV-Push part of a backend: caldav.PushBackend,
+// carddav.PushBackend and webdav.PushBackend.
 type Backend interface {
 	PushInfo(ctx context.Context, path string) (*PushInfo, error)
 	RegisterPush(ctx context.Context, path string, sub *PushSubscription) (*PushRegistration, error)

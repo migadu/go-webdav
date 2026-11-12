@@ -1,6 +1,7 @@
 package webdav
 
 import (
+	"context"
 	"encoding/xml"
 	"net/http"
 	"net/url"
@@ -18,7 +19,8 @@ import (
 // collections. It's specified by draft-bitfire-webdav-push-00
 // (https://github.com/bitfireAT/webdav-push), which DAVx⁵ implements. The
 // CalDAV and CardDAV servers support it for backends implementing
-// caldav.PushBackend and carddav.PushBackend.
+// caldav.PushBackend and carddav.PushBackend, and ServePrincipal if
+// ServePrincipalOptions.Push is set.
 var CapabilityPush = Capability("webdav-push")
 
 // Depth is the depth of a request or of a WebDAV-Push trigger: whether it
@@ -161,6 +163,49 @@ const (
 // send push messages to the push resource, for instance because of its host.
 func NewPushPreconditionError(p PushPreconditionType) error {
 	return push.NewPushPreconditionError(p)
+}
+
+// PushBackend is the WebDAV-Push part of a backend
+// (draft-bitfire-webdav-push-00), with which ServePrincipal supports
+// WebDAV-Push for a principal: see ServePrincipalOptions.Push.
+//
+// It has the same methods as caldav.PushBackend and carddav.PushBackend,
+// which also describe how the backend sends push messages: a server sharing
+// a principal between CalDAV and CardDAV can use a single backend for the
+// three. For the principal, the backend sends a push message to the
+// subscriptions with a property update trigger when the properties of the
+// principal change (draft-bitfire-webdav-push section 5).
+type PushBackend interface {
+	// PushInfo returns the WebDAV-Push information of the principal at
+	// path, or nil if push isn't available for it, for instance because the
+	// current user may not subscribe to it. It may be called for a path
+	// where there's no principal: it then returns nil, or a 404 error.
+	//
+	// The draft recommends supporting property updates of depth 0 for
+	// principals (section 5).
+	PushInfo(ctx context.Context, path string) (*PushInfo, error)
+	// RegisterPush registers the push subscription sub for the principal at
+	// path, for which PushInfo returned information, and returns the
+	// registration.
+	//
+	// If the principal already has a subscription with the same push
+	// resource (sub.WebPush.PushResource), RegisterPush updates it rather than
+	// registering another one, and keeps its registration URL (section 3.2).
+	//
+	// The expiration time of the registration should take into account the
+	// one requested in sub.Expires, if any, but it can be earlier: the draft
+	// recommends allowing at least three days (section 3.4).
+	//
+	// RegisterPush can refuse a subscription with NewPushPreconditionError.
+	RegisterPush(ctx context.Context, path string, sub *PushSubscription) (*PushRegistration, error)
+	// UnregisterPush removes the registration whose registration URL has
+	// path for its path, in reply to a DELETE request (section 3.3).
+	//
+	// ServePrincipal calls it for every DELETE request: it returns false,
+	// and no error, if path isn't the path of a registration URL. If there's
+	// no such registration, or it has expired, it returns true and a 404
+	// error.
+	UnregisterPush(ctx context.Context, path string) (ok bool, err error)
 }
 
 // PushMessage is a push message, which notifies the subscriptions of a

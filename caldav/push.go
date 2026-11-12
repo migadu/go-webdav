@@ -51,6 +51,10 @@ import (
 //
 // Registrations should be bound to the current user: only that user may
 // update or remove them, or list them in Push-Dont-Notify (section 7.1).
+//
+// A server serving the principal with webdav.ServePrincipal, shared with a
+// CardDAV server, can pass the same backend in
+// webdav.ServePrincipalOptions.Push: webdav.PushBackend has the same methods.
 type PushBackend interface {
 	// PushInfo returns the WebDAV-Push information of the collection at
 	// path, the user principal, the calendar home set, a calendar or the
