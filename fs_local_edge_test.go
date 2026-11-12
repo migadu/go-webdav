@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -243,4 +244,57 @@ func TestLocalFileSystemPathThroughFileNotFound(t *testing.T) {
 		}
 	}
 	checkTestFile(t, filepath.Join(dir, "file.txt"), "hello")
+}
+
+// A symbolic link which doesn't resolve is replaced by PUT, COPY and MOVE
+// like any other destination, whether what it points to is missing or a path
+// through a file.
+func TestLocalFileSystemOverwriteBrokenLink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symbolic links")
+	}
+	ctx := context.Background()
+	ops := []struct {
+		name string
+		do   func(fs webdav.LocalFileSystem, dst string, noOverwrite bool) error
+	}{
+		{"Create", func(fs webdav.LocalFileSystem, dst string, noOverwrite bool) error {
+			_, _, err := fs.Create(ctx, dst, io.NopCloser(strings.NewReader("src")), &webdav.CreateOptions{})
+			return err
+		}},
+		{"Copy", func(fs webdav.LocalFileSystem, dst string, noOverwrite bool) error {
+			_, err := fs.Copy(ctx, "/src.txt", dst, &webdav.CopyOptions{NoOverwrite: noOverwrite})
+			return err
+		}},
+		{"Move", func(fs webdav.LocalFileSystem, dst string, noOverwrite bool) error {
+			_, err := fs.Move(ctx, "/src.txt", dst, &webdav.MoveOptions{NoOverwrite: noOverwrite})
+			return err
+		}},
+	}
+	for _, op := range ops {
+		for _, target := range []string{"missing", "file.txt/sub"} {
+			t.Run(op.name+" onto a link to "+target, func(t *testing.T) {
+				dir := t.TempDir()
+				writeTestFile(t, filepath.Join(dir, "file.txt"), "hello")
+				writeTestFile(t, filepath.Join(dir, "src.txt"), "src")
+				writeTestSymlink(t, filepath.Join(dir, "link"), target)
+				fs := webdav.LocalFileSystem(dir)
+
+				// The link doesn't name an existing resource, but
+				// Copy and Move don't replace it without overwriting
+				if op.name != "Create" {
+					checkHTTPErrorCode(t, op.do(fs, "/link", true), http.StatusPreconditionFailed)
+				}
+
+				if err := op.do(fs, "/link", false); err != nil {
+					t.Fatalf("%v() = %v", op.name, err)
+				}
+				checkTestFile(t, filepath.Join(dir, "link"), "src")
+				if fi, err := os.Lstat(filepath.Join(dir, "link")); err != nil || !fi.Mode().IsRegular() {
+					t.Errorf("destination isn't a regular file (%v)", err)
+				}
+				checkTestFile(t, filepath.Join(dir, "file.txt"), "hello")
+			})
+		}
+	}
 }
