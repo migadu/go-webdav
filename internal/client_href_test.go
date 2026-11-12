@@ -30,7 +30,15 @@ func TestClientHrefPath(t *testing.T) {
 	}{
 		// On the endpoint's host: as before
 		{endpoint, "/1234567/carddavhome/", "/1234567/carddavhome/"},
-		{endpoint, "card/", "card/"},
+		// A relative reference is relative to the URL of the request, not
+		// to the endpoint (RFC 3986 section 5.2), and an empty one refers
+		// to that URL (section 4.4)
+		{endpoint, "card/", "/1234567/principal/card/"},
+		{endpoint, "card/a%20b.vcf", "/1234567/principal/card/a b.vcf"},
+		{endpoint, "../carddavhome/a.vcf", "/1234567/carddavhome/a.vcf"},
+		{endpoint, "./a.vcf", "/1234567/principal/a.vcf"},
+		{endpoint, "", "/1234567/principal/"},
+		{endpoint, "#frag", "/1234567/principal/"},
 		{endpoint, "https://contacts.icloud.com/a%20b/", "/a b/"},
 		{endpoint, "https://contacts.icloud.com:443/a", "/a"},
 		{endpoint, "https://Contacts.iCloud.com/a", "/a"},

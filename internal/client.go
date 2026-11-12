@@ -239,18 +239,26 @@ func defaultPort(scheme string) string {
 // normalizeHref returns href, a reference received in a response to a request
 // for base (the endpoint if nil), in the form returned by clients.
 //
-// A resource on the endpoint's host is referred to by its path, or kept as is
-// if href is relative to a URL on the endpoint's host. A resource on another
-// host is referred to by its absolute URL, resolved against base if href is
-// relative. So is a resource whose href has a query, which a path can't carry.
+// A resource on the endpoint's host is referred to by its path, resolved
+// against base if href is a relative reference other than a path. A resource
+// on another host is referred to by its absolute URL, resolved against base if
+// href is relative. So is a resource whose href has a query, which a path
+// can't carry.
 func (c *Client) normalizeHref(base *url.URL, href Href) Href {
-	if base == nil {
+	known := base != nil
+	if !known {
 		base = c.endpoint
 	}
 
 	u := url.URL(href)
 	if u.Scheme == "" && u.Host == "" {
-		if u.RawQuery == "" && c.onEndpointHost(base) {
+		// A path on the endpoint's host is already in the form returned by
+		// clients. Other relative references are resolved against base (RFC
+		// 3986 section 5.2), the URL of the request: "a.vcf" is a member of
+		// a collection, and an empty reference is base itself (section 4.4).
+		// Without base, a reference is kept as is, as clients resolve paths
+		// against the endpoint (see ResolveHref).
+		if u.RawQuery == "" && c.onEndpointHost(base) && (strings.HasPrefix(u.Path, "/") || !known) {
 			return href
 		}
 		u = *base.ResolveReference(&u)

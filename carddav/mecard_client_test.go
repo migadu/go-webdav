@@ -31,6 +31,12 @@ func TestClientFindMeCard(t *testing.T) {
 			want:      "/user/contacts/default/me.vcf",
 		},
 		{
+			// SabreDAV documents the href as relative to the home set
+			name:      "relative",
+			propstats: `<D:propstat><D:prop><CS:me-card><D:href>default/me.vcf</D:href></CS:me-card></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>`,
+			want:      "/user/contacts/default/me.vcf",
+		},
+		{
 			name:      "other host",
 			propstats: `<D:propstat><D:prop><CS:me-card><D:href>https://contacts.example.com/1234/card/me.vcf</D:href></CS:me-card></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>`,
 			want:      "https://contacts.example.com/1234/card/me.vcf",
