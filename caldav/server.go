@@ -1517,6 +1517,11 @@ func (b *backend) propPatchCalendar(r *http.Request, updater CalendarUpdater, up
 			calUpdate.Timezone = tz
 			calUpdate.RemoveTimezone = false
 		default:
+			if isProtectedCalendarProp(name) {
+				// RFC 4918 section 9.2.1
+				return internal.NewProtectedPropError()
+			}
+			// The server doesn't store dead properties
 			return internal.HTTPErrorf(http.StatusForbidden, "caldav: property cannot be modified")
 		}
 		return nil
@@ -1670,8 +1675,8 @@ func (b *backend) Mkcol(r *http.Request) error {
 // many which are only meaningful to them, such as the calendar-order and
 // calendar-free-busy-set properties the iOS Calendar app sets, and refusing
 // the request would leave them unable to create calendars. DAV:resourcetype
-// is checked by internal.Mkcol.CheckResourceType for an extended MKCOL
-// request, and is that of a calendar for a MKCALENDAR one.
+// must be that of a calendar, or the error is 403 Forbidden with the
+// DAV:valid-resourcetype precondition (RFC 5689 section 3.3).
 func setCalendarProp(cal *Calendar, raw *internal.RawXMLValue) error {
 	name, _ := raw.XMLName()
 	switch name {
@@ -1717,6 +1722,10 @@ func setCalendarProp(cal *Calendar, raw *internal.RawXMLValue) error {
 		}
 		cal.SupportedComponentSet = names
 	case internal.ResourceTypeName:
+		// A MKCALENDAR request creates a calendar, so it can only set
+		// that resource type, as an extended MKCOL request creating one
+		// (RFC 5689 section 4.1), which CheckResourceType checked first
+		return internal.CheckResourceTypeProp(raw, calendarName)
 	default:
 		if internal.IsProtectedProp(name, protectedCalendarProps...) {
 			return internal.NewProtectedPropError()
@@ -1740,6 +1749,19 @@ var protectedCalendarProps = []xml.Name{
 	push.TransportsName,
 	push.TopicName,
 	push.SupportedTriggersName,
+}
+
+// isProtectedCalendarProp reports whether a PROPPATCH request can't change
+// the property name of a calendar because it's protected: one of those a
+// request creating the calendar can't set either, or DAV:resourcetype and
+// CALDAV:supported-calendar-component-set, which only that request sets (RFC
+// 4918 section 15.9: "Resource type is generally decided through the
+// operation creating the resource (MKCOL vs PUT), not by PROPPATCH", RFC 4791
+// section 5.2.3: "Since this property is protected, it cannot be changed by
+// clients using a PROPPATCH request").
+func isProtectedCalendarProp(name xml.Name) bool {
+	return name == internal.ResourceTypeName || name == supportedCalendarComponentSetName ||
+		internal.IsProtectedProp(name, protectedCalendarProps...)
 }
 
 // calendarComponentTypes lists the types of the components of calendar

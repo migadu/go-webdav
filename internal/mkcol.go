@@ -125,21 +125,33 @@ func (m *Mkcol) SetProps(set func(raw *RawXMLValue) error) []PropStat {
 // element.
 func (m *Mkcol) CheckResourceType(name xml.Name) error {
 	props := Prop{Raw: m.props()}
-	raw := props.Get(ResourceTypeName)
-	if raw == nil {
+	if props.Get(ResourceTypeName) == nil {
 		return newValidResourceTypeError()
 	}
+	if propStats := m.SetProps(func(raw *RawXMLValue) error {
+		if n, _ := raw.XMLName(); n == ResourceTypeName {
+			return CheckResourceTypeProp(raw, name)
+		}
+		return nil
+	}); propStats != nil {
+		return m.PropError(propStats)
+	}
+	return nil
+}
+
+// CheckResourceTypeProp checks raw, a DAV:resourcetype property set by a
+// request creating a collection of the resource type name: it must hold
+// DAV:collection and name (RFC 5689 section 3). Otherwise the server doesn't
+// support the resource type it asks for: the error is 403 Forbidden with the
+// DAV:valid-resourcetype precondition (section 3.3). A value which doesn't
+// decode is a 409 Conflict error.
+func CheckResourceTypeProp(raw *RawXMLValue, name xml.Name) error {
 	var t ResourceType
 	if err := raw.Decode(&t); err != nil {
-		return &HTTPError{http.StatusBadRequest, err}
+		return &HTTPError{http.StatusConflict, err}
 	}
 	if !t.Is(CollectionName) || !t.Is(name) {
-		return m.PropError(m.SetProps(func(raw *RawXMLValue) error {
-			if n, _ := raw.XMLName(); n == ResourceTypeName {
-				return newValidResourceTypeError()
-			}
-			return nil
-		}))
+		return newValidResourceTypeError()
 	}
 	return nil
 }

@@ -379,8 +379,6 @@ func (b *backend) propFindFile(ctx context.Context, propfind *internal.PropFind,
 	return internal.NewPropFindResponseWithDeadProps(fi.Path, propfind, props, deadProps)
 }
 
-var cannotModifyProtectedPropertyName = xml.Name{internal.Namespace, "cannot-modify-protected-property"}
-
 // isProtectedProp reports whether a property is a live property which
 // clients cannot modify: the properties in the DAV: namespace, which WebDAV
 // specifications define, except DAV:displayname (RFC 4918 section 15.2).
@@ -429,12 +427,7 @@ func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*
 		name, _ := raw.XMLName()
 		if isProtectedProp(name) {
 			// RFC 4918 section 9.2.1
-			return &internal.HTTPError{
-				Code: http.StatusForbidden,
-				Err: &internal.Error{Raw: []internal.RawXMLValue{
-					*internal.NewRawXMLElement(cannotModifyProtectedPropertyName, nil, nil),
-				}},
-			}
+			return internal.NewProtectedPropError()
 		}
 		p := DeadPropertyPatch{Remove: remove, Property: DeadProperty{XMLName: name}}
 		if !remove {

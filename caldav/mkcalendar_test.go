@@ -81,6 +81,26 @@ func TestMkcalendar(t *testing.T) {
 
 // The component types of a calendar are those of RFC 5545 section 3.6 and RFC
 // 7953 section 3.1, or experimental ones (x-comp), whatever their case.
+// A MKCALENDAR request may set the resource type of a calendar, as an
+// extended MKCOL request does.
+func TestMkcalendarResourceType(t *testing.T) {
+	backend := &createBackend{}
+	handler := Handler{Backend: backend}
+
+	req := httptest.NewRequest("MKCALENDAR", "/user/calendars/default/", strings.NewReader(mkcalendarBody(
+		`<D:displayname>Default</D:displayname><D:resourcetype><D:collection/><C:calendar/></D:resourcetype>`)))
+	req.Header.Set("Content-Type", "application/xml")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("MKCALENDAR returned %v: %s", w.Code, w.Body.String())
+	}
+	if len(backend.created) != 1 || backend.created[0].Name != "Default" {
+		t.Errorf("created calendars %+v, want one named Default", backend.created)
+	}
+}
+
 func TestMkcalendarComponentSet(t *testing.T) {
 	backend := &createBackend{}
 	handler := Handler{Backend: backend}
@@ -203,6 +223,27 @@ func TestMkcalendarErrors(t *testing.T) {
 			body:     mkcalendarBody(`<C:supported-calendar-component-set><C:comp name="VFOO"/></C:supported-calendar-component-set>`),
 			wantCode: http.StatusMultiStatus,
 			wantBody: "multistatus /user/calendars/work/ 409 {urn:ietf:params:xml:ns:caldav}supported-calendar-component-set",
+		},
+		{
+			// A MKCALENDAR request creates a calendar: the resource type
+			// it sets must be that one, as for an extended MKCOL request
+			// (RFC 5689 sections 3.3 and 4.1)
+			name:     "resource type of an ordinary resource",
+			body:     mkcalendarBody(`<D:displayname>Work</D:displayname><D:resourcetype/>`),
+			wantCode: http.StatusMultiStatus,
+			wantBody: "multistatus /user/calendars/work/ 403 {DAV:}resourcetype error {DAV:}valid-resourcetype; 424 {DAV:}displayname",
+		},
+		{
+			name:     "address book resource type",
+			body:     mkcalendarBody(`<D:resourcetype xmlns:CR="urn:ietf:params:xml:ns:carddav"><D:collection/><CR:addressbook/></D:resourcetype>`),
+			wantCode: http.StatusMultiStatus,
+			wantBody: "multistatus /user/calendars/work/ 403 {DAV:}resourcetype error {DAV:}valid-resourcetype",
+		},
+		{
+			name:     "calendar resource type without collection",
+			body:     mkcalendarBody(`<D:resourcetype><C:calendar/></D:resourcetype>`),
+			wantCode: http.StatusMultiStatus,
+			wantBody: "multistatus /user/calendars/work/ 403 {DAV:}resourcetype error {DAV:}valid-resourcetype",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
