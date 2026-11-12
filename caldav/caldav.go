@@ -31,6 +31,10 @@ func NewCalendarHomeSet(path string) webdav.BackendSuppliedHomeSet {
 // SupportedComponentSet lists VTIMEZONE hold such objects (RFC 4791 section
 // 5.2.3): Handler checks it for PUT, and CalendarObjectCopyMover must check it
 // for COPY and MOVE.
+//
+// Component names are case-insensitive (RFC 5545 section 3.1), but they're
+// compared in upper case: the go-ical decoder and ical.NewComponent
+// upper-case them, and the go-ical encoder only checks components named so.
 func ValidateCalendarObject(cal *ical.Calendar) (eventType string, uid string, err error) {
 	// The encoder checks the components and properties required or allowed
 	// by RFC 5545. A calendar it rejects couldn't be served back to clients
