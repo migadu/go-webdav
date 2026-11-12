@@ -48,6 +48,11 @@ func TestHrefErrorResponses(t *testing.T) {
 		{"empty multi-error", multiError(nil), nil},
 		{"multi-error of nils", multiError{nil, nil}, nil},
 		{"nil HrefError", (*HrefError)(nil), nil},
+		// Not an absolute path (RFC 4918 section 8.3): about the request
+		// target, which fails the whole request
+		{"empty path", newHrefError("", &HTTPError{Code: http.StatusLocked}), nil},
+		{"relative path", newHrefError("a", &HTTPError{Code: http.StatusLocked}), nil},
+		{"joined with an empty path", errors.Join(forbidden, newHrefError("", ioErr)), nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resps, err := HrefErrorResponses(tc.err)
