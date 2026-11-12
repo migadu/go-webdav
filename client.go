@@ -372,7 +372,7 @@ func (c *Client) DeadProperties(ctx context.Context, name string, names ...xml.N
 					props = append(props, prop)
 				}
 			case code != http.StatusNotFound:
-				errs = append(errs, propStatError(raw, &propstat))
+				errs = append(errs, internal.PropStatError(raw, &propstat))
 			}
 		}
 	}
@@ -416,49 +416,7 @@ func (c *Client) PatchDeadProperties(ctx context.Context, name string, patch []D
 		}
 	}
 
-	req, err := c.ic.NewXMLRequest("PROPPATCH", name, &update)
-	if err != nil {
-		return err
-	}
-	ms, err := c.ic.DoMultiStatus(req.WithContext(ctx))
-	if err != nil {
-		return err
-	}
-
-	var errs, failedDeps []error
-	for i := range ms.Responses {
-		resp := &ms.Responses[i]
-		if err := resp.Err(); err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		for j := range resp.PropStats {
-			propstat := &resp.PropStats[j]
-			if propstat.Status.Code/100 == 2 {
-				continue
-			}
-			for k := range propstat.Prop.Raw {
-				err := propStatError(&propstat.Prop.Raw[k], propstat)
-				if propstat.Status.Code == http.StatusFailedDependency {
-					failedDeps = append(failedDeps, err)
-				} else {
-					errs = append(errs, err)
-				}
-			}
-		}
-	}
-	return errors.Join(append(errs, failedDeps...)...)
-}
-
-// propStatError returns the error of a property of a propstat element with a
-// failure status.
-func propStatError(raw *internal.RawXMLValue, propstat *internal.PropStat) error {
-	err := &internal.HTTPError{Code: propstat.Status.Code}
-	if propstat.Error != nil {
-		err.Err = propstat.Error
-	}
-	name, _ := raw.XMLName()
-	return fmt.Errorf("webdav: property <%v %v>: %w", name.Space, name.Local, err)
+	return c.ic.PropPatch(ctx, name, &update)
 }
 
 // Move moves a file.

@@ -44,7 +44,11 @@ func DiscoverContextURL(ctx context.Context, domain string) (string, error) {
 	return internal.DiscoverContextURL(ctx, "caldav", domain)
 }
 
-// Client provides access to a remote CardDAV server.
+// Client provides access to a remote CalDAV server.
+//
+// The webdav.Client it embeds performs the requests which aren't specific to
+// CalDAV, such as removing a calendar, along with the calendar objects it
+// holds, or a single calendar object with RemoveAll.
 type Client struct {
 	*webdav.Client
 
@@ -220,6 +224,154 @@ func decodeCalendar(path string, resp *internal.Response) (*Calendar, error) {
 		ReadOnly:              readOnly,
 		CTag:                  ctag.CTag,
 	}, nil
+}
+
+// CreateCalendar creates a calendar at calendar.Path with a MKCALENDAR
+// request (RFC 4791 section 5.3.1). The fields of calendar which aren't empty
+// set its properties: Name, Description, Color, Timezone, which must hold a
+// single VTIMEZONE component (RFC 4791 section 5.2.2), and
+// SupportedComponentSet, which can't be changed afterwards (RFC 4791 section
+// 5.2.3). The other fields are maintained by the server, and ignored:
+// MaxResourceSize, for instance, is protected (RFC 4791 section 5.2.5).
+//
+// The server fails the request if there already is a resource at the path,
+// generally with 405 Method Not Allowed, if the collection which would hold
+// the calendar doesn't exist, with 409 Conflict, or if calendars can't be
+// created there, with 403 Forbidden and the
+// CALDAV:calendar-collection-location-ok precondition: the error is then a
+// *webdav.HTTPError with that status. If the server refuses some of the
+// properties, the error lists each of them with its status, as for
+// UpdateCalendar.
+//
+// Servers needn't support MKCALENDAR: some only have one calendar per user,
+// created along with the account (RFC 4791 section 5.3.1). Calendars are
+// removed with RemoveAll.
+func (c *Client) CreateCalendar(ctx context.Context, calendar *Calendar) error {
+	if calendar.Path == "" {
+		return fmt.Errorf("caldav: missing calendar path")
+	}
+	prop, err := encodeCalendarProps(calendar)
+	if err != nil {
+		return err
+	}
+
+	var req *http.Request
+	if len(prop.Raw) == 0 {
+		// The CALDAV:mkcalendar element holds a DAV:set element (RFC 4791
+		// section 9.3): without properties to set, there's no request body
+		req, err = c.ic.NewRequest("MKCALENDAR", calendar.Path, nil)
+	} else {
+		req, err = c.ic.NewXMLRequest("MKCALENDAR", calendar.Path, &mkcalendarSetReq{
+			Set: internal.Set{Prop: *prop},
+		})
+	}
+	if err != nil {
+		return err
+	}
+	return c.ic.DoCreateCollection(req.WithContext(ctx))
+}
+
+// encodeCalendarProps returns the properties of cal which CreateCalendar sets,
+// those which aren't empty.
+func encodeCalendarProps(cal *Calendar) (*internal.Prop, error) {
+	var values []interface{}
+	if cal.Name != "" {
+		values = append(values, &internal.DisplayName{Name: cal.Name})
+	}
+	if cal.Description != "" {
+		values = append(values, &calendarDescription{Description: cal.Description})
+	}
+	if len(cal.SupportedComponentSet) > 0 {
+		var set supportedCalendarComponentSet
+		for _, name := range cal.SupportedComponentSet {
+			set.Comp = append(set.Comp, comp{Name: name})
+		}
+		values = append(values, &set)
+	}
+	if cal.Timezone != nil {
+		tz, err := encodeCalendarTimezone(cal.Timezone)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, tz)
+	}
+	if cal.Color != "" {
+		values = append(values, &calendarColor{Color: cal.Color})
+	}
+	return internal.EncodeProp(values...)
+}
+
+func encodeCalendarTimezone(tz *ical.Calendar) (*calendarTimezone, error) {
+	var buf bytes.Buffer
+	if err := ical.NewEncoder(&buf).Encode(tz); err != nil {
+		return nil, fmt.Errorf("caldav: failed to encode calendar timezone: %w", err)
+	}
+	return &calendarTimezone{Timezone: buf.String()}, nil
+}
+
+// UpdateCalendar changes the properties of the calendar at path with a
+// PROPPATCH request (RFC 4918 section 9.2), which the server applies in full
+// or not at all. The fields of update which are nil are left as they are; a
+// field pointing to the empty string removes the property, as RemoveTimezone
+// removes the timezone. An update without any change sends no request.
+//
+// If the server refuses the request, the returned error lists each property
+// with its status: first those which failed, then those which got 424 Failed
+// Dependency because of them, so that errors.As finds the *webdav.HTTPError
+// of a property which failed. The server can also fail the request as a
+// whole, for instance with 404 Not Found if there's no calendar at path: the
+// error is then a *webdav.HTTPError with that status.
+func (c *Client) UpdateCalendar(ctx context.Context, path string, update *CalendarUpdate) error {
+	propUpdate, err := encodeCalendarUpdate(update)
+	if err != nil || propUpdate == nil {
+		return err
+	}
+	return c.ic.PropPatch(ctx, path, propUpdate)
+}
+
+// encodeCalendarUpdate returns the PROPPATCH request body for update, or nil
+// if it changes nothing.
+func encodeCalendarUpdate(update *CalendarUpdate) (*internal.PropertyUpdate, error) {
+	if update == nil {
+		return nil, nil
+	}
+	if update.Timezone != nil && update.RemoveTimezone {
+		return nil, fmt.Errorf("caldav: calendar update both sets and removes the timezone")
+	}
+
+	var set []interface{}
+	var remove []xml.Name
+	if s := update.Name; s != nil {
+		if *s == "" {
+			remove = append(remove, internal.DisplayNameName)
+		} else {
+			set = append(set, &internal.DisplayName{Name: *s})
+		}
+	}
+	if s := update.Description; s != nil {
+		if *s == "" {
+			remove = append(remove, calendarDescriptionName)
+		} else {
+			set = append(set, &calendarDescription{Description: *s})
+		}
+	}
+	if s := update.Color; s != nil {
+		if *s == "" {
+			remove = append(remove, calendarColorName)
+		} else {
+			set = append(set, &calendarColor{Color: *s})
+		}
+	}
+	if update.Timezone != nil {
+		tz, err := encodeCalendarTimezone(update.Timezone)
+		if err != nil {
+			return nil, err
+		}
+		set = append(set, tz)
+	} else if update.RemoveTimezone {
+		remove = append(remove, calendarTimezoneName)
+	}
+	return internal.NewPropertyUpdate(set, remove)
 }
 
 // isEmpty reports whether the request asks for nothing in particular.

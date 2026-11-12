@@ -548,6 +548,27 @@ type PropertyUpdate struct {
 	Instructions []PropertyUpdateInstruction `xml:"-"`
 }
 
+// NewPropertyUpdate returns a PROPPATCH request body setting the properties
+// encoded from set, and removing those named remove. It returns nil if there
+// are none.
+func NewPropertyUpdate(set []interface{}, remove []xml.Name) (*PropertyUpdate, error) {
+	if len(set) == 0 && len(remove) == 0 {
+		return nil, nil
+	}
+	var update PropertyUpdate
+	if len(set) > 0 {
+		prop, err := EncodeProp(set...)
+		if err != nil {
+			return nil, err
+		}
+		update.Set = []Set{{Prop: *prop}}
+	}
+	if len(remove) > 0 {
+		update.Remove = []Remove{{Prop: Prop{Raw: xmlNamesToRaw(remove)}}}
+	}
+	return &update, nil
+}
+
 // PropertyUpdateInstruction is a remove or set instruction of a
 // PropertyUpdate.
 type PropertyUpdateInstruction struct {

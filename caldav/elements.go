@@ -363,6 +363,14 @@ type mkcalendarReq struct {
 	Set     mkcolSet `xml:"DAV: set"`
 }
 
+// mkcalendarSetReq is the body of a MKCALENDAR request sent by a Client
+// (RFC 4791 section 9.3). Unlike mkcalendarReq, which the server decodes, it
+// holds only the properties which are set.
+type mkcalendarSetReq struct {
+	XMLName xml.Name     `xml:"urn:ietf:params:xml:ns:caldav mkcalendar"`
+	Set     internal.Set `xml:"DAV: set"`
+}
+
 type mkcolSet struct {
 	Prop mkcolProp `xml:"DAV: prop"`
 }

@@ -31,6 +31,10 @@ func DiscoverContextURL(ctx context.Context, domain string) (string, error) {
 }
 
 // Client provides access to a remote CardDAV server.
+//
+// The webdav.Client it embeds performs the requests which aren't specific to
+// CardDAV, such as removing an address book, along with the address objects it
+// holds, or a single address object with RemoveAll.
 type Client struct {
 	*webdav.Client
 
@@ -238,6 +242,88 @@ func decodeAddressBook(path string, resp *internal.Response) (*AddressBook, erro
 		ReadOnly:             readOnly,
 		CTag:                 ctag.CTag,
 	}, nil
+}
+
+// CreateAddressBook creates an address book at addressBook.Path with an
+// extended MKCOL request (RFC 5689, RFC 6352 section 6.3.1). The fields of
+// addressBook which aren't empty set its properties: Name and Description.
+// The other fields are maintained by the server, and ignored:
+// SupportedAddressData and MaxResourceSize, for instance, are protected (RFC
+// 6352 sections 6.2.2 and 6.2.3).
+//
+// The server fails the request if there already is a resource at the path,
+// generally with 405 Method Not Allowed, if the collection which would hold
+// the address book doesn't exist, with 409 Conflict, or if address books
+// can't be created there, generally with 403 Forbidden: the error is then a
+// *webdav.HTTPError with that status. If the server refuses some of the
+// properties, the error lists each of them with its status, as for
+// UpdateAddressBook.
+//
+// Address books are removed with RemoveAll.
+func (c *Client) CreateAddressBook(ctx context.Context, addressBook *AddressBook) error {
+	if addressBook.Path == "" {
+		return fmt.Errorf("carddav: missing address book path")
+	}
+
+	values := []interface{}{internal.NewResourceType(internal.CollectionName, addressBookName)}
+	if addressBook.Name != "" {
+		values = append(values, &internal.DisplayName{Name: addressBook.Name})
+	}
+	if addressBook.Description != "" {
+		values = append(values, &addressbookDescription{Description: addressBook.Description})
+	}
+	prop, err := internal.EncodeProp(values...)
+	if err != nil {
+		return err
+	}
+
+	req, err := c.ic.NewXMLRequest("MKCOL", addressBook.Path, &mkcolSetReq{
+		Set: internal.Set{Prop: *prop},
+	})
+	if err != nil {
+		return err
+	}
+	return c.ic.DoCreateCollection(req.WithContext(ctx))
+}
+
+// UpdateAddressBook changes the properties of the address book at path with a
+// PROPPATCH request (RFC 4918 section 9.2), which the server applies in full
+// or not at all. The fields of update which are nil are left as they are; a
+// field pointing to the empty string removes the property. An update without
+// any change sends no request.
+//
+// If the server refuses the request, the returned error lists each property
+// with its status: first those which failed, then those which got 424 Failed
+// Dependency because of them, so that errors.As finds the *webdav.HTTPError
+// of a property which failed. The server can also fail the request as a
+// whole, for instance with 404 Not Found if there's no address book at path:
+// the error is then a *webdav.HTTPError with that status.
+func (c *Client) UpdateAddressBook(ctx context.Context, path string, update *AddressBookUpdate) error {
+	if update == nil {
+		return nil
+	}
+
+	var set []interface{}
+	var remove []xml.Name
+	if s := update.Name; s != nil {
+		if *s == "" {
+			remove = append(remove, internal.DisplayNameName)
+		} else {
+			set = append(set, &internal.DisplayName{Name: *s})
+		}
+	}
+	if s := update.Description; s != nil {
+		if *s == "" {
+			remove = append(remove, addressBookDescriptionName)
+		} else {
+			set = append(set, &addressbookDescription{Description: *s})
+		}
+	}
+	propUpdate, err := internal.NewPropertyUpdate(set, remove)
+	if err != nil || propUpdate == nil {
+		return err
+	}
+	return c.ic.PropPatch(ctx, path, propUpdate)
 }
 
 func encodeAddressPropReq(req *AddressDataRequest) (*internal.Prop, error) {
