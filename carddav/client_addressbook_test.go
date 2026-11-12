@@ -226,6 +226,8 @@ func TestClientAddressBookErrors(t *testing.T) {
 	err = c.CreateAddressBook(ctx, &AddressBook{Path: "/user/contacts/", Name: "Home"})
 	if !errors.As(err, &httpErr) || httpErr.Code != http.StatusForbidden {
 		t.Errorf("CreateAddressBook() on the home set = %v, want a 403 HTTPError", err)
+	} else if !strings.Contains(err.Error(), string(PreconditionAddressBookCollectionLocationOk)) {
+		t.Errorf("CreateAddressBook() on the home set = %v, want the %v precondition", err, PreconditionAddressBookCollectionLocationOk)
 	}
 
 	if err := c.CreateAddressBook(ctx, &AddressBook{}); err == nil {

@@ -366,11 +366,6 @@ func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	return d.DecodeElement(v, &start)
 }
 
-type mkcolReq struct {
-	XMLName xml.Name `xml:"DAV: mkcol"`
-	Set     mkcolSet `xml:"DAV: set"`
-}
-
 // https://tools.ietf.org/html/rfc4791#section-9.3
 type mkcalendarReq struct {
 	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav mkcalendar"`
@@ -389,8 +384,10 @@ type mkcolSet struct {
 	Prop mkcolProp `xml:"DAV: prop"`
 }
 
+// mkcolProp holds the properties of an extended MKCOL or a MKCALENDAR request
+// which the server reads. Extended MKCOL requests also set DAV:resourcetype,
+// which internal.Mkcol.CheckResourceType checks.
 type mkcolProp struct {
-	ResourceType                  internal.ResourceType         `xml:"DAV: resourcetype"`
 	DisplayName                   string                        `xml:"DAV: displayname"`
 	CalendarDescription           string                        `xml:"urn:ietf:params:xml:ns:caldav calendar-description"`
 	CalendarTimezone              string                        `xml:"urn:ietf:params:xml:ns:caldav calendar-timezone"`

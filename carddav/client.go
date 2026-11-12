@@ -289,8 +289,8 @@ func (c *Client) CreateAddressBook(ctx context.Context, addressBook *AddressBook
 		return err
 	}
 
-	req, err := c.ic.NewXMLRequest("MKCOL", addressBook.Path, &mkcolSetReq{
-		Set: internal.Set{Prop: *prop},
+	req, err := c.ic.NewXMLRequest("MKCOL", addressBook.Path, &internal.Mkcol{
+		Set: []internal.Set{{Prop: *prop}},
 	})
 	if err != nil {
 		return err

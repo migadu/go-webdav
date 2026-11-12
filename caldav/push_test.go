@@ -688,7 +688,7 @@ func TestPushNotImplemented(t *testing.T) {
 	}
 
 	dav, allow := options(t, b, pushCalendarPath)
-	if want := []string{"1", "3", "calendar-access"}; !reflect.DeepEqual(dav, want) {
+	if want := []string{"1", "3", "calendar-access", "extended-mkcol"}; !reflect.DeepEqual(dav, want) {
 		t.Errorf("DAV = %v, want %v", dav, want)
 	}
 	var methods []string
@@ -712,5 +712,33 @@ func TestPushNotImplemented(t *testing.T) {
 	}
 	if len(deleted) != 0 {
 		t.Errorf("deleted %v, want none", deleted)
+	}
+}
+
+// RFC 5689 section 3.1: a server supporting extended MKCOL "MUST include
+// "extended-mkcol" as a field in the DAV response header from an OPTIONS
+// request on any URI that supports use of the extended MKCOL method", which
+// are the collections, not the calendar objects.
+func TestOptionsExtendedMkcol(t *testing.T) {
+	const eventPath = pushCalendarPath + "event.ics"
+	b := testBackend{
+		calendars: []Calendar{{Path: pushCalendarPath}},
+		objectMap: map[string][]CalendarObject{pushCalendarPath: {{Path: eventPath}}},
+	}
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{pushCalendarPath, true},
+		{eventPath, false},
+	} {
+		dav, allow := options(t, b, tc.path)
+		got := false
+		for _, v := range dav {
+			got = got || v == "extended-mkcol"
+		}
+		if got != tc.want || got != allow["MKCOL"] {
+			t.Errorf("OPTIONS %v: DAV = %v, Allow MKCOL = %v; want extended-mkcol listed: %v", tc.path, dav, allow["MKCOL"], tc.want)
+		}
 	}
 }
