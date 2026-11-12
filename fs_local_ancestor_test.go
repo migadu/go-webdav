@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 // Copy and Move refuse to overwrite a collection containing the source: the

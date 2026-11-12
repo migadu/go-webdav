@@ -10,7 +10,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 // listTestDir returns the names of the entries of dir.

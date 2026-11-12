@@ -1,12 +1,12 @@
 ---
-name: Bug report or feature request
-about: Report a bug or request a new feature
+name: Bug report, feature request, or question
+about: Report a bug, request a feature, or ask about the Migadu fork
 ---
 
 <!--
 
-Please read the following before submitting a new issue:
-
-Do NOT create GitHub issues if you have a question about go-webdav or about WebDAV in general. Ask questions on IRC in #emersion on Libera Chat.
+This tracker is for the independently maintained Migadu fork of go-webdav.
+For bugs, include the library and Go versions, a minimal example, and the
+expected and actual behavior. Remove credentials and private data from logs.
 
 -->

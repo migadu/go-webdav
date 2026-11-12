@@ -7,8 +7,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/emersion/go-webdav/internal"
-	"github.com/emersion/go-webdav/internal/push"
+	"github.com/migadu/go-webdav/internal"
+	"github.com/migadu/go-webdav/internal/push"
 )
 
 // CapabilityPush is the DAV capability of the resources which support

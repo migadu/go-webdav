@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/emersion/go-webdav"
-	"github.com/emersion/go-webdav/internal"
+	"github.com/migadu/go-webdav"
+	"github.com/migadu/go-webdav/internal"
 )
 
 // The size of the listings of the tests below: large enough for the

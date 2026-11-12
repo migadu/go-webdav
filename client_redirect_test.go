@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 // apacheServer answers as Apache does with mod_dav, e.g. for a Hetzner

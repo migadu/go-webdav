@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/emersion/go-webdav/internal"
+	"github.com/migadu/go-webdav/internal"
 )
 
 const (

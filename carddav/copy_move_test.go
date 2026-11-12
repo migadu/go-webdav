@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/emersion/go-vcard"
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 // objectBackend holds address objects at the paths in objects.

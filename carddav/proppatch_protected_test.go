@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/emersion/go-webdav/internal"
+	"github.com/migadu/go-webdav/internal"
 )
 
 // RFC 4918 section 9.2.1: "403 (Forbidden): The client has attempted to set

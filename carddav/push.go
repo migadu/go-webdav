@@ -5,9 +5,9 @@ import (
 	"encoding/xml"
 	"net/http"
 
-	"github.com/emersion/go-webdav"
-	"github.com/emersion/go-webdav/internal"
-	"github.com/emersion/go-webdav/internal/push"
+	"github.com/migadu/go-webdav"
+	"github.com/migadu/go-webdav/internal"
+	"github.com/migadu/go-webdav/internal/push"
 )
 
 // PushBackend is an optional interface a Backend can implement to support

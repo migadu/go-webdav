@@ -13,7 +13,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 // fakeHost answers the requests for a host name with canned responses, by

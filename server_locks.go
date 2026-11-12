@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/emersion/go-webdav/internal"
+	"github.com/migadu/go-webdav/internal"
 )
 
 // lockingBackend is the backend of a Handler with a LockSystem: it supports

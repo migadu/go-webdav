@@ -14,7 +14,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 // deadPropFileSystem is an in-memory FileSystem which stores dead properties.

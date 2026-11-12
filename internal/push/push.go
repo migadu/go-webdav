@@ -16,7 +16,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/emersion/go-webdav/internal"
+	"github.com/migadu/go-webdav/internal"
 )
 
 // Namespace is the XML namespace of WebDAV-Push.

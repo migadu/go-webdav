@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/emersion/go-webdav"
-	"github.com/emersion/go-webdav/internal"
+	"github.com/migadu/go-webdav"
+	"github.com/migadu/go-webdav/internal"
 )
 
 // testFileSystem is a FileSystem whose directory listing and write

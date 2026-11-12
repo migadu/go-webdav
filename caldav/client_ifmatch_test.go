@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/emersion/go-ical"
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 // minimalCalendar builds a single-VEVENT VCALENDAR valid enough to encode.

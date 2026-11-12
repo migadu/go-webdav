@@ -8,7 +8,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/emersion/go-webdav"
+	"github.com/migadu/go-webdav"
 )
 
 // checkNotSameFile checks that a and b, two existing files, are distinct
