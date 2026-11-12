@@ -94,8 +94,13 @@ func (c *Client) FindCurrentUserPrincipal(ctx context.Context) (string, error) {
 	if prop.Unauthenticated != nil {
 		return "", fmt.Errorf("webdav: unauthenticated")
 	}
+	if prop.Href == nil {
+		// RFC 5397 section 3 requires one of them. Taken as an empty href,
+		// the missing one would refer to the request URL.
+		return "", fmt.Errorf("webdav: malformed current-user-principal property: neither an href nor DAV:unauthenticated")
+	}
 
-	return resp.HrefPath(&prop.Href), nil
+	return resp.HrefPath(prop.Href), nil
 }
 
 var fileInfoPropFind = internal.NewPropNamePropFind(

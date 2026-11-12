@@ -23,10 +23,13 @@ var (
 	addressDataName = xml.Name{namespace, "address-data"}
 )
 
-// https://tools.ietf.org/html/rfc6352#section-6.2.3
+// https://tools.ietf.org/html/rfc6352#section-7.1.1
+//
+// The property may hold no href: Href is then nil, unlike for an empty href,
+// which refers to the request URL (RFC 3986 section 4.4).
 type addressbookHomeSet struct {
-	XMLName xml.Name      `xml:"urn:ietf:params:xml:ns:carddav addressbook-home-set"`
-	Href    internal.Href `xml:"DAV: href"`
+	XMLName xml.Name       `xml:"urn:ietf:params:xml:ns:carddav addressbook-home-set"`
+	Href    *internal.Href `xml:"DAV: href"`
 }
 
 func (a *addressbookHomeSet) GetXMLName() xml.Name {
@@ -38,10 +41,10 @@ var meCardName = xml.Name{Space: internal.CalendarServerNamespace, Local: "me-ca
 // meCard is the CalendarServer me-card property of an address book home set,
 // an extension of Apple's address book clients: the href of the address
 // object of the user's own contact. See https://sabre.io/dav/carddav-me-card/
-// and MeCardBackend.
+// and MeCardBackend. Href is nil if the property holds no href.
 type meCard struct {
-	XMLName xml.Name      `xml:"http://calendarserver.org/ns/ me-card"`
-	Href    internal.Href `xml:"DAV: href"`
+	XMLName xml.Name       `xml:"http://calendarserver.org/ns/ me-card"`
+	Href    *internal.Href `xml:"DAV: href"`
 }
 
 type addressbookDescription struct {

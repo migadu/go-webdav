@@ -699,7 +699,7 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 			if err != nil {
 				return nil, err
 			}
-			return &addressbookHomeSet{Href: internal.Href{Path: homeSetPath}}, nil
+			return &addressbookHomeSet{Href: &internal.Href{Path: homeSetPath}}, nil
 		},
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, internal.PrincipalName)),
 	}
@@ -762,7 +762,7 @@ func (b *backend) addMeCardProp(ctx context.Context, propfind *internal.PropFind
 			return nil, err
 		}
 	} else if p != "" {
-		props[meCardName] = internal.PropFindValue(&meCard{Href: internal.Href{Path: p}})
+		props[meCardName] = internal.PropFindValue(&meCard{Href: &internal.Href{Path: p}})
 	}
 }
 
