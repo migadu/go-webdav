@@ -54,3 +54,27 @@ func TestContainsPathEmpty(t *testing.T) {
 		t.Errorf(`onlyHrefs() = true for a response on "", want false`)
 	}
 }
+
+func TestIsInScope(t *testing.T) {
+	for _, tc := range []struct {
+		scope, p string
+		want     bool
+	}{
+		{"/cal/", "/cal/a.ics", true},
+		{"/cal", "/cal/a.ics", true},
+		{"/cal/", "/cal/sub/a.ics", true},
+		{"/cal/", "/cal/", true},
+		{"/cal/", "/cal", true},
+		{"/cal/a.ics", "/cal/a.ics", true},
+		{"/", "/cal/a.ics", true},
+		{"/cal/", "/calendar/a.ics", false},
+		{"/cal/", "/other/a.ics", false},
+		{"/cal/", "/cal/../other/a.ics", false},
+		{"/cal/a.ics", "/cal/b.ics", false},
+		{"/cal/", "", false},
+	} {
+		if got := IsInScope(tc.scope, tc.p); got != tc.want {
+			t.Errorf("IsInScope(%q, %q) = %v, want %v", tc.scope, tc.p, got, tc.want)
+		}
+	}
+}

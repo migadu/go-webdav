@@ -1,6 +1,9 @@
 package internal
 
-import "strings"
+import (
+	"path"
+	"strings"
+)
 
 // SamePath reports whether a and b, two absolute paths or URLs, refer to the
 // same resource.
@@ -25,4 +28,14 @@ func SamePath(a, b string) bool {
 		return a == b
 	}
 	return a == b || strings.TrimSuffix(a, "/") == strings.TrimSuffix(b, "/")
+}
+
+// IsInScope reports whether p is the resource at scope or one of its members,
+// at any depth: the scope of a REPORT whose hrefs must name members of the
+// resource at the Request-URI, such as calendar-multiget (RFC 4791 section
+// 7.9) and addressbook-multiget (RFC 6352 section 8.7). Both are absolute
+// paths, and dot-segments are resolved first.
+func IsInScope(scope, p string) bool {
+	scope, p = path.Clean(scope), path.Clean(p)
+	return p == scope || strings.HasPrefix(p, strings.TrimSuffix(scope, "/")+"/")
 }
