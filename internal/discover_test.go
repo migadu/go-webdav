@@ -61,6 +61,16 @@ func TestDiscoverContextURL(t *testing.T) {
 		// Keys can't hold "=", so this is the key "xpath", not "x" and "path"
 		{"TXT key ending in path", fakeResolver{srv: srv, txt: []string{"xpath=/other/"}}, "https://dav.example.com/.well-known/caldav", nil},
 		{"TXT path with an equals sign", fakeResolver{srv: srv, txt: []string{"path=/dav/a=b/"}}, "https://dav.example.com/dav/a=b/", nil},
+		// The path is used as is in HTTP requests (RFC 6764 section 4), so
+		// it's percent-encoded: "%7E" is "~", not "%" followed by "7E"
+		{"TXT path percent-encoded", fakeResolver{srv: srv, txt: []string{"path=/dav/%7Euser/"}}, "https://dav.example.com/dav/%7Euser/", nil},
+		{"TXT path with an encoded space", fakeResolver{srv: srv, txt: []string{"path=/dav/my%20calendars/"}}, "https://dav.example.com/dav/my%20calendars/", nil},
+		{"TXT path with an encoded slash", fakeResolver{srv: srv, txt: []string{"path=/dav/a%2Fb/"}}, "https://dav.example.com/dav/a%2Fb/", nil},
+		{"TXT relative path percent-encoded", fakeResolver{srv: srv, txt: []string{"path=%7Euser/"}}, "https://dav.example.com/%7Euser/", nil},
+		// Characters which can't be in a request path are still escaped
+		{"TXT path with a space", fakeResolver{srv: srv, txt: []string{"path=/dav/my calendars/"}}, "https://dav.example.com/dav/my%20calendars/", nil},
+		{"TXT path with non-ASCII characters", fakeResolver{srv: srv, txt: []string{"path=/dav/café/"}}, "https://dav.example.com/dav/caf%C3%A9/", nil},
+		{"TXT path with a space and an encoded character", fakeResolver{srv: srv, txt: []string{"path=/dav/my %7Euser/"}}, "https://dav.example.com/dav/my%20~user/", nil},
 		{"no TXT record", fakeResolver{srv: srv, txtErr: notFound}, "https://dav.example.com/.well-known/caldav", nil},
 		{"TXT refused", fakeResolver{srv: srv, txtErr: refused}, "", refused},
 		{"TXT temporary failure", fakeResolver{srv: srv, txtErr: temporary}, "", temporary},
@@ -94,6 +104,10 @@ func TestDiscoverContextURLInvalidTXT(t *testing.T) {
 		{"multiple path entries", []string{"path=/a/", "path=/b/"}},
 		{"empty path, strings joined", []string{"txtvers=1path="}},
 		{"multiple path entries, strings joined", []string{"path=/a/path=/b/"}},
+		// Not a valid percent-encoded path (RFC 3986 section 2.1)
+		{"bare percent sign", []string{"path=/dav/100%/"}},
+		{"invalid percent-encoding", []string{"path=/dav/%zzuser/"}},
+		{"truncated percent-encoding", []string{"path=/dav/%7"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			defer func(r dnsResolver) { resolver = r }(resolver)
