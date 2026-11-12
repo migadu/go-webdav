@@ -2,6 +2,7 @@ package caldav
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -9,14 +10,27 @@ import (
 	"github.com/emersion/go-webdav/internal"
 )
 
-// Filter returns the filtered list of calendar objects matching the provided query.
-// A nil query will return the full list of calendar objects.
+// Filter returns the filtered list of calendar objects matching the provided
+// query, with only the parts of their data query.CompRequest asks for (see
+// CalendarCompRequest). The objects of cos are left as they are. These parts
+// may not make a valid iCalendar object, which ical.Encoder refuses to
+// encode. A nil query will return the full list of calendar objects.
+//
+// If query.CompRequest also asks for Expand, LimitRecurrenceSet or
+// LimitFreeBusySet, the objects are returned whole: the backend applies these
+// to the objects Filter returns, which needs parts the client may not ask
+// for, such as the RRULE of recurring components. The Handler writes only the
+// requested parts of the objects the backend returns in any case.
 func Filter(query *CalendarQuery, cos []CalendarObject) ([]CalendarObject, error) {
 	if query == nil {
 		// FIXME: should we always return a copy of the provided slice?
 		return cos, nil
 	}
 
+	dataReq := &query.CompRequest
+	if dataReq.Expand != nil || dataReq.LimitRecurrenceSet != nil || dataReq.LimitFreeBusySet != nil {
+		dataReq = nil
+	}
 	var out []CalendarObject
 	for _, co := range cos {
 		ok, err := Match(query.CompFilter, &co)
@@ -27,10 +41,78 @@ func Filter(query *CalendarQuery, cos []CalendarObject) ([]CalendarObject, error
 			continue
 		}
 
-		// TODO properties are not currently filtered even if requested
+		co.Data = filterCalendar(dataReq, co.Data)
 		out = append(out, co)
 	}
 	return out, nil
+}
+
+// filterCalendar returns the parts of cal req asks for (RFC 4791 section 9.6,
+// see CalendarCompRequest): cal itself if req is nil or asks for all of it.
+// Otherwise the result is a new calendar, which shares with cal the
+// components it holds whole, and cal is left as it is.
+func filterCalendar(req *CalendarCompRequest, cal *ical.Calendar) *ical.Calendar {
+	if req == nil || cal == nil || cal.Component == nil {
+		return cal
+	}
+	// The outermost request is for the calendar object, whatever its name
+	comp := filterComponent(req, cal.Component)
+	if comp == cal.Component {
+		return cal
+	}
+	return &ical.Calendar{Component: comp}
+}
+
+// filterComponent returns the parts of comp req asks for: comp itself if
+// that's all of it, otherwise a new component. The caller checks that req is
+// for comp.
+func filterComponent(req *CalendarCompRequest, comp *ical.Component) *ical.Component {
+	// An empty comp element asks for the whole component, as for VTIMEZONE
+	// in the example of RFC 4791 section 7.8.1
+	noProps := !req.AllProps && len(req.Props) == 0
+	noComps := !req.AllComps && len(req.Comps) == 0
+	if (noProps && noComps) || (req.AllProps && req.AllComps) {
+		return comp
+	}
+
+	out := &ical.Component{Name: comp.Name, Props: make(ical.Props)}
+	for name, props := range comp.Props {
+		if !req.AllProps && !containsFold(req.Props, name) {
+			continue
+		}
+		// Copy the slice, so that changing the result, starting with the
+		// values of novalue properties, can't change comp
+		props = slices.Clone(props)
+		if !req.AllProps && containsFold(req.NoValue, name) {
+			for i := range props {
+				// The encoder writes the parameters followed by just
+				// a ":" (RFC 4791 section 9.6.4)
+				props[i].Value = ""
+			}
+		}
+		out.Props[name] = props
+	}
+
+	if req.AllComps {
+		out.Children = slices.Clone(comp.Children)
+	} else {
+		for _, child := range comp.Children {
+			i := slices.IndexFunc(req.Comps, func(c CalendarCompRequest) bool {
+				return strings.EqualFold(c.Name, child.Name)
+			})
+			if i >= 0 {
+				out.Children = append(out.Children, filterComponent(&req.Comps[i], child))
+			}
+		}
+	}
+	return out
+}
+
+// containsFold reports whether list holds s, ignoring case.
+func containsFold(list []string, s string) bool {
+	return slices.ContainsFunc(list, func(v string) bool {
+		return strings.EqualFold(v, s)
+	})
 }
 
 // Match reports whether the provided CalendarObject matches the query.

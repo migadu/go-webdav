@@ -420,7 +420,10 @@ func encodeCalendarCompReq(c *CalendarCompRequest) (*comp, error) {
 		encoded.Allprop = &struct{}{}
 	}
 	for _, name := range c.Props {
-		encoded.Prop = append(encoded.Prop, prop{Name: name})
+		encoded.Prop = append(encoded.Prop, prop{
+			Name:    name,
+			NoValue: noValue(containsFold(c.NoValue, name)),
+		})
 	}
 
 	if c.AllComps {
