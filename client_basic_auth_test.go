@@ -12,11 +12,12 @@ import (
 	"testing"
 
 	"github.com/emersion/go-webdav"
+	"github.com/emersion/go-webdav/internal"
 )
 
 // originServer answers the requests for any host name from routes, keyed by
-// "scheme://host METHOD URI", and records each request it gets as such a key
-// followed by the user of its basic credentials, or "-" without any.
+// "scheme://host[:port] METHOD URI", and records each request it gets as such
+// a key followed by the user of its basic credentials, or "-" without any.
 type originServer struct {
 	routes map[string]http.HandlerFunc
 
@@ -29,8 +30,7 @@ func (s *originServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	host, _, _ := strings.Cut(r.Host, ":")
-	key := scheme + "://" + host + " " + r.Method + " " + r.URL.RequestURI()
+	key := scheme + "://" + r.Host + " " + r.Method + " " + r.URL.RequestURI()
 	user, _, ok := r.BasicAuth()
 	if !ok {
 		user = "-"
@@ -56,7 +56,8 @@ func (s *originServer) requests() []string {
 }
 
 // newOriginServer starts s, and returns an HTTP client reaching it by any host
-// name: with https on port 443, and with plain HTTP on any other port.
+// name: with https on ports 443 and 8443, and with plain HTTP on any other
+// port. It follows redirects as the default client does.
 func newOriginServer(t *testing.T, s *originServer) *http.Client {
 	ts := httptest.NewServer(s)
 	t.Cleanup(ts.Close)
@@ -67,7 +68,7 @@ func newOriginServer(t *testing.T, s *originServer) *http.Client {
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			target := ts.Listener.Addr().String()
-			if _, port, _ := net.SplitHostPort(addr); port == "443" {
+			if _, port, _ := net.SplitHostPort(addr); port == "443" || port == "8443" {
 				target = tlsServer.Listener.Addr().String()
 			}
 			return dialer.DialContext(ctx, network, target)
@@ -75,14 +76,16 @@ func newOriginServer(t *testing.T, s *originServer) *http.Client {
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
 	t.Cleanup(transport.CloseIdleConnections)
-	return &http.Client{Transport: transport}
+	return &http.Client{Transport: transport, CheckRedirect: internal.DefaultHTTPClient().CheckRedirect}
 }
 
 // TestHTTPClientWithBasicAuthOrigin checks that the credentials of
 // HTTPClientWithBasicAuth only go to the endpoint's origin (RFC 7617 section
 // 2.2): not to the other hosts a server lists resources on, not over plain
-// HTTP with an https endpoint, and not to the request sent again to follow a
-// redirect to another domain, which the client strips them from.
+// HTTP with an https endpoint, and not to the target of a redirect to another
+// origin, be it another domain, a subdomain or another port of the host,
+// whether the client sends the request again or http.Client follows the
+// redirect itself.
 func TestHTTPClientWithBasicAuthOrigin(t *testing.T) {
 	text := func(s string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -123,9 +126,12 @@ func TestHTTPClientWithBasicAuthOrigin(t *testing.T) {
 		"https://dav.test MKCOL /dav/308/":   redirect(http.StatusPermanentRedirect, "https://other.test/new/"),
 		"https://dav.test MKCOL /dav/same/":  redirect(http.StatusFound, "/dav/new/"),
 		"https://dav.test MKCOL /dav/sub/":   redirect(http.StatusFound, "https://files.dav.test/new/"),
+		"https://dav.test MKCOL /dav/port/":  redirect(http.StatusFound, "https://dav.test:8443/new/"),
+		"https://dav.test MKCOL /dav/port7/": redirect(http.StatusTemporaryRedirect, "https://dav.test:8443/new/"),
 		"https://dav.test MKCOL /dav/new/":   created,
 		"https://other.test MKCOL /new/":     created,
 		"https://files.dav.test MKCOL /new/": created,
+		"https://dav.test:8443 MKCOL /new/":  created,
 	}}
 	hc := webdav.HTTPClientWithBasicAuth(newOriginServer(t, s), "user", "secret")
 	ctx := context.Background()
@@ -215,12 +221,21 @@ func TestHTTPClientWithBasicAuthOrigin(t *testing.T) {
 		do:   func() error { return c.Mkdir(ctx, "same/") },
 		want: []string{"https://dav.test MKCOL /dav/same/ user", "https://dav.test GET /dav/new/ user", "https://dav.test MKCOL /dav/new/ user"},
 	}, {
-		// As http.Client does for a 307 redirect
+		// http.Client keeps the Authorization header field of the request
+		// for a subdomain, or for another port or scheme of the host
 		name: "302 to a subdomain",
 		do:   func() error { return c.Mkdir(ctx, "sub/") },
-		want: []string{"https://dav.test MKCOL /dav/sub/ user", "https://files.dav.test GET /new/ user", "https://files.dav.test MKCOL /new/ user"},
+		want: []string{"https://dav.test MKCOL /dav/sub/ user", "https://files.dav.test GET /new/ -", "https://files.dav.test MKCOL /new/ -"},
 	}, {
-		// A request the caller sends itself is up to it
+		name: "302 to another port",
+		do:   func() error { return c.Mkdir(ctx, "port/") },
+		want: []string{"https://dav.test MKCOL /dav/port/ user", "https://dav.test:8443 GET /new/ -", "https://dav.test:8443 MKCOL /new/ -"},
+	}, {
+		name: "307 to another port",
+		do:   func() error { return c.Mkdir(ctx, "port7/") },
+		want: []string{"https://dav.test MKCOL /dav/port7/ user", "https://dav.test:8443 MKCOL /new/ -"},
+	}, {
+		// A request the caller sends itself is up to it, and isn't modified
 		name: "request sent directly",
 		do: func() error {
 			req, err := http.NewRequest(http.MethodGet, "https://other.test/direct", nil)
@@ -230,6 +245,9 @@ func TestHTTPClientWithBasicAuthOrigin(t *testing.T) {
 			resp, err := hc.Do(req)
 			if err != nil {
 				return err
+			}
+			if auth := req.Header.Get("Authorization"); auth != "" {
+				t.Errorf("Do() set Authorization %q on the request it was given", auth)
 			}
 			return resp.Body.Close()
 		},

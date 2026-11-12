@@ -24,6 +24,9 @@ type basicAuthHTTPClient struct {
 
 func (c *basicAuthHTTPClient) Do(req *http.Request) (*http.Response, error) {
 	if internal.CredentialsAllowed(req) {
+		// Added to a copy: the request of the caller is left as is, and the
+		// one a Client sends again to follow a redirect doesn't carry them
+		req = req.Clone(req.Context())
 		req.SetBasicAuth(c.username, c.password)
 	}
 	return c.c.Do(req)
@@ -32,18 +35,20 @@ func (c *basicAuthHTTPClient) Do(req *http.Request) (*http.Response, error) {
 // HTTPClientWithBasicAuth returns an HTTP client that adds basic
 // authentication to the requests a Client sends for the origin of its
 // endpoint, i.e. its scheme, host and port, and to the requests it's given
-// directly.
+// directly. It adds it to a copy of the request, which it doesn't modify.
 //
 // The credentials are for the endpoint (RFC 7617 section 2.2): a Client doesn't
 // send them to the other hosts a server lists resources on, such as the
 // iCloud host of a home set, nor to an http URL with an https endpoint. To
 // send them to another host, create a Client with an endpoint on it, e.g. the
-// URL of the home set. The request a Client sends again to follow a 301 or 302
-// redirect keeps them as http.Client keeps them for a 307 one: if the target
-// is on the same domain as the request, or on one of its subdomains.
+// URL of the home set. Neither does a Client send them to the target of a
+// redirect to another origin.
 //
 // If c is nil, a copy of http.DefaultClient is used, which doesn't follow a
-// redirect from an https URL to an http one (see NewClient).
+// redirect from an https URL to an http one, and doesn't keep the credentials
+// for another origin when it follows a redirect itself, as for a 307 one (see
+// NewClient). A given *http.Client keeps them for the same domain and its
+// subdomains, whatever the scheme and port.
 func HTTPClientWithBasicAuth(c HTTPClient, username, password string) HTTPClient {
 	if c == nil {
 		c = internal.DefaultHTTPClient()
@@ -63,8 +68,10 @@ type Client struct {
 // would send the request there with the Authorization and Cookie header
 // fields of the first one if it's on the same domain, in cleartext. The error
 // returned for such a redirect wraps an *HTTPError with its status. Other
-// redirects are followed, 10 at most. A given *http.Client follows its own
-// CheckRedirect.
+// redirects are followed, 10 at most, without the Authorization header field
+// once one leaves the origin of the request, its scheme, host and port, which
+// http.Client would keep for the same domain. A given *http.Client follows its
+// own CheckRedirect.
 //
 // To use HTTP basic authentication, HTTPClientWithBasicAuth can be used.
 //
