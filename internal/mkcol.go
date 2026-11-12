@@ -112,39 +112,31 @@ func (m *Mkcol) SetProps(set func(raw *RawXMLValue) error) []PropStat {
 	return append(propStats, m.failedDependencies(failed)...)
 }
 
-// CheckResourceType checks that m creates a collection of the resource type
-// name: its DAV:resourcetype property must hold DAV:collection and name (RFC
-// 5689 section 3).
-//
-// Otherwise the server doesn't support the resource type m asks for, and the
-// error is 403 Forbidden with the DAV:valid-resourcetype precondition
-// (section 3.3). Since the property can't be set, it's reported in a
-// DAV:mkcol-response element, as in the example of section 3.5. If m doesn't
-// set DAV:resourcetype, as a MKCOL request without a body, it asks for an
-// ordinary collection: the precondition is then reported in a DAV:error
-// element.
-func (m *Mkcol) CheckResourceType(name xml.Name) error {
+// CheckResourceType checks that m, an extended MKCOL request, sets
+// DAV:resourcetype. Otherwise it asks for an ordinary collection (RFC 4918
+// section 9.3, RFC 5689 section 3), which the servers of calendars and
+// address books don't create: the error is 403 Forbidden with the
+// DAV:valid-resourcetype precondition (RFC 5689 section 3.3), in a DAV:error
+// element since there's no property to report it on. The value of the
+// property is checked along with the other properties, with
+// CheckResourceTypeProp, so that each property which can't be set is
+// reported with its own status.
+func (m *Mkcol) CheckResourceType() error {
 	props := Prop{Raw: m.props()}
 	if props.Get(ResourceTypeName) == nil {
 		return newValidResourceTypeError()
-	}
-	if propStats := m.SetProps(func(raw *RawXMLValue) error {
-		if n, _ := raw.XMLName(); n == ResourceTypeName {
-			return CheckResourceTypeProp(raw, name)
-		}
-		return nil
-	}); propStats != nil {
-		return m.PropError(propStats)
 	}
 	return nil
 }
 
 // CheckResourceTypeProp checks raw, a DAV:resourcetype property set by a
 // request creating a collection of the resource type name: it must hold
-// DAV:collection and name (RFC 5689 section 3). Otherwise the server doesn't
-// support the resource type it asks for: the error is 403 Forbidden with the
-// DAV:valid-resourcetype precondition (section 3.3). A value which doesn't
-// decode is a 409 Conflict error.
+// DAV:collection and name, and nothing else (RFC 5689 section 3). Otherwise
+// the server doesn't support the resource type it asks for, a collection
+// which isn't of that type or is of another one too, as the
+// "special-resource" of the example of section 3.5: the error is 403
+// Forbidden with the DAV:valid-resourcetype precondition (section 3.3). A
+// value which doesn't decode is a 409 Conflict error.
 func CheckResourceTypeProp(raw *RawXMLValue, name xml.Name) error {
 	var t ResourceType
 	if err := raw.Decode(&t); err != nil {
@@ -152,6 +144,11 @@ func CheckResourceTypeProp(raw *RawXMLValue, name xml.Name) error {
 	}
 	if !t.Is(CollectionName) || !t.Is(name) {
 		return newValidResourceTypeError()
+	}
+	for _, raw := range t.Raw {
+		if n, ok := raw.XMLName(); ok && n != CollectionName && n != name {
+			return newValidResourceTypeError()
+		}
 	}
 	return nil
 }
@@ -257,4 +254,14 @@ var protectedProps = []xml.Name{
 // set, as listed by protectedProps or in others.
 func IsProtectedProp(name xml.Name, others ...xml.Name) bool {
 	return slices.Contains(protectedProps, name) || slices.Contains(others, name)
+}
+
+// IsProtectedObjectProp reports whether name is a protected property of the
+// calendar and address objects served by the caldav and carddav packages:
+// one of protectedProps, DAV:resourcetype (RFC 4918 section 15.9) or
+// DAV:getcontenttype, which the server sets to the media type of the objects
+// (section 15.5: "Potentially protected if the server prefers to assign
+// content types on its own").
+func IsProtectedObjectProp(name xml.Name) bool {
+	return IsProtectedProp(name, ResourceTypeName, GetContentTypeName)
 }

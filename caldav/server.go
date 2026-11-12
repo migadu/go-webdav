@@ -1474,6 +1474,7 @@ func (b *backend) propFindAllCalendarObjects(ctx context.Context, mw *internal.M
 
 func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*internal.Response, error) {
 	// Make sure the resource exists before reporting on its properties
+	var isProtected func(name xml.Name) bool
 	switch b.resourceTypeAtPath(r.Context(), r.URL.Path) {
 	case resourceTypeCalendar:
 		if _, err := b.Backend.GetCalendar(r.Context(), r.URL.Path); err != nil {
@@ -1482,19 +1483,22 @@ func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*
 		if updater, ok := b.Backend.(CalendarUpdater); ok {
 			return b.propPatchCalendar(r, updater, update)
 		}
+		isProtected = isProtectedCalendarProp
 	case resourceTypeCalendarObject:
 		var dataReq CalendarCompRequest
 		if _, err := b.Backend.GetCalendarObject(r.Context(), r.URL.Path, &dataReq); err != nil {
 			return nil, err
 		}
+		isProtected = internal.IsProtectedObjectProp
 	}
 
 	// Properties cannot be written yet, and those of the scheduling Inbox
 	// won't be. Refusing them one by one in a multistatus, rather than
 	// failing the whole request, keeps clients which PROPPATCH display
 	// metadata while adopting a calendar (macOS Calendar sets displayname,
-	// calendar-color and calendar-order) from dropping it.
-	return internal.NewPropPatchResponse(r.URL.Path, update, http.StatusForbidden)
+	// calendar-color and calendar-order) from dropping it. The protected
+	// ones are reported as such all the same.
+	return internal.NewPropPatchResponse(r.URL.Path, update, isProtected)
 }
 
 func (b *backend) propPatchCalendar(r *http.Request, updater CalendarUpdater, update *internal.PropertyUpdate) (*internal.Response, error) {
@@ -1678,18 +1682,20 @@ func (b *backend) Mkcol(r *http.Request) error {
 	}
 	// The Backend only creates calendars: not the ordinary collection of a
 	// MKCOL request without a body, for instance
-	if err := m.CheckResourceType(calendarName); err != nil {
+	if err := m.CheckResourceType(); err != nil {
 		return err
 	}
-	if b.resourceTypeAtPath(r.Context(), r.URL.Path) != resourceTypeCalendar {
-		return newPreconditionError(http.StatusForbidden, PreconditionCalendarCollectionLocationOk)
-	}
-
+	// The resource type the request asks for, which setCalendarProp
+	// checks, is reported before the location, as for an address book
+	// asked for in the calendar home set
 	cal := Calendar{Path: r.URL.Path}
 	if propStats := m.SetProps(func(raw *internal.RawXMLValue) error {
 		return setCalendarProp(&cal, raw)
 	}); propStats != nil {
 		return m.PropError(propStats)
+	}
+	if b.resourceTypeAtPath(r.Context(), r.URL.Path) != resourceTypeCalendar {
+		return newPreconditionError(http.StatusForbidden, PreconditionCalendarCollectionLocationOk)
 	}
 	return b.Backend.CreateCalendar(r.Context(), &cal)
 }
@@ -1752,7 +1758,7 @@ func setCalendarProp(cal *Calendar, raw *internal.RawXMLValue) error {
 	case internal.ResourceTypeName:
 		// A MKCALENDAR request creates a calendar, so it can only set
 		// that resource type, as an extended MKCOL request creating one
-		// (RFC 5689 section 4.1), which CheckResourceType checked first
+		// (RFC 5689 section 4.1)
 		return internal.CheckResourceTypeProp(raw, calendarName)
 	default:
 		if internal.IsProtectedProp(name, protectedCalendarProps...) {

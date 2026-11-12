@@ -245,6 +245,12 @@ func TestMkcalendarErrors(t *testing.T) {
 			wantCode: http.StatusMultiStatus,
 			wantBody: "multistatus /user/calendars/work/ 403 {DAV:}resourcetype error {DAV:}valid-resourcetype",
 		},
+		{
+			name:     "calendar and another resource type",
+			body:     mkcalendarBody(`<D:resourcetype xmlns:E="http://example.com/ns/"><D:collection/><C:calendar/><E:special-resource/></D:resourcetype>`),
+			wantCode: http.StatusMultiStatus,
+			wantBody: "multistatus /user/calendars/work/ 403 {DAV:}resourcetype error {DAV:}valid-resourcetype",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			backend := &createBackend{}

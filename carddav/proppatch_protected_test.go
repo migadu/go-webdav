@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -87,6 +88,79 @@ func TestPropPatchAddressBookProtectedProps(t *testing.T) {
 			}
 			if len(backend.updates) != 0 {
 				t.Errorf("updates = %+v, want none", backend.updates)
+			}
+		})
+	}
+}
+
+// Where no property can be changed, on an address object or on the address
+// book of a backend which isn't an AddressBookUpdater, the protected
+// properties are still reported with DAV:cannot-modify-protected-property
+// (RFC 4918 section 9.2.1), and the others with a plain 403.
+func TestPropPatchReadOnlyProtectedProps(t *testing.T) {
+	const protected = "403 {DAV:}cannot-modify-protected-property"
+	b, objPath := newAddressDataBackend(t)
+	h := &Handler{Backend: b}
+
+	for _, tc := range []struct {
+		name, path string
+		want       map[string]string
+	}{
+		{
+			name: "address book",
+			path: syncAddressBookPath,
+			want: map[string]string{
+				"{DAV:}getetag":      protected,
+				"{DAV:}resourcetype": protected,
+				"{urn:ietf:params:xml:ns:carddav}supported-address-data": protected,
+				"{DAV:}getcontenttype":          "403",
+				"{DAV:}displayname":             "403",
+				"{http://example.com/ns/}color": "403",
+			},
+		},
+		{
+			name: "address object",
+			path: objPath,
+			want: map[string]string{
+				"{DAV:}getetag":      protected,
+				"{DAV:}resourcetype": protected,
+				// The server sets it, to text/vcard
+				"{DAV:}getcontenttype": protected,
+				// Not a property of address objects
+				"{urn:ietf:params:xml:ns:carddav}supported-address-data": "403",
+				"{DAV:}displayname":             "403",
+				"{http://example.com/ns/}color": "403",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := serveTestRequest(t, h, "PROPPATCH", tc.path, `<?xml version="1.0" encoding="UTF-8"?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:CR="urn:ietf:params:xml:ns:carddav" xmlns:X="http://example.com/ns/">
+  <D:set><D:prop>
+    <D:displayname>Work</D:displayname>
+    <D:getetag>"1"</D:getetag>
+    <D:getcontenttype>text/plain</D:getcontenttype>
+    <X:color>red</X:color>
+    <CR:supported-address-data/>
+  </D:prop></D:set>
+  <D:remove><D:prop><D:resourcetype/></D:prop></D:remove>
+</D:propertyupdate>`)
+			errs := make(map[string]string)
+			for _, propstat := range decodeTestMultiStatus(t, res).Responses[0].PropStats {
+				s := fmt.Sprint(propstat.Status.Code)
+				if propstat.Error != nil {
+					for _, raw := range propstat.Error.Raw {
+						name, _ := raw.XMLName()
+						s += " {" + name.Space + "}" + name.Local
+					}
+				}
+				for _, raw := range propstat.Prop.Raw {
+					name, _ := raw.XMLName()
+					errs["{"+name.Space+"}"+name.Local] = s
+				}
+			}
+			if !reflect.DeepEqual(errs, tc.want) {
+				t.Errorf("propstats = %v, want %v", errs, tc.want)
 			}
 		})
 	}

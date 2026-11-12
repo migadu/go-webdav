@@ -1021,6 +1021,7 @@ func (b *backend) propFindAllAddressObjects(ctx context.Context, mw *internal.Mu
 
 func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*internal.Response, error) {
 	// Make sure the resource exists before reporting on its properties
+	var isProtected func(name xml.Name) bool
 	switch b.resourceTypeAtPath(r.URL.Path) {
 	case resourceTypeAddressBook:
 		if _, err := b.Backend.GetAddressBook(r.Context(), r.URL.Path); err != nil {
@@ -1029,14 +1030,17 @@ func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*
 		if updater, ok := b.Backend.(AddressBookUpdater); ok {
 			return b.propPatchAddressBook(r, updater, update)
 		}
+		isProtected = isProtectedAddressBookProp
 	case resourceTypeAddressObject:
 		var dataReq AddressDataRequest
 		if _, err := b.Backend.GetAddressObject(r.Context(), r.URL.Path, &dataReq); err != nil {
 			return nil, err
 		}
+		isProtected = internal.IsProtectedObjectProp
 	}
 
-	return internal.NewPropPatchResponse(r.URL.Path, update, http.StatusForbidden)
+	// No property can be changed: the protected ones are reported as such
+	return internal.NewPropPatchResponse(r.URL.Path, update, isProtected)
 }
 
 func (b *backend) propPatchAddressBook(r *http.Request, updater AddressBookUpdater, update *internal.PropertyUpdate) (*internal.Response, error) {
@@ -1061,11 +1065,8 @@ func (b *backend) propPatchAddressBook(r *http.Request, updater AddressBookUpdat
 			}
 			abUpdate.Description = &v.Description
 		default:
-			// RFC 4918 section 9.2.1. DAV:resourcetype is set by the
-			// request creating the address book (RFC 4918 section 15.9:
-			// "Resource type is generally decided through the operation
-			// creating the resource (MKCOL vs PUT), not by PROPPATCH").
-			if name == internal.ResourceTypeName || internal.IsProtectedProp(name, protectedAddressBookProps...) {
+			if isProtectedAddressBookProp(name) {
+				// RFC 4918 section 9.2.1
 				return internal.NewProtectedPropError()
 			}
 			// The server doesn't store dead properties
@@ -1144,21 +1145,23 @@ func (b *backend) Mkcol(r *http.Request) error {
 	}
 	// The Backend only creates address books: not the ordinary collection of
 	// a MKCOL request without a body, for instance
-	if err := m.CheckResourceType(addressBookName); err != nil {
+	if err := m.CheckResourceType(); err != nil {
 		return err
+	}
+	// The resource type the request asks for, which setAddressBookProp
+	// checks, is reported before the location, as for a calendar asked for
+	// in the address book home set
+	ab := AddressBook{Path: r.URL.Path}
+	if propStats := m.SetProps(func(raw *internal.RawXMLValue) error {
+		return setAddressBookProp(&ab, raw)
+	}); propStats != nil {
+		return m.PropError(propStats)
 	}
 	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeAddressBook {
 		// RFC 6352 defines no precondition for MKCOL: this is the one of
 		// COPY and MOVE for the same condition (section 6.3.2.1), as CalDAV
 		// uses calendar-collection-location-ok for MKCALENDAR
 		return newPreconditionError(http.StatusForbidden, PreconditionAddressBookCollectionLocationOk)
-	}
-
-	ab := AddressBook{Path: r.URL.Path}
-	if propStats := m.SetProps(func(raw *internal.RawXMLValue) error {
-		return setAddressBookProp(&ab, raw)
-	}); propStats != nil {
-		return m.PropError(propStats)
 	}
 	return b.Backend.CreateAddressBook(r.Context(), &ab)
 }
@@ -1171,7 +1174,9 @@ func (b *backend) Mkcol(r *http.Request) error {
 // The other properties the server doesn't store are ignored, as for the
 // calendars of the caldav package: refusing the request would leave clients
 // which set properties only meaningful to them unable to create address
-// books. DAV:resourcetype is checked by internal.Mkcol.CheckResourceType.
+// books. DAV:resourcetype must be that of an address book, or the error is
+// 403 Forbidden with the DAV:valid-resourcetype precondition (RFC 5689
+// section 3.3).
 func setAddressBookProp(ab *AddressBook, raw *internal.RawXMLValue) error {
 	name, _ := raw.XMLName()
 	switch name {
@@ -1188,6 +1193,7 @@ func setAddressBookProp(ab *AddressBook, raw *internal.RawXMLValue) error {
 		}
 		ab.Description = v.Description
 	case internal.ResourceTypeName:
+		return internal.CheckResourceTypeProp(raw, addressBookName)
 	default:
 		if internal.IsProtectedProp(name, protectedAddressBookProps...) {
 			return internal.NewProtectedPropError()
@@ -1207,6 +1213,16 @@ var protectedAddressBookProps = []xml.Name{
 	push.TransportsName,
 	push.TopicName,
 	push.SupportedTriggersName,
+}
+
+// isProtectedAddressBookProp reports whether a PROPPATCH request can't change
+// the property name of an address book because it's protected: one of those
+// a request creating the address book can't set either, or
+// DAV:resourcetype, which only that request sets (RFC 4918 section 15.9:
+// "Resource type is generally decided through the operation creating the
+// resource (MKCOL vs PUT), not by PROPPATCH").
+func isProtectedAddressBookProp(name xml.Name) bool {
+	return name == internal.ResourceTypeName || internal.IsProtectedProp(name, protectedAddressBookProps...)
 }
 
 // inPrefix reports whether p is under the prefix of the Handler.

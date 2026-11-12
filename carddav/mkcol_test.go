@@ -168,6 +168,25 @@ func TestMkcolErrors(t *testing.T) {
 			wantCode: http.StatusForbidden,
 			wantBody: "mkcol-response 403 {urn:ietf:params:xml:ns:carddav}supported-address-data error {DAV:}cannot-modify-protected-property; 424 {DAV:}resourcetype",
 		},
+		{
+			// RFC 5689 section 3.3: "The server MUST support the
+			// specified resourcetype value for the specified
+			// collection", here an address book which is something else
+			// too
+			name:     "address book and another resource type",
+			body:     mkcolBody(`<D:resourcetype><D:collection/><CR:addressbook/><X:special-resource/></D:resourcetype>`),
+			wantCode: http.StatusForbidden,
+			wantBody: "mkcol-response 403 {DAV:}resourcetype error {DAV:}valid-resourcetype",
+		},
+		{
+			// Each property which can't be set gets its own status,
+			// only the others 424 (RFC 5689 section 3)
+			name:     "resource type and protected property",
+			body:     mkcolBody(mkcolCalendarType + `<D:getetag>"1"</D:getetag><D:displayname>Work</D:displayname>`),
+			wantCode: http.StatusForbidden,
+			wantBody: "mkcol-response 403 {DAV:}resourcetype error {DAV:}valid-resourcetype; " +
+				"403 {DAV:}getetag error {DAV:}cannot-modify-protected-property; 424 {DAV:}displayname",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			backend := &testBackend{}
