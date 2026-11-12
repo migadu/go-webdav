@@ -1061,6 +1061,14 @@ func (b *backend) propPatchAddressBook(r *http.Request, updater AddressBookUpdat
 			}
 			abUpdate.Description = &v.Description
 		default:
+			// RFC 4918 section 9.2.1. DAV:resourcetype is set by the
+			// request creating the address book (RFC 4918 section 15.9:
+			// "Resource type is generally decided through the operation
+			// creating the resource (MKCOL vs PUT), not by PROPPATCH").
+			if name == internal.ResourceTypeName || internal.IsProtectedProp(name, protectedAddressBookProps...) {
+				return internal.NewProtectedPropError()
+			}
+			// The server doesn't store dead properties
 			return internal.HTTPErrorf(http.StatusForbidden, "carddav: property cannot be modified")
 		}
 		return nil
