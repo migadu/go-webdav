@@ -144,8 +144,9 @@ func errFromOS(err error) error {
 }
 
 // isNotExist reports whether err means that a path names no file: either it
-// doesn't exist, or a component of its parent path isn't a directory but a
-// file (ENOTDIR), which iofs.ErrNotExist doesn't match.
+// doesn't exist, or a component of its parent path, or of the target of a
+// symbolic link it resolves through, isn't a directory but a file (ENOTDIR),
+// which iofs.ErrNotExist doesn't match.
 func isNotExist(err error) bool {
 	return errors.Is(err, iofs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
@@ -335,7 +336,8 @@ func (fs LocalFileSystem) Create(ctx context.Context, name string, body io.ReadC
 
 	origStat, err := root.Stat(p)
 	if err != nil {
-		if !errors.Is(err, iofs.ErrNotExist) {
+		// A symbolic link which doesn't resolve is replaced
+		if !isNotExist(err) {
 			return nil, false, errFromOS(err)
 		}
 	} else {
@@ -459,7 +461,7 @@ func copyRegularFile(root *os.Root, src, dst string, perm os.FileMode) error {
 	defer srcFile.Close()
 
 	dstFile, err := root.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_TRUNC, perm)
-	if os.IsNotExist(err) {
+	if isNotExist(err) {
 		return NewHTTPError(http.StatusConflict, err)
 	} else if err != nil {
 		return errFromOS(err)
@@ -771,7 +773,8 @@ func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *Co
 	}
 
 	if dstInfo, err := root.Stat(dstPath); err != nil {
-		if !os.IsNotExist(err) {
+		// A symbolic link which doesn't resolve is replaced
+		if !isNotExist(err) {
 			return false, errFromOS(err)
 		}
 		if _, lerr := root.Lstat(dstPath); lerr == nil {
@@ -925,7 +928,8 @@ func (fs LocalFileSystem) Move(ctx context.Context, src, dst string, options *Mo
 	}
 
 	if _, err := root.Stat(dstPath); err != nil {
-		if !os.IsNotExist(err) {
+		// A symbolic link which doesn't resolve is replaced
+		if !isNotExist(err) {
 			return false, errFromOS(err)
 		}
 		if _, lerr := root.Lstat(dstPath); lerr == nil {
