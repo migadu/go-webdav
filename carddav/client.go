@@ -357,6 +357,10 @@ func encodeAddressPropReq(req *AddressDataRequest) (*internal.Prop, error) {
 }
 
 func encodePropFilter(pf *PropFilter) (*propFilter, error) {
+	// RFC 6352 section 10.5.1 requires a name
+	if pf.Name == "" {
+		return nil, fmt.Errorf("carddav: failed to encode PropFilter: missing Name")
+	}
 	el := &propFilter{Name: pf.Name, Test: filterTest(pf.Test)}
 	if pf.IsNotDefined {
 		if len(pf.TextMatches) > 0 || len(pf.Params) > 0 {
@@ -378,6 +382,10 @@ func encodePropFilter(pf *PropFilter) (*propFilter, error) {
 }
 
 func encodeParamFilter(pf *ParamFilter) (*paramFilter, error) {
+	// RFC 6352 section 10.5.2 requires a name
+	if pf.Name == "" {
+		return nil, fmt.Errorf("carddav: failed to encode ParamFilter: missing Name")
+	}
 	el := &paramFilter{Name: pf.Name}
 	if pf.IsNotDefined {
 		if pf.TextMatch != nil {
@@ -386,7 +394,7 @@ func encodeParamFilter(pf *ParamFilter) (*paramFilter, error) {
 		el.IsNotDefined = &struct{}{}
 	}
 	if pf.TextMatch != nil {
-		el.TextMatch = encodeTextMatch(pf.TextMatch)
+		el.TextMatch = []textMatch{*encodeTextMatch(pf.TextMatch)}
 	}
 	return el, nil
 }

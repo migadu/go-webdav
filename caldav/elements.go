@@ -114,7 +114,9 @@ type calendarQuery struct {
 	Prop     *internal.Prop `xml:"DAV: prop,omitempty"`
 	AllProp  *struct{}      `xml:"DAV: allprop,omitempty"`
 	PropName *struct{}      `xml:"DAV: propname,omitempty"`
-	Filter   filter         `xml:"filter"`
+	// Filter is a pointer to tell a missing filter, which section 9.5
+	// requires, from an empty one
+	Filter *filter `xml:"filter"`
 	// TODO: timezone
 }
 
@@ -128,17 +130,26 @@ type calendarMultiget struct {
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.7
+//
+// The filter holds a single comp-filter. CompFilters is a slice to tell more
+// than one, which encoding/xml would decode onto the first one, from a single
+// one.
 type filter struct {
-	XMLName    xml.Name   `xml:"urn:ietf:params:xml:ns:caldav filter"`
-	CompFilter compFilter `xml:"comp-filter"`
+	XMLName     xml.Name     `xml:"urn:ietf:params:xml:ns:caldav filter"`
+	CompFilters []compFilter `xml:"comp-filter"`
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.7.1
+//
+// The grammar allows at most one is-not-defined and one time-range element.
+// They're slices to tell a repeated element, which encoding/xml would decode
+// onto the first one, from a single one. So are the is-not-defined,
+// time-range and text-match elements of propFilter and paramFilter.
 type compFilter struct {
 	XMLName      xml.Name     `xml:"urn:ietf:params:xml:ns:caldav comp-filter"`
 	Name         string       `xml:"name,attr"`
-	IsNotDefined *struct{}    `xml:"is-not-defined,omitempty"`
-	TimeRange    *timeRange   `xml:"time-range,omitempty"`
+	IsNotDefined []struct{}   `xml:"is-not-defined,omitempty"`
+	TimeRange    []timeRange  `xml:"time-range,omitempty"`
 	PropFilters  []propFilter `xml:"prop-filter,omitempty"`
 	CompFilters  []compFilter `xml:"comp-filter,omitempty"`
 }
@@ -147,18 +158,18 @@ type compFilter struct {
 type propFilter struct {
 	XMLName      xml.Name      `xml:"urn:ietf:params:xml:ns:caldav prop-filter"`
 	Name         string        `xml:"name,attr"`
-	IsNotDefined *struct{}     `xml:"is-not-defined,omitempty"`
-	TimeRange    *timeRange    `xml:"time-range,omitempty"`
-	TextMatch    *textMatch    `xml:"text-match,omitempty"`
+	IsNotDefined []struct{}    `xml:"is-not-defined,omitempty"`
+	TimeRange    []timeRange   `xml:"time-range,omitempty"`
+	TextMatch    []textMatch   `xml:"text-match,omitempty"`
 	ParamFilter  []paramFilter `xml:"param-filter,omitempty"`
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.7.3
 type paramFilter struct {
-	XMLName      xml.Name   `xml:"urn:ietf:params:xml:ns:caldav param-filter"`
-	Name         string     `xml:"name,attr"`
-	IsNotDefined *struct{}  `xml:"is-not-defined,omitempty"`
-	TextMatch    *textMatch `xml:"text-match,omitempty"`
+	XMLName      xml.Name    `xml:"urn:ietf:params:xml:ns:caldav param-filter"`
+	Name         string      `xml:"name,attr"`
+	IsNotDefined []struct{}  `xml:"is-not-defined,omitempty"`
+	TextMatch    []textMatch `xml:"text-match,omitempty"`
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.7.5
@@ -200,17 +211,32 @@ type timeRange struct {
 // newTimeRange returns the time-range element for [start, end), leaving out
 // the attribute of a zero bound: RFC 4791 section 9.9 reads a missing start
 // as -infinity and a missing end as +infinity.
-func newTimeRange(start, end time.Time) *timeRange {
+//
+// The bounds are truncated to the second, as the "date with UTC time" format
+// is, so that check sees the range that is sent, as for newRequiredTimeRange.
+func newTimeRange(start, end time.Time) timeRange {
 	var tr timeRange
 	if !start.IsZero() {
-		t := dateWithUTCTime(start)
+		t := dateWithUTCTime(start.UTC().Truncate(time.Second))
 		tr.Start = &t
 	}
 	if !end.IsZero() {
-		t := dateWithUTCTime(end)
+		t := dateWithUTCTime(end.UTC().Truncate(time.Second))
 		tr.End = &t
 	}
-	return &tr
+	return tr
+}
+
+// check checks tr against RFC 4791 section 9.9: at least one of start and
+// end, and the end after the start when both are there.
+func (tr *timeRange) check() error {
+	if tr.Start == nil && tr.End == nil {
+		return fmt.Errorf("caldav: time-range requires a start or an end attribute")
+	}
+	if tr.Start != nil && tr.End != nil && !time.Time(*tr.End).After(time.Time(*tr.Start)) {
+		return fmt.Errorf("caldav: the end of time-range must be after its start")
+	}
+	return nil
 }
 
 // bounds returns the start and end of the time range, zero when unbounded.

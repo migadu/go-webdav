@@ -243,6 +243,10 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
 }
 
 func decodePropFilter(el *propFilter) (*PropFilter, error) {
+	// RFC 6352 section 10.5.1 requires a name
+	if el.Name == "" {
+		return nil, fmt.Errorf("carddav: failed to parse prop-filter: missing name")
+	}
 	pf := &PropFilter{Name: el.Name, Test: FilterTest(el.Test)}
 	if el.IsNotDefined != nil {
 		if len(el.TextMatches) > 0 || len(el.Params) > 0 {
@@ -268,15 +272,22 @@ func decodePropFilter(el *propFilter) (*PropFilter, error) {
 }
 
 func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {
+	// RFC 6352 section 10.5.2: (is-not-defined | text-match)?, and a name
+	if el.Name == "" {
+		return nil, fmt.Errorf("carddav: failed to parse param-filter: missing name")
+	}
+	if len(el.TextMatch) > 1 {
+		return nil, fmt.Errorf("carddav: failed to parse param-filter: more than one text-match")
+	}
 	pf := &ParamFilter{Name: el.Name}
 	if el.IsNotDefined != nil {
-		if el.TextMatch != nil {
+		if len(el.TextMatch) > 0 {
 			return nil, fmt.Errorf("carddav: failed to parse param-filter: if is-not-defined is provided, text-match can't be provided")
 		}
 		pf.IsNotDefined = true
 	}
-	if el.TextMatch != nil {
-		decodedTM, err := decodeTextMatch(el.TextMatch)
+	if len(el.TextMatch) > 0 {
+		decodedTM, err := decodeTextMatch(&el.TextMatch[0])
 		if err != nil {
 			return nil, err
 		}
