@@ -465,6 +465,9 @@ func copyRegularFile(root *os.Root, src, dst string, perm os.FileMode) error {
 		return errFromOS(err)
 	}
 	defer dstFile.Close()
+	// As in Create, Chmod isn't masked by the umask, unlike the mode the
+	// file is created with
+	dstFile.Chmod(perm)
 
 	if _, err := io.Copy(dstFile, srcFile); err != nil {
 		return err
@@ -834,6 +837,9 @@ func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *Co
 			if err := root.Mkdir(target, perm|0700); err != nil {
 				return errFromOS(err)
 			}
+			// As in Create, Chmod isn't masked by the umask, unlike
+			// the mode the directory is created with
+			root.Chmod(target, perm|0700)
 			if perm&0700 != 0700 {
 				dirPerms = append(dirPerms, dirPerm{target, perm})
 			}

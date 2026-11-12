@@ -204,6 +204,62 @@ func TestLocalFileSystemCopyReadOnly(t *testing.T) {
 	checkPerm("shallow", 0555)
 }
 
+// Copy keeps the permissions of the files and directories it copies,
+// including those the process umask would clear from the copies.
+func TestLocalFileSystemCopyKeepsPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permissions")
+	}
+	dir := t.TempDir()
+	perms := []struct {
+		name string
+		perm os.FileMode
+	}{
+		{"src", 0777},
+		{"src/shared.txt", 0666},
+		{"src/run.sh", 0777},
+		{"src/own.txt", 0640},
+		{"src/sub", 0775},
+		{"src/sub/b.txt", 0664},
+	}
+	writeTestFile(t, filepath.Join(dir, "src", "shared.txt"), "a")
+	writeTestFile(t, filepath.Join(dir, "src", "run.sh"), "a")
+	writeTestFile(t, filepath.Join(dir, "src", "own.txt"), "a")
+	writeTestFile(t, filepath.Join(dir, "src", "sub", "b.txt"), "b")
+	for _, p := range perms {
+		if err := os.Chmod(filepath.Join(dir, p.name), p.perm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fs := webdav.LocalFileSystem(dir)
+	ctx := context.Background()
+
+	checkPerm := func(name string, want os.FileMode) {
+		t.Helper()
+		if fi, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Error(err)
+		} else if perm := fi.Mode().Perm(); perm != want {
+			t.Errorf("%v has permissions %v, want %v", name, perm, want)
+		}
+	}
+
+	if _, err := fs.Copy(ctx, "/src", "/dst", &webdav.CopyOptions{}); err != nil {
+		t.Fatalf("Copy() = %v", err)
+	}
+	for _, p := range perms {
+		checkPerm("dst"+strings.TrimPrefix(p.name, "src"), p.perm)
+	}
+
+	if _, err := fs.Copy(ctx, "/src", "/shallow", &webdav.CopyOptions{NoRecursive: true}); err != nil {
+		t.Fatalf("Copy() = %v", err)
+	}
+	checkPerm("shallow", 0777)
+	if _, err := fs.Copy(ctx, "/src/shared.txt", "/shared.txt", &webdav.CopyOptions{}); err != nil {
+		t.Fatalf("Copy() = %v", err)
+	}
+	checkPerm("shared.txt", 0666)
+}
+
 // newSymlinkTestDir creates a directory to be served by LocalFileSystem, and a
 // sibling directory outside of it holding a secret file. The served directory
 // contains symbolic links pointing to the outside directory.
