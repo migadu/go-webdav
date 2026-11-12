@@ -2,6 +2,7 @@ package carddav
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/emersion/go-webdav"
 )
 
 // fakeHost answers the requests for a host name with canned responses, by
@@ -247,6 +250,79 @@ func TestClientCrossHost(t *testing.T) {
 	}
 	if want := []string{gone}; !reflect.DeepEqual(syncRes.Deleted, want) {
 		t.Errorf("SyncCollection() deleted %q, want %q", syncRes.Deleted, want)
+	}
+}
+
+// requireBasicAuth answers 401 Unauthorized to the requests without the basic
+// credentials of user "user" with password "secret", and the others with f.
+func requireBasicAuth(f http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if user, pass, ok := r.BasicAuth(); !ok || user != "user" || pass != "secret" {
+			w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		f(w, r)
+	}
+}
+
+// TestClientCrossHostBasicAuth checks that the credentials of
+// webdav.HTTPClientWithBasicAuth only go to the endpoint's origin: with
+// iCloud, whose address book home set is on another host than the principal,
+// a Client for the home set sends them there.
+func TestClientCrossHostBasicAuth(t *testing.T) {
+	const homeSet = "http://p37-contacts.test/1234567/carddavhome/"
+	principalHost := &fakeHost{name: "contacts.test", routes: map[string]http.HandlerFunc{
+		"PROPFIND /": requireBasicAuth(multiStatusHandler(`<d:response><d:href>/</d:href>` +
+			propStat(`<d:current-user-principal><d:href>/1234567/principal/</d:href></d:current-user-principal>`) +
+			`</d:response>`)),
+		"PROPFIND /1234567/principal/": requireBasicAuth(multiStatusHandler(`<d:response><d:href>/1234567/principal/</d:href>` +
+			propStat(`<card:addressbook-home-set><d:href>`+homeSet+`</d:href></card:addressbook-home-set>`) +
+			`</d:response>`)),
+	}}
+	homeHost := &fakeHost{name: "p37-contacts.test", routes: map[string]http.HandlerFunc{
+		"PROPFIND /1234567/carddavhome/": requireBasicAuth(multiStatusHandler(`
+			<d:response><d:href>/1234567/carddavhome/</d:href>` +
+			propStat(`<d:resourcetype><d:collection/></d:resourcetype>`) + `</d:response>
+			<d:response><d:href>/1234567/carddavhome/card/</d:href>` +
+			propStat(`<d:resourcetype><d:collection/><card:addressbook/></d:resourcetype>`) +
+			`</d:response>`)),
+	}}
+
+	ctx := context.Background()
+	hc := webdav.HTTPClientWithBasicAuth(newFakeHostsClient(t, principalHost, homeHost), "user", "secret")
+	c, err := NewClient(hc, "http://contacts.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	principal, err := c.FindCurrentUserPrincipal(ctx)
+	if err != nil {
+		t.Fatalf("FindCurrentUserPrincipal() = %v", err)
+	}
+	gotHomeSet, err := c.FindAddressBookHomeSet(ctx, principal)
+	if err != nil {
+		t.Fatalf("FindAddressBookHomeSet() = %v", err)
+	} else if gotHomeSet != homeSet {
+		t.Fatalf("FindAddressBookHomeSet() = %q, want %q", gotHomeSet, homeSet)
+	}
+
+	// The server named the other host: that doesn't make it trusted
+	var httpErr *webdav.HTTPError
+	if abs, err := c.FindAddressBooks(ctx, gotHomeSet); !errors.As(err, &httpErr) || httpErr.Code != http.StatusUnauthorized {
+		t.Errorf("FindAddressBooks() on another host = %+v, %v, want an HTTP error 401", abs, err)
+	}
+
+	homeClient, err := NewClient(hc, gotHomeSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs, err := homeClient.FindAddressBooks(ctx, gotHomeSet)
+	if err != nil {
+		t.Fatalf("FindAddressBooks() with a Client for the home set = %v", err)
+	}
+	if want := "/1234567/carddavhome/card/"; len(abs) != 1 || abs[0].Path != want {
+		t.Errorf("FindAddressBooks() with a Client for the home set = %+v, want an address book at %q", abs, want)
 	}
 }
 

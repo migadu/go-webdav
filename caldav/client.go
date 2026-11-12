@@ -60,7 +60,8 @@ type Client struct {
 // The paths the client returns and takes are as described for
 // webdav.NewClient: a calendar home set, calendar or calendar object on
 // another host than the endpoint's, as with iCloud, is returned as an absolute
-// URL.
+// URL. The credentials of webdav.HTTPClientWithBasicAuth are only sent there
+// by a Client with an endpoint on that host, e.g. the home set.
 func NewClient(c webdav.HTTPClient, endpoint string) (*Client, error) {
 	wc, err := webdav.NewClient(c, endpoint)
 	if err != nil {
