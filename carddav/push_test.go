@@ -532,7 +532,7 @@ func TestPushNotImplemented(t *testing.T) {
 	}
 
 	dav, allow := pushOptions(t, b, syncAddressBookPath)
-	if want := []string{"1", "3", "addressbook"}; !reflect.DeepEqual(dav, want) {
+	if want := []string{"1", "3", "addressbook", "extended-mkcol"}; !reflect.DeepEqual(dav, want) {
 		t.Errorf("DAV = %v, want %v", dav, want)
 	}
 	if allow["POST"] {
@@ -545,5 +545,29 @@ func TestPushNotImplemented(t *testing.T) {
 	// The path of a registration URL is no address book or address object
 	if w := serveCardDAV(b, http.MethodDelete, "/push/io6Efei4ooph", "", ""); w.Code != http.StatusForbidden {
 		t.Errorf("DELETE: status = %v, want 403", w.Code)
+	}
+}
+
+// RFC 5689 section 3.1: a server supporting extended MKCOL "MUST include
+// "extended-mkcol" as a field in the DAV response header from an OPTIONS
+// request on any URI that supports use of the extended MKCOL method", which
+// are the collections, not the address objects.
+func TestOptionsExtendedMkcol(t *testing.T) {
+	b := newPushTestBackend(t)
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{syncAddressBookPath, true},
+		{syncAddressBookPath + "/missing.vcf", false},
+	} {
+		dav, allow := pushOptions(t, b, tc.path)
+		got := false
+		for _, v := range dav {
+			got = got || v == "extended-mkcol"
+		}
+		if got != tc.want || got != allow["MKCOL"] {
+			t.Errorf("OPTIONS %v: DAV = %v, Allow MKCOL = %v; want extended-mkcol listed: %v", tc.path, dav, allow["MKCOL"], tc.want)
+		}
 	}
 }

@@ -530,6 +530,9 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 		// Note: some clients assume the address book is read-only when
 		// DELETE/MKCOL are missing
 		allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "MKCOL"}
+		// MKCOL creates collections with extended MKCOL only (RFC 5689
+		// section 3.1)
+		caps = append(caps, "extended-mkcol")
 		if _, ok := b.Backend.(AddressBookUpdater); ok {
 			allow = append(allow, "PROPPATCH")
 		}
