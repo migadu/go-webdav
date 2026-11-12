@@ -407,36 +407,47 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	}
 	if resp.StatusCode/100 != 2 {
 		defer resp.Body.Close()
-
-		contentType := resp.Header.Get("Content-Type")
-		if contentType == "" {
-			contentType = "text/plain"
-		}
-
-		var wrappedErr error
-		t, _, _ := mime.ParseMediaType(contentType)
-		if t == "application/xml" || t == "text/xml" {
-			var davErr Error
-			if err := xml.NewDecoder(resp.Body).Decode(&davErr); err != nil {
-				wrappedErr = err
-			} else {
-				wrappedErr = &davErr
-			}
-		} else if strings.HasPrefix(t, "text/") {
-			lr := io.LimitedReader{R: resp.Body, N: 1024}
-			var buf bytes.Buffer
-			io.Copy(&buf, &lr)
-			resp.Body.Close()
-			if s := strings.TrimSpace(buf.String()); s != "" {
-				if lr.N == 0 {
-					s += " […]"
-				}
-				wrappedErr = fmt.Errorf("%v", s)
-			}
-		}
-		return nil, &HTTPError{Code: resp.StatusCode, Err: wrappedErr}
+		return nil, responseError(resp)
 	}
 	return resp, nil
+}
+
+// isXMLMediaType reports whether the Content-Type of h is an XML one.
+func isXMLMediaType(h http.Header) bool {
+	t, _, _ := mime.ParseMediaType(h.Get("Content-Type"))
+	return t == "application/xml" || t == "text/xml"
+}
+
+// responseError returns the error of resp, a response with a status outside
+// 2xx: an *HTTPError with its status, wrapping the DAV:error element or the
+// text of its body. The caller closes the body.
+func responseError(resp *http.Response) error {
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "text/plain"
+	}
+
+	var wrappedErr error
+	t, _, _ := mime.ParseMediaType(contentType)
+	if t == "application/xml" || t == "text/xml" {
+		var davErr Error
+		if err := xml.NewDecoder(resp.Body).Decode(&davErr); err != nil {
+			wrappedErr = err
+		} else {
+			wrappedErr = &davErr
+		}
+	} else if strings.HasPrefix(t, "text/") {
+		lr := io.LimitedReader{R: resp.Body, N: 1024}
+		var buf bytes.Buffer
+		io.Copy(&buf, &lr)
+		if s := strings.TrimSpace(buf.String()); s != "" {
+			if lr.N == 0 {
+				s += " […]"
+			}
+			wrappedErr = fmt.Errorf("%v", s)
+		}
+	}
+	return &HTTPError{Code: resp.StatusCode, Err: wrappedErr}
 }
 
 // send sends req with the HTTP client, keeping its method across 301 and 302
@@ -709,6 +720,142 @@ func (c *Client) DoAndCheckMultiStatus(req *http.Request) error {
 		return err
 	}
 	return errors.Join(errs...)
+}
+
+// PropPatch performs a PROPPATCH request for path, which the server applies
+// in full or not at all (RFC 4918 section 9.2).
+//
+// If the server refuses the request, the returned error lists each property
+// with its status: first those which failed, then those which got 424 Failed
+// Dependency because of them, so that errors.As finds the HTTPError of a
+// property which failed.
+func (c *Client) PropPatch(ctx context.Context, path string, update *PropertyUpdate) error {
+	req, err := c.NewXMLRequest("PROPPATCH", path, update)
+	if err != nil {
+		return err
+	}
+
+	var errs propErrors
+	_, err = c.DoMultiStatusFunc(req.WithContext(ctx), func(resp *Response) error {
+		errs.addResponse(resp)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return errs.err()
+}
+
+// maxCreateErrorSize is the size of the largest error response body
+// DoCreateCollection reads.
+const maxCreateErrorSize = 1 << 20
+
+// DoCreateCollection performs req, a request creating a collection and
+// setting its properties all at once: an extended MKCOL (RFC 5689) or a
+// MKCALENDAR (RFC 4791 section 5.3.1) request.
+//
+// If the server refuses some of the properties, the returned error lists each
+// of them with its status, as for PropPatch. The server reports them in a 207
+// Multi-Status response, or with an error status and a response body such as
+// DAV:mkcol-response (RFC 5689 section 3.5): the HTTPError of that status then
+// wraps them. Any other response with a status outside 2xx is returned as Do
+// returns it.
+func (c *Client) DoCreateCollection(req *http.Request) error {
+	resp, err := c.send(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	switch {
+	case resp.StatusCode == http.StatusMultiStatus:
+		base := responseBase(req, resp)
+		var errs propErrors
+		_, err := decodeMultiStatus(resp.Body, func(r *Response) error {
+			c.normalizeResponse(r, base)
+			errs.addResponse(r)
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		return errs.err()
+	case resp.StatusCode/100 == 2:
+		return nil
+	case !isXMLMediaType(resp.Header):
+		return responseError(resp)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCreateErrorSize))
+	if err != nil {
+		return &HTTPError{Code: resp.StatusCode, Err: err}
+	}
+	// Any root element holding propstat elements is accepted: RFC 5689 calls
+	// it DAV:mkcol-response, and RFC 4791 CALDAV:mkcalendar-response. A
+	// DAV:error element holds none.
+	var propStats struct {
+		PropStats []PropStat `xml:"DAV: propstat"`
+	}
+	if xml.Unmarshal(body, &propStats) == nil {
+		var errs propErrors
+		errs.addPropStats(propStats.PropStats)
+		if err := errs.err(); err != nil {
+			return &HTTPError{Code: resp.StatusCode, Err: err}
+		}
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	return responseError(resp)
+}
+
+// propErrors collects the errors of the properties of a PROPPATCH or a
+// collection creation request the server refused. The properties which got
+// 424 Failed Dependency are kept apart, to be listed after the others.
+type propErrors struct {
+	errs, failedDeps []error
+}
+
+// addResponse adds the error of resp, or else those of its properties.
+func (pe *propErrors) addResponse(resp *Response) {
+	if err := resp.Err(); err != nil {
+		pe.errs = append(pe.errs, err)
+		return
+	}
+	pe.addPropStats(resp.PropStats)
+}
+
+// addPropStats adds the errors of the properties of propStats with a status
+// outside 2xx.
+func (pe *propErrors) addPropStats(propStats []PropStat) {
+	for i := range propStats {
+		propstat := &propStats[i]
+		if propstat.Status.Code/100 == 2 {
+			continue
+		}
+		for j := range propstat.Prop.Raw {
+			err := PropStatError(&propstat.Prop.Raw[j], propstat)
+			if propstat.Status.Code == http.StatusFailedDependency {
+				pe.failedDeps = append(pe.failedDeps, err)
+			} else {
+				pe.errs = append(pe.errs, err)
+			}
+		}
+	}
+}
+
+func (pe *propErrors) err() error {
+	return errors.Join(append(pe.errs, pe.failedDeps...)...)
+}
+
+// PropStatError returns the error of raw, a property of propstat, a propstat
+// element with a status outside 2xx: an HTTPError with that status, wrapping
+// the DAV:error element of propstat if any.
+func PropStatError(raw *RawXMLValue, propstat *PropStat) error {
+	err := &HTTPError{Code: propstat.Status.Code}
+	if propstat.Error != nil {
+		err.Err = propstat.Error
+	}
+	name, _ := raw.XMLName()
+	return fmt.Errorf("webdav: property <%v %v>: %w", name.Space, name.Local, err)
 }
 
 func (c *Client) PropFind(ctx context.Context, path string, depth Depth, propfind *PropFind) (*MultiStatus, error) {

@@ -227,6 +227,14 @@ func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	return d.DecodeElement(v, &start)
 }
 
+// mkcolSetReq is the body of an extended MKCOL request sent by a Client (RFC
+// 5689 section 5.1). Unlike mkcolReq, which the server decodes, it holds only
+// the properties which are set.
+type mkcolSetReq struct {
+	XMLName xml.Name     `xml:"DAV: mkcol"`
+	Set     internal.Set `xml:"DAV: set"`
+}
+
 type mkcolReq struct {
 	XMLName      xml.Name               `xml:"DAV: mkcol"`
 	ResourceType internal.ResourceType  `xml:"set>prop>resourcetype"`
