@@ -60,10 +60,12 @@ func mkcolBody(props string) string {
 </D:mkcol>`
 }
 
-// mkcolErrorBody summarizes the XML body of an error response to a MKCOL
-// request: the conditions of a DAV:error element, or the propstat elements
-// of a DAV:mkcol-response element (RFC 5689 section 3.5), each with its
-// status, properties and conditions. Another body is summarized as "".
+// mkcolErrorBody summarizes the XML body of an error response to a MKCOL or
+// a MKCALENDAR request: the conditions of a DAV:error element, or the
+// propstat elements of a DAV:mkcol-response element (RFC 5689 section 3.5)
+// or of the responses of a DAV:multistatus element (RFC 4791 section
+// 5.3.1.1), each with its status, properties and conditions. Another body is
+// summarized as "".
 func mkcolErrorBody(t *testing.T, w *httptest.ResponseRecorder) string {
 	t.Helper()
 	if !strings.HasPrefix(w.Header().Get("Content-Type"), "application/xml") {
@@ -73,6 +75,7 @@ func mkcolErrorBody(t *testing.T, w *httptest.ResponseRecorder) string {
 		XMLName   xml.Name
 		Raw       []internal.RawXMLValue `xml:",any"`
 		PropStats []internal.PropStat    `xml:"DAV: propstat"`
+		Responses []internal.Response    `xml:"DAV: response"`
 	}
 	if err := xml.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("malformed XML body %q: %v", w.Body.String(), err)
@@ -85,19 +88,32 @@ func mkcolErrorBody(t *testing.T, w *httptest.ResponseRecorder) string {
 		}
 		return strings.Join(l, ",")
 	}
-	switch body.XMLName {
-	case xml.Name{Space: "DAV:", Local: "error"}:
-		return "error " + names(body.Raw)
-	case xml.Name{Space: "DAV:", Local: "mkcol-response"}:
+	propStats := func(propStats []internal.PropStat) string {
 		var l []string
-		for _, ps := range body.PropStats {
+		for _, ps := range propStats {
 			s := fmt.Sprintf("%v %v", ps.Status.Code, names(ps.Prop.Raw))
 			if ps.Error != nil {
 				s += " error " + names(ps.Error.Raw)
 			}
 			l = append(l, s)
 		}
-		return "mkcol-response " + strings.Join(l, "; ")
+		return strings.Join(l, "; ")
+	}
+	switch body.XMLName {
+	case xml.Name{Space: "DAV:", Local: "error"}:
+		return "error " + names(body.Raw)
+	case xml.Name{Space: "DAV:", Local: "mkcol-response"}:
+		return "mkcol-response " + propStats(body.PropStats)
+	case xml.Name{Space: "DAV:", Local: "multistatus"}:
+		var l []string
+		for _, resp := range body.Responses {
+			var hrefs []string
+			for _, href := range resp.Hrefs {
+				hrefs = append(hrefs, href.Path)
+			}
+			l = append(l, strings.Join(hrefs, ",")+" "+propStats(resp.PropStats))
+		}
+		return "multistatus " + strings.Join(l, " | ")
 	}
 	return "<" + body.XMLName.Space + " " + body.XMLName.Local + ">"
 }
