@@ -294,3 +294,19 @@ func TestServerMeCard(t *testing.T) {
 		}
 	})
 }
+
+// TestServerMeCardEncoding pins the encoding of the me-card property in a
+// PROPFIND response: clients decode it with a type of their own.
+func TestServerMeCardEncoding(t *testing.T) {
+	h := &Handler{Backend: &meCardTestBackend{meCard: meCardObject}}
+	req := httptest.NewRequest("PROPFIND", meCardHomeSet, strings.NewReader(propFindMeCard))
+	req.Header.Set("Content-Type", "application/xml")
+	req.Header.Set("Depth", "0")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	want := `<me-card xmlns="http://calendarserver.org/ns/"><href xmlns="DAV:">` + meCardObject + `</href></me-card>`
+	if !strings.Contains(w.Body.String(), want) {
+		t.Errorf("PROPFIND %v: %s not in the response:\n%s", meCardHomeSet, want, w.Body.String())
+	}
+}

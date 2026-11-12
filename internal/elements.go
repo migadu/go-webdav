@@ -532,9 +532,9 @@ type DisplayName struct {
 
 // https://tools.ietf.org/html/rfc5397#section-3
 //
-// The property holds either an href or DAV:unauthenticated. Href is a pointer
-// so that a property received without an href can be told from one with an
-// empty href, which refers to the request URL (RFC 3986 section 4.4).
+// The property holds either an href or DAV:unauthenticated: servers encode it
+// with NewCurrentUserPrincipal. Clients decode it with a type of their own,
+// which keeps every href, so that they can reject a property with several.
 type CurrentUserPrincipal struct {
 	XMLName         xml.Name  `xml:"DAV: current-user-principal"`
 	Href            *Href     `xml:"href,omitempty"`

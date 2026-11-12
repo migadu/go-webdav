@@ -108,25 +108,29 @@ func (c *Client) FindCurrentUserPrincipal(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	var prop internal.CurrentUserPrincipal
+	var prop currentUserPrincipal
 	if err := resp.DecodeProp(&prop); err != nil {
 		return "", err
 	}
-	// RFC 5397 section 3 requires exactly one of them:
+	// RFC 5397 section 3 requires exactly one of them, and a single href:
 	// <!ELEMENT current-user-principal (unauthenticated | href)>
 	switch {
-	case prop.Unauthenticated != nil && prop.Href != nil:
+	case prop.Unauthenticated != nil && len(prop.Hrefs) > 0:
 		// Neither can be trusted over the other
 		return "", fmt.Errorf("webdav: malformed current-user-principal property: both an href and DAV:unauthenticated")
 	case prop.Unauthenticated != nil:
 		return "", fmt.Errorf("webdav: unauthenticated")
-	case prop.Href == nil:
+	case len(prop.Hrefs) == 0:
 		// Taken as an empty href, the missing one would refer to the
 		// request URL
 		return "", fmt.Errorf("webdav: malformed current-user-principal property: neither an href nor DAV:unauthenticated")
+	case len(prop.Hrefs) > 1:
+		// No href can be trusted over the others: the wrong one could be
+		// the principal of another user
+		return "", fmt.Errorf("webdav: malformed current-user-principal property: %d hrefs", len(prop.Hrefs))
 	}
 
-	return resp.HrefPath(prop.Href), nil
+	return resp.HrefPath(&prop.Hrefs[0]), nil
 }
 
 var fileInfoPropFind = internal.NewPropNamePropFind(

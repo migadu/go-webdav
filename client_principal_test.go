@@ -14,8 +14,9 @@ import (
 // TestClientFindCurrentUserPrincipalHref checks that FindCurrentUserPrincipal
 // tells an empty href, which refers to the request URL (RFC 3986 section
 // 4.4), from a DAV:current-user-principal without any href or
-// DAV:unauthenticated, or with both, which RFC 5397 section 3 doesn't allow:
-// <!ELEMENT current-user-principal (unauthenticated | href)>.
+// DAV:unauthenticated, with both, or with several hrefs, which RFC 5397
+// section 3 doesn't allow: <!ELEMENT current-user-principal (unauthenticated
+// | href)>.
 func TestClientFindCurrentUserPrincipalHref(t *testing.T) {
 	const (
 		endpoint        = "/dav/"
@@ -39,6 +40,9 @@ func TestClientFindCurrentUserPrincipalHref(t *testing.T) {
 		{"unauthenticated", `<D:current-user-principal><D:unauthenticated/></D:current-user-principal>`, "", unauthenticated},
 		{"unauthenticated and href", `<D:current-user-principal><D:unauthenticated/><D:href>/principals/me/</D:href></D:current-user-principal>`, "", malformed},
 		{"href and unauthenticated", `<D:current-user-principal><D:href>/principals/me/</D:href><D:unauthenticated/></D:current-user-principal>`, "", malformed},
+		{"two hrefs", `<D:current-user-principal><D:href>/principals/alice/</D:href><D:href>/principals/bob/</D:href></D:current-user-principal>`, "", malformed},
+		{"two hrefs, one empty", `<D:current-user-principal><D:href>/principals/alice/</D:href><D:href></D:href></D:current-user-principal>`, "", malformed},
+		{"two hrefs and unauthenticated", `<D:current-user-principal><D:href>/principals/alice/</D:href><D:href>/principals/bob/</D:href><D:unauthenticated/></D:current-user-principal>`, "", malformed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
