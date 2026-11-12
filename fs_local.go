@@ -508,6 +508,40 @@ func isSubPath(dir, p string) bool {
 	return strings.HasPrefix(p, dir+"/")
 }
 
+// isWithin reports whether dir, a path to a directory relative to the root
+// directory, resolves to ancestor or to a directory beneath it. The
+// directories dir is in are dir/.., dir/../.. and so on: os.Root resolves
+// ".." after following the symbolic links before it, so unlike the prefixes
+// of dir, these are the directories dir really is in.
+func isWithin(root *os.Root, dir string, ancestor os.FileInfo) bool {
+	rootInfo, err := root.Stat(".")
+	if err != nil {
+		return false
+	}
+	for {
+		fi, err := root.Stat(dir)
+		if err != nil {
+			return false
+		}
+		if os.SameFile(fi, ancestor) {
+			return true
+		}
+		if os.SameFile(fi, rootInfo) {
+			return false
+		}
+		dir += "/.."
+	}
+}
+
+// isBeneath reports whether p, a path relative to the root directory, is
+// located beneath the collection dirPath, which resolves to dirInfo: whether
+// it's a path beneath dirPath, or the directory p is in is dirPath's or one
+// beneath it under another name, through a symbolic link or an alias on a
+// case-insensitive file system.
+func isBeneath(root *os.Root, dirPath string, dirInfo os.FileInfo, p string) bool {
+	return isSubPath(dirPath, p) || isWithin(root, path.Dir(p), dirInfo)
+}
+
 // errOverwriteSourceParent is the error of a COPY or MOVE request overwriting
 // a collection which contains the source. The destination is removed first
 // (RFC 4918 sections 9.8.4 and 9.9.3), which would remove the source with it.
@@ -515,12 +549,17 @@ func errOverwriteSourceParent() error {
 	return NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: cannot overwrite a collection containing the source"))
 }
 
+// maxLinks is the number of symbolic links containsSource follows from the
+// source, as many as Linux follows to resolve a path.
+const maxLinks = 40
+
 // containsSource reports whether removing dstPath, an existing destination,
 // would remove srcPath with it: whether dstPath is an ancestor of srcPath, or
 // the same directory as one under another name, through a symbolic link to
-// it or an alias on a case-insensitive file system. A destination which is a
-// symbolic link to such a directory is a link of its own (see
-// isSeparateLink), removed without the source.
+// it or an alias on a case-insensitive file system. If srcPath is a symbolic
+// link, it also reports whether removing dstPath would remove what srcPath
+// resolves to. A destination which is a symbolic link to such a directory is
+// a link of its own (see isSeparateLink), removed without the source.
 func containsSource(root *os.Root, srcPath, dstPath string) bool {
 	if isSubPath(dstPath, srcPath) {
 		return true
@@ -529,13 +568,47 @@ func containsSource(root *os.Root, srcPath, dstPath string) bool {
 	if err != nil || !dstInfo.IsDir() {
 		return false
 	}
+	// Removing a directory along the source's path, even a symbolic link,
+	// leaves the source unreachable through that path
 	for dir := path.Dir(srcPath); dir != "."; dir = path.Dir(dir) {
 		fi, err := root.Stat(dir)
 		if err == nil && os.SameFile(fi, dstInfo) && !isSeparateLink(root, dir, dstPath) {
 			return true
 		}
 	}
-	return false
+	if fi, err := root.Lstat(dstPath); err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	// Removing a directory removes what it really contains: the source,
+	// and if it's a symbolic link, each link it resolves through and the
+	// file it resolves to, each in the directory its path is relative to
+	p := srcPath
+	for i := 0; ; i++ {
+		dir := "."
+		if j := strings.LastIndex(p, "/"); j >= 0 {
+			dir = p[:j]
+		}
+		if isWithin(root, dir, dstInfo) {
+			return true
+		}
+		if i == maxLinks {
+			return false
+		}
+		fi, err := root.Lstat(p)
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			return false
+		}
+		target, err := root.Readlink(p)
+		if err != nil {
+			return false
+		}
+		// Not path.Join: ".." in the target applies after following
+		// the links in dir, as os.Root does
+		p = target
+		if dir != "." {
+			p = dir + "/" + target
+		}
+	}
 }
 
 // isSameFile reports whether srcPath and dstPath resolve to the same file,
@@ -684,8 +757,9 @@ func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *Co
 	}
 
 	// "Note that an infinite-depth COPY of /A/ into /A/B/ could lead to
-	// infinite recursion if not handled correctly" (RFC 4918 section 9.8.3)
-	if srcInfo.IsDir() && !options.NoRecursive && isSubPath(srcPath, dstPath) {
+	// infinite recursion if not handled correctly" (RFC 4918 section 9.8.3),
+	// and /A/B/ may be under another name
+	if srcInfo.IsDir() && !options.NoRecursive && isBeneath(root, srcPath, srcInfo, dstPath) {
 		return false, NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: cannot copy a collection into itself"))
 	}
 
@@ -814,15 +888,17 @@ func (fs LocalFileSystem) Move(ctx context.Context, src, dst string, options *Mo
 	}
 	defer root.Close()
 
-	if _, err := root.Stat(srcPath); err != nil && isPathEscapesError(err) {
-		return false, errFromOS(err)
+	srcTarget, targetErr := root.Stat(srcPath)
+	if targetErr != nil && isPathEscapesError(targetErr) {
+		return false, errFromOS(targetErr)
 	}
-	srcInfo, err := root.Lstat(srcPath)
-	if err != nil {
+	if _, err := root.Lstat(srcPath); err != nil {
 		return false, errFromOS(err)
 	}
 
-	if srcInfo.IsDir() && isSubPath(srcPath, dstPath) {
+	// A symbolic link is moved as a link, but one to a collection names
+	// that collection, which can't be moved into itself either
+	if targetErr == nil && srcTarget.IsDir() && isBeneath(root, srcPath, srcTarget, dstPath) {
 		return false, NewHTTPError(http.StatusForbidden, fmt.Errorf("webdav: cannot move a collection into itself"))
 	}
 
