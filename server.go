@@ -3,6 +3,7 @@ package webdav
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -688,8 +689,11 @@ func principalAllow(r *http.Request, options *ServePrincipalOptions) (string, *P
 	methods := []string{http.MethodOptions, "PROPFIND"}
 	var info *PushInfo
 	if options.Push != nil {
+		// With push information that can't be served as the draft
+		// requires, the principal doesn't support WebDAV-Push: the push
+		// properties and registrations get the error
 		var err error
-		if info, err = push.Info(r.Context(), options.Push, r.URL.Path); err != nil {
+		if info, err = push.Info(r.Context(), options.Push, r.URL.Path); err != nil && !errors.Is(err, push.ErrInvalidInfo) {
 			return "", nil, err
 		}
 	}

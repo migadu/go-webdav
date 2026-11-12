@@ -111,8 +111,12 @@ func serveRegister(t *testing.T, b *fakeBackend, contentType, body string) *http
 		r.Header.Set("Content-Type", contentType)
 	}
 	w := httptest.NewRecorder()
-	info, _ := b.PushInfo(r.Context(), testPath)
-	if err := ServeRegister(w, r, b, info); err != nil {
+	// As the handlers do
+	info, err := Info(r.Context(), b, testPath)
+	if err == nil {
+		err = ServeRegister(w, r, b, info)
+	}
+	if err != nil {
 		internal.ServeError(w, err)
 	}
 	return w
@@ -568,6 +572,12 @@ func TestAddPropsInvalidInfo(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newFakeBackend()
 			b.info[testPath] = &tc.info
+
+			// Callers tell it from other errors, to leave WebDAV-Push out of
+			// OPTIONS responses
+			if info, err := Info(context.Background(), b, testPath); info != nil || !errors.Is(err, ErrInvalidInfo) {
+				t.Errorf("Info() = %v, %v, want an ErrInvalidInfo error", info, err)
+			}
 
 			if w := serveRegister(t, b, "application/xml", draftSamplePushRegister); w.Code != http.StatusInternalServerError {
 				t.Errorf("POST: status = %v, want 500", w.Code)
