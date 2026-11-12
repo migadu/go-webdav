@@ -22,6 +22,7 @@ var (
 	calendarTimezoneName              = xml.Name{namespace, "calendar-timezone"}
 	supportedCalendarDataName         = xml.Name{namespace, "supported-calendar-data"}
 	supportedCalendarComponentSetName = xml.Name{namespace, "supported-calendar-component-set"}
+	supportedCollationSetName         = xml.Name{namespace, "supported-collation-set"}
 	maxResourceSizeName               = xml.Name{namespace, "max-resource-size"}
 
 	calendarColorName = xml.Name{appleNamespace, "calendar-color"}
@@ -86,6 +87,12 @@ type supportedCalendarData struct {
 type supportedCalendarComponentSet struct {
 	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav supported-calendar-component-set"`
 	Comp    []comp   `xml:"comp"`
+}
+
+// https://tools.ietf.org/html/rfc4791#section-7.5.1
+type supportedCollationSet struct {
+	XMLName    xml.Name `xml:"urn:ietf:params:xml:ns:caldav supported-collation-set"`
+	Collations []string `xml:"supported-collation"`
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.6

@@ -15,6 +15,7 @@ var (
 	addressBookName            = xml.Name{namespace, "addressbook"}
 	addressBookDescriptionName = xml.Name{namespace, "addressbook-description"}
 	supportedAddressDataName   = xml.Name{namespace, "supported-address-data"}
+	supportedCollationSetName  = xml.Name{namespace, "supported-collation-set"}
 	maxResourceSizeName        = xml.Name{namespace, "max-resource-size"}
 
 	addressBookQueryName    = xml.Name{namespace, "addressbook-query"}
@@ -62,6 +63,12 @@ type addressDataType struct {
 	XMLName     xml.Name `xml:"urn:ietf:params:xml:ns:carddav address-data-type"`
 	ContentType string   `xml:"content-type,attr"`
 	Version     string   `xml:"version,attr"`
+}
+
+// https://tools.ietf.org/html/rfc6352#section-8.3.1
+type supportedCollationSet struct {
+	XMLName    xml.Name `xml:"urn:ietf:params:xml:ns:carddav supported-collation-set"`
+	Collations []string `xml:"supported-collation"`
 }
 
 // https://tools.ietf.org/html/rfc6352#section-6.2.3

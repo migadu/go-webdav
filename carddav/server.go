@@ -277,9 +277,15 @@ func decodeTextMatch(tm *textMatch) (*TextMatch, error) {
 	if !internal.IsSupportedCollation(tm.Collation) {
 		return nil, newPreconditionError(http.StatusForbidden, PreconditionSupportedCollation)
 	}
+	collation := tm.Collation
+	// "default" names the default collation (RFC 6352 section 8.3), which
+	// backends get as an empty Collation
+	if collation == internal.CollationDefault {
+		collation = ""
+	}
 	return &TextMatch{
 		Text:            tm.Text,
-		Collation:       tm.Collation,
+		Collation:       collation,
 		NegateCondition: bool(tm.NegateCondition),
 		MatchType:       MatchType(tm.MatchType),
 	}, nil
@@ -802,6 +808,11 @@ func (b *backend) propFindAddressBook(ctx context.Context, propfind *internal.Pr
 				{ContentType: vcard.MIMEType, Version: "3.0"},
 				{ContentType: vcard.MIMEType, Version: "4.0"},
 			},
+		}),
+		// addressbook-query, the REPORT which does text matching, is served
+		// for address books (RFC 6352 section 8.3)
+		supportedCollationSetName: internal.PropFindValue(&supportedCollationSet{
+			Collations: internal.SupportedCollations(),
 		}),
 		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(internal.NewCurrentUserPrivilegeSet(ab.ReadOnly)),
 		internal.SupportedReportSetName:      internal.PropFindValue(b.supportedReportSet()),
