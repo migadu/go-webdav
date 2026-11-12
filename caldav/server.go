@@ -453,9 +453,20 @@ func decodeFilter(el *filter) (*CompFilter, error) {
 	return decodeCompFilter(&el.CompFilters[0])
 }
 
+// decodeComp decodes a CALDAV:comp element of the calendar-data of a REPORT
+// request (RFC 4791 section 9.6.1). The requests for components of the same
+// type are merged (see mergeCompRequests).
 func decodeComp(comp *comp) (*CalendarCompRequest, error) {
-	if comp == nil {
-		return nil, internal.HTTPErrorf(http.StatusBadRequest, "caldav: unexpected empty calendar-data in request")
+	// <!ATTLIST comp name CDATA #REQUIRED> (section 9.6.1), and
+	// <!ATTLIST prop name CDATA #REQUIRED novalue (yes | no) "no">
+	// (section 9.6.4)
+	if comp.Name == "" {
+		return nil, internal.HTTPErrorf(http.StatusBadRequest, "caldav: comp without a name in calendar-data")
+	}
+	for _, p := range comp.Prop {
+		if p.Name == "" {
+			return nil, internal.HTTPErrorf(http.StatusBadRequest, "caldav: prop without a name in calendar-data")
+		}
 	}
 	if comp.Allprop != nil && len(comp.Prop) > 0 {
 		return nil, internal.HTTPErrorf(http.StatusBadRequest, "caldav: only one of allprop or prop can be specified in calendar-data")
@@ -490,6 +501,8 @@ func decodeComp(comp *comp) (*CalendarCompRequest, error) {
 		}
 		req.Comps = append(req.Comps, *comp)
 	}
+	// The backend gets a single request for each component type
+	req.Comps = mergeCompRequests(req.Comps)
 	return req, nil
 }
 
@@ -510,6 +523,7 @@ func decodeCalendarDataReq(calendarData *calendarDataReq) (*CalendarCompRequest,
 		name string
 		n    int
 	}{
+		{"comp", len(calendarData.Comp)},
 		{"expand", len(calendarData.Expand)},
 		{"limit-recurrence-set", len(calendarData.LimitRecurrenceSet)},
 		{"limit-freebusy-set", len(calendarData.LimitFreeBusySet)},
@@ -523,14 +537,19 @@ func decodeCalendarDataReq(calendarData *calendarDataReq) (*CalendarCompRequest,
 	}
 
 	var req *CalendarCompRequest
-	if calendarData.Comp == nil {
+	if len(calendarData.Comp) == 0 {
 		req = &CalendarCompRequest{
 			AllProps: true,
 			AllComps: true,
 		}
+	} else if c := &calendarData.Comp[0]; !strings.EqualFold(c.Name, ical.CompCalendar) {
+		// The outer comp is for the calendar object, which is a VCALENDAR
+		// component (RFC 5545 section 3.4): another name asks for none of
+		// it, which is no request a client means to make
+		return nil, internal.HTTPErrorf(http.StatusBadRequest, "caldav: the outer comp of calendar-data must be %v, not %q", ical.CompCalendar, c.Name)
 	} else {
 		var err error
-		if req, err = decodeComp(calendarData.Comp); err != nil {
+		if req, err = decodeComp(c); err != nil {
 			return nil, err
 		}
 	}

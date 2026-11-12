@@ -153,13 +153,18 @@ type CalendarUpdate struct {
 // section 9.6 allows: the client is to ask for what it needs.
 type CalendarCompRequest struct {
 	// Name is the name of the component, compared case-insensitively. That
-	// of the outermost request isn't checked: a Client sends VCALENDAR for
-	// an empty one.
+	// of the outermost request is VCALENDAR, the component of calendar
+	// objects (RFC 5545 section 3.4): a Client sends VCALENDAR for an empty
+	// one and refuses another, and the Handler refuses another one in a
+	// request. Filter applies the outermost request to the calendar object
+	// whatever its name.
 	Name string
 
 	AllProps bool
 	// Props lists the names of the properties to return, compared
-	// case-insensitively.
+	// case-insensitively. They can't be empty: a Client refuses to send
+	// one, and the Handler refuses one in a request (RFC 4791 section
+	// 9.6.4).
 	Props []string
 	// NoValue lists the names of Props requested with novalue="yes": the
 	// properties they name are returned with their parameters, but with an
@@ -168,8 +173,11 @@ type CalendarCompRequest struct {
 	NoValue []string
 
 	AllComps bool
-	// Comps lists the requests for the components to return. A component
-	// is returned as the first request with its name asks for it.
+	// Comps lists the requests for the components to return. Several
+	// requests for the same component type are merged: a component is
+	// returned with the parts any of them asks for, and a property asked
+	// for with its value by any of them keeps it. The Handler merges those
+	// of a request before passing it to the backend.
 	Comps []CalendarCompRequest
 
 	// The fields below apply to the whole calendar data, so only the

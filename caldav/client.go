@@ -420,6 +420,10 @@ func encodeCalendarCompReq(c *CalendarCompRequest) (*comp, error) {
 		encoded.Allprop = &struct{}{}
 	}
 	for _, name := range c.Props {
+		if name == "" {
+			// The name attribute is required (RFC 4791 section 9.6.4)
+			return nil, fmt.Errorf("caldav: missing property name in calendar data request")
+		}
 		encoded.Prop = append(encoded.Prop, prop{
 			Name:    name,
 			NoValue: noValue(containsFold(c.NoValue, name)),
@@ -454,6 +458,10 @@ func encodeCalendarReq(c *CalendarCompRequest) (*internal.Prop, error) {
 		withName := *c
 		withName.Name = ical.CompCalendar
 		c = &withName
+	} else if !c.isEmpty() && !strings.EqualFold(c.Name, ical.CompCalendar) {
+		// As the server refuses it: a calendar object is a VCALENDAR
+		// component (RFC 5545 section 3.4)
+		return nil, fmt.Errorf("caldav: the outer CalendarCompRequest must be %v, not %q", ical.CompCalendar, c.Name)
 	}
 	compReq, err := encodeCalendarCompReq(c)
 	if err != nil {
@@ -462,7 +470,10 @@ func encodeCalendarReq(c *CalendarCompRequest) (*internal.Prop, error) {
 
 	// The time ranges are checked as the server checks them, a zero time
 	// being a missing attribute
-	calDataReq := calendarDataReq{Comp: compReq}
+	var calDataReq calendarDataReq
+	if compReq != nil {
+		calDataReq.Comp = []comp{*compReq}
+	}
 	if e := c.Expand; e != nil {
 		tr := newRequiredTimeRange(e.Start, e.End)
 		if err := tr.check("expand"); err != nil {
