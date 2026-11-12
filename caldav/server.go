@@ -505,11 +505,6 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *cal
 		AllProp:  query.AllProp,
 		PropName: query.PropName,
 	}
-	// Check it before the backend is queried: otherwise the request fails
-	// only if an object matches
-	if err := internal.CheckPropFind(&propfind); err != nil {
-		return err
-	}
 
 	var q CalendarQuery
 	if query.Prop != nil {
@@ -567,10 +562,6 @@ func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multige
 		Prop:     multiget.Prop,
 		AllProp:  multiget.AllProp,
 		PropName: multiget.PropName,
-	}
-	// Check it before the responses for missing objects are written
-	if err := internal.CheckPropFind(&propfind); err != nil {
-		return err
 	}
 
 	var dataReq CalendarCompRequest
@@ -1180,6 +1171,14 @@ func (b *backend) propFindAllCalendars(ctx context.Context, mw *internal.MultiSt
 }
 
 func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal.PropFind, report bool, co *CalendarObject) (*internal.Response, error) {
+	// Unlike a PROPFIND request, a calendar-query or calendar-multiget
+	// REPORT doesn't have to ask for properties (RFC 4791 sections 9.5 and
+	// 9.10). Each object found still gets a response, with only a status
+	// (RFC 4918 section 14.24).
+	if report && !propfind.AsksForProps() {
+		return internal.NewOKResponse(co.Path), nil
+	}
+
 	props := map[xml.Name]internal.PropFindFunc{
 		internal.CurrentUserPrincipalName: func(*internal.RawXMLValue) (interface{}, error) {
 			path, err := b.Backend.CurrentUserPrincipal(ctx)

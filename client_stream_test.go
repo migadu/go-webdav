@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -258,6 +259,146 @@ func TestClientWriteMultiStatusTruncated(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "EOF") {
 				t.Errorf("%v = %v, want an unexpected EOF", op.method, err)
+			}
+		})
+	}
+}
+
+// The multistatus of TestClientMultiStatusMemory: memTestResponses responses
+// with memTestJunkSize bytes of text each, 16 MiB together.
+const (
+	memTestResponses = 128
+	memTestJunkSize  = 128 << 10
+	// The most the live heap may grow by while they're decoded. It leaves
+	// room for many responses at once (the one being decoded, the decoder's
+	// buffers, ...), but not for a quarter of them.
+	memTestMaxGrowth = 4 << 20
+)
+
+// generatedMultiStatus is the body of a 207 Multi-Status response made of n
+// responses, each returned by resp. They are generated as they're read,
+// rather than held in memory. Once the last one has been read, onEnd is
+// called before the end of the multistatus can be.
+type generatedMultiStatus struct {
+	n     int
+	resp  func(i int) string
+	onEnd func()
+
+	buf   strings.Reader
+	i     int // the next response
+	stage int // 0: the start, 1: the responses, 2: the end, 3: EOF
+}
+
+func (g *generatedMultiStatus) Read(p []byte) (int, error) {
+	for g.buf.Len() == 0 {
+		switch g.stage {
+		case 0:
+			g.buf.Reset(`<?xml version="1.0" encoding="utf-8"?>` + "\n" + `<D:multistatus xmlns:D="DAV:">`)
+			g.stage++
+		case 1:
+			if g.i < g.n {
+				g.buf.Reset(g.resp(g.i))
+				g.i++
+			} else {
+				g.stage++
+			}
+		case 2:
+			g.buf.Reset(`</D:multistatus>`)
+			g.stage++
+			g.onEnd()
+		default:
+			return 0, io.EOF
+		}
+	}
+	return g.buf.Read(p)
+}
+
+// bodyClient answers every request with a 207 Multi-Status response with
+// the body body, without a server: nothing else allocates memory while the
+// client decodes it.
+type bodyClient struct {
+	body io.Reader
+}
+
+func (c bodyClient) Do(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		io.Copy(io.Discard, req.Body)
+		req.Body.Close()
+	}
+	return &http.Response{
+		Status:        "207 Multi-Status",
+		StatusCode:    http.StatusMultiStatus,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        http.Header{"Content-Type": {`application/xml; charset="utf-8"`}},
+		Body:          io.NopCloser(c.body),
+		ContentLength: -1,
+		Request:       req,
+	}, nil
+}
+
+// liveHeap returns the size of the objects still reachable on the heap.
+func liveHeap() uint64 {
+	runtime.GC()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return ms.HeapAlloc
+}
+
+// ReadDir and the methods answered with the status of each member (RemoveAll,
+// Copy and Move) don't keep the responses of a multistatus once they're
+// converted, as they did when they decoded the whole multistatus first. The
+// results are the same either way: only the memory used tells them apart.
+// Each response has a large element the methods drop: a property ReadDir
+// didn't ask for (servers may return more), the description of a member
+// deleted.
+func TestClientMultiStatusMemory(t *testing.T) {
+	junk := strings.Repeat("a", memTestJunkSize)
+	for _, tc := range []struct {
+		name string
+		resp func(i int) string
+		call func(c *webdav.Client) error
+	}{
+		{"ReadDir", func(i int) string {
+			return fmt.Sprintf(`<D:response><D:href>/dir/f%d.txt</D:href><D:propstat><D:prop>`+
+				`<D:resourcetype/><D:getcontentlength>1</D:getcontentlength>`+
+				`<X:junk xmlns:X="urn:x">%s</X:junk>`+
+				`</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`, i, junk)
+		}, func(c *webdav.Client) error {
+			fis, err := c.ReadDir(context.Background(), "/dir/", false)
+			if err == nil && len(fis) != memTestResponses {
+				err = fmt.Errorf("got %d files, want %d", len(fis), memTestResponses)
+			}
+			return err
+		}},
+		{"RemoveAll", func(i int) string {
+			return fmt.Sprintf(`<D:response><D:href>/dir/f%d.txt</D:href><D:status>HTTP/1.1 204 No Content</D:status>`+
+				`<D:responsedescription>%s</D:responsedescription></D:response>`, i, junk)
+		}, func(c *webdav.Client) error {
+			return c.RemoveAll(context.Background(), "/dir/")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var end uint64
+			body := &generatedMultiStatus{n: memTestResponses, resp: tc.resp, onEnd: func() {
+				end = liveHeap()
+			}}
+			c, err := webdav.NewClient(bodyClient{body}, "http://dav.example.com/")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			before := liveHeap()
+			if err := tc.call(c); err != nil {
+				t.Fatal(err)
+			}
+			if end == 0 {
+				t.Fatal("the multistatus wasn't read to its end")
+			}
+			if end > before && end-before > memTestMaxGrowth {
+				t.Errorf("the live heap grew by %v MiB while %v responses of %v KiB were decoded, want less than %v MiB",
+					(end-before)>>20, memTestResponses, memTestJunkSize>>10, memTestMaxGrowth>>20)
 			}
 		})
 	}
