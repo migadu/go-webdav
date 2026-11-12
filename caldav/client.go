@@ -854,10 +854,12 @@ func (c *Client) PutCalendarObject(ctx context.Context, path string, cal *ical.C
 // specified resource, as defined in RFC 6578.
 //
 // Members the server couldn't report, such as changed calendar objects it
-// failed to retrieve, are returned as an error made of HrefErrors, along
-// with the SyncResponse holding the other changes. The new SyncToken covers
-// their changes too, so a caller keeping it should fetch them otherwise, for
-// instance with MultiGetCalendar.
+// failed to retrieve, and members whose properties or data can't be decoded
+// are returned as an error made of HrefErrors, along with the SyncResponse
+// holding the other changes. The new SyncToken covers their changes too, so
+// a caller keeping it should fetch them otherwise, for instance with
+// MultiGetCalendar. A response without a sync token is an error, with no
+// SyncResponse.
 func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQuery) (*SyncResponse, error) {
 	var limit *internal.Limit
 	if query.Limit > 0 {
@@ -885,7 +887,15 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 			case !errors.As(err, &httpErr):
 				errs = append(errs, err)
 			case httpErr.Code == http.StatusNotFound && len(resp.Hrefs) > 0:
-				ret.Deleted = append(ret.Deleted, resp.Paths()...)
+				// Only members can be removed (RFC 6578 section 3.2): a
+				// 404 Not Found for the collection itself is an error
+				for _, p := range resp.Paths() {
+					if internal.SamePath(p, collectionPath) {
+						errs = append(errs, err)
+					} else {
+						ret.Deleted = append(ret.Deleted, p)
+					}
+				}
 			case httpErr.Code == http.StatusInsufficientStorage &&
 				(len(resp.Hrefs) == 0 || (len(resp.Hrefs) == 1 && internal.SamePath(p, collectionPath))):
 				// The server reports a truncated result on the request-URI
@@ -901,6 +911,14 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 			return nil
 		}
 
+		// A member the client can't decode is reported as an error, like one
+		// the server failed to retrieve, rather than failing the whole sync:
+		// the other changes are still valid
+		memberErr := func(err error) error {
+			errs = append(errs, &internal.HrefError{Href: url.URL(resp.Hrefs[0]), Err: err})
+			return nil
+		}
+
 		// A changed member can't have an error status (RFC 6578 section
 		// 3.2): the server reports one it failed to retrieve with failed
 		// propstats instead. Report it as an error too, rather than as
@@ -912,17 +930,17 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 
 		var getLastMod internal.GetLastModified
 		if err := resp.DecodeProp(&getLastMod); err != nil && !internal.IsNotFound(err) {
-			return err
+			return memberErr(err)
 		}
 
 		var getETag internal.GetETag
 		if err := resp.DecodeProp(&getETag); err != nil && !internal.IsNotFound(err) {
-			return err
+			return memberErr(err)
 		}
 
 		var getContentLength internal.GetContentLength
 		if err := resp.DecodeProp(&getContentLength); err != nil && !internal.IsNotFound(err) {
-			return err
+			return memberErr(err)
 		}
 
 		o := CalendarObject{
@@ -940,11 +958,11 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 		if err := resp.DecodeProp(&calData); err == nil {
 			cal, err := ical.NewDecoder(bytes.NewReader(calData.Data)).Decode()
 			if err != nil {
-				return err
+				return memberErr(err)
 			}
 			o.Data = cal
 		} else if !internal.IsNotFound(err) {
-			return err
+			return memberErr(err)
 		}
 
 		ret.Updated = append(ret.Updated, o)
@@ -952,6 +970,13 @@ func (c *Client) SyncCollection(ctx context.Context, path string, query *SyncQue
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	// The response "MUST contain one DAV:sync-token element" (RFC 6578
+	// section 3.2): without one, a caller would replace its token with an
+	// empty one, and start over
+	if strings.TrimSpace(ms.SyncToken) == "" {
+		return nil, fmt.Errorf("caldav: sync-collection response without DAV:sync-token")
 	}
 
 	ret.SyncToken = ms.SyncToken
