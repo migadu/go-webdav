@@ -423,10 +423,12 @@ func downgradeTrigger(req, sup *PushTrigger) *PushTrigger {
 	return &t
 }
 
-// absoluteURL resolves ref against the URL of the request r. An absolute URL
-// is returned as is. If r has no host, its URL isn't known: ref is only
-// resolved against its path, and the client resolves the result against the
-// request URL (RFC 9110 section 10.2.2).
+// absoluteURL resolves ref against the URL of the request r, for the Location
+// header field of a registration, which must be an absolute URL
+// (draft-bitfire-webdav-push section 3.1.3). An absolute URL is returned as
+// is. It fails if the result has no host, which a client couldn't send the
+// DELETE request removing the registration to: for a path if r has no host,
+// as the URL of r isn't known then, or for an absolute URL without a host.
 func absoluteURL(r *http.Request, ref string) (string, error) {
 	u, err := url.Parse(ref)
 	if err != nil {
@@ -435,15 +437,15 @@ func absoluteURL(r *http.Request, ref string) (string, error) {
 	if u.IsAbs() && u.Host != "" {
 		return ref, nil
 	}
-	base := url.URL{Path: r.URL.Path}
-	if r.Host != "" {
-		base.Scheme = "http"
-		base.Host = r.Host
-		if r.TLS != nil {
-			base.Scheme = "https"
-		}
+	base := url.URL{Scheme: "http", Host: r.Host, Path: r.URL.Path}
+	if r.TLS != nil {
+		base.Scheme = "https"
 	}
-	return base.ResolveReference(u).String(), nil
+	loc := base.ResolveReference(u)
+	if loc.Host == "" {
+		return "", fmt.Errorf("webdav: can't make push registration URL %q absolute, with request host %q", ref, r.Host)
+	}
+	return loc.String(), nil
 }
 
 // ServeUnregister serves the removal of a push subscription registration, a

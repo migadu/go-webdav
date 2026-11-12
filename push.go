@@ -133,9 +133,9 @@ type WebPushSubscription = push.WebPushSubscription
 //     updated. The server replies with an absolute URL: a URL reference
 //     such as a path is resolved against the URL of the request, made of the
 //     Host header field and of https if the request was received over TLS,
-//     http otherwise. If the request has no host, the reference is only
-//     resolved against its path. A server behind a reverse proxy may need to
-//     return an absolute URL.
+//     http otherwise. The registration fails if that gives a URL without a
+//     host, for instance for a path when the request has no host. A server
+//     behind a reverse proxy may need to return an absolute URL.
 //   - Expires time.Time: the expiration time of the registration, which must
 //     be set. It can be earlier than the time requested by the client.
 type PushRegistration = push.PushRegistration

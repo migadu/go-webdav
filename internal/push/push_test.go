@@ -410,22 +410,30 @@ func TestServeRegisterBackendError(t *testing.T) {
 	}
 }
 
+// The Location header field of a registration is an absolute URL
+// (draft-bitfire-webdav-push section 3.1.3). When the registration URL can't
+// be made one, the registration fails, as without a registration URL.
 func TestServeRegisterLocation(t *testing.T) {
 	for _, tc := range []struct {
 		url    string
 		tls    bool
 		noHost bool
-		want   string
+		want   string // "" if the registration fails
 	}{
 		{url: "https://dav.example.org/push/a", want: "https://dav.example.org/push/a"},
 		{url: "/push/a", want: "http://example.com/push/a"},
 		{url: "/push/a", tls: true, want: "https://example.com/push/a"},
 		{url: "a", want: "http://example.com/user/calendars/work/a"},
-		// Without a host, the URL can't be absolute: the client resolves
-		// the reference against the request URL (RFC 9110 section 10.2.2)
-		{url: "/push/a", noHost: true, want: "/push/a"},
-		{url: "a", noHost: true, tls: true, want: "/user/calendars/work/a"},
+		{url: "//dav.example.org/push/a", tls: true, want: "https://dav.example.org/push/a"},
+		// Without a host, the request URL isn't known: only an absolute URL
+		// or a network-path reference can be made absolute
 		{url: "https://dav.example.org/push/a", noHost: true, want: "https://dav.example.org/push/a"},
+		{url: "//dav.example.org/push/a", noHost: true, want: "http://dav.example.org/push/a"},
+		{url: "/push/a", noHost: true},
+		{url: "a", noHost: true, tls: true},
+		// Nor is an absolute URL without a host
+		{url: "http:///push/a"},
+		{url: "urn:uuid:6e8bc430-9c3a-11d9-9669-0800200c9a66"},
 	} {
 		b := newFakeBackend()
 		b.reg.URL = tc.url
@@ -438,11 +446,20 @@ func TestServeRegisterLocation(t *testing.T) {
 			r.Host = ""
 		}
 		w := httptest.NewRecorder()
-		if err := ServeRegister(w, r, b, b.info[testPath]); err != nil {
-			t.Fatalf("ServeRegister() = %v", err)
+		err := ServeRegister(w, r, b, b.info[testPath])
+		if tc.want == "" {
+			if err == nil || internal.HTTPErrorFromError(err).Code != http.StatusInternalServerError {
+				t.Errorf("registration URL %q, no host: %v: ServeRegister() = %v, want a 500 error", tc.url, tc.noHost, err)
+			}
+			if loc := w.Header().Get("Location"); loc != "" {
+				t.Errorf("registration URL %q, no host: %v: Location = %q, want none", tc.url, tc.noHost, loc)
+			}
+			continue
 		}
-		if got := w.Header().Get("Location"); got != tc.want {
-			t.Errorf("registration URL %q: Location = %q, want %q", tc.url, got, tc.want)
+		if err != nil {
+			t.Errorf("registration URL %q, no host: %v: ServeRegister() = %v", tc.url, tc.noHost, err)
+		} else if got := w.Header().Get("Location"); got != tc.want {
+			t.Errorf("registration URL %q, no host: %v: Location = %q, want %q", tc.url, tc.noHost, got, tc.want)
 		}
 	}
 }
