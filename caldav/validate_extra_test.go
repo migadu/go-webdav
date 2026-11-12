@@ -73,3 +73,34 @@ END:VCALENDAR`,
 		})
 	}
 }
+
+// Component names are case-insensitive (RFC 5545 section 3.1). The decoder
+// upper-cases them, so ValidateCalendarObject sees a lowercase VTIMEZONE or
+// VEVENT as any other.
+func TestValidateCalendarObjectLowercaseNames(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		data          string
+		wantEventType string
+		wantUID       string
+	}{
+		{"VTIMEZONE only", lowercaseTimezone(calendarTimezoneData), ical.CompTimezone, ""},
+		{
+			"VEVENT with VTIMEZONE",
+			strings.NewReplacer("BEGIN:VEVENT", "Begin:vevent", "END:VEVENT", "End:vevent").Replace(lowercaseTimezone(putTimezoneEventData)),
+			ical.CompEvent,
+			"74855313FA803DA593CD579A@example.com",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cal, err := ical.NewDecoder(strings.NewReader(tc.data)).Decode()
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			eventType, uid, err := ValidateCalendarObject(cal)
+			if err != nil || eventType != tc.wantEventType || uid != tc.wantUID {
+				t.Errorf("ValidateCalendarObject() = (%q, %q, %v), want (%q, %q, nil)", eventType, uid, err, tc.wantEventType, tc.wantUID)
+			}
+		})
+	}
+}

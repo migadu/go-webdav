@@ -1467,6 +1467,8 @@ func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 }
 
 // isTimezoneOnly reports whether cal holds VTIMEZONE components only.
+// Component names are case-insensitive (RFC 5545 section 3.1), but the
+// decoder of go-ical upper-cases them, as ical.NewComponent does.
 func isTimezoneOnly(cal *ical.Calendar) bool {
 	for _, comp := range cal.Children {
 		if comp.Name != ical.CompTimezone {
@@ -1493,8 +1495,13 @@ func (b *backend) checkTimezoneOnly(ctx context.Context, p string) error {
 	}
 	// With a trailing slash, the form RFC 4918 section 5.2 asks clients to
 	// use for collections
-	cal, err := b.Backend.GetCalendar(ctx, path.Dir(path.Clean(p))+"/")
-	if err != nil {
+	calPath := path.Dir(path.Clean(p)) + "/"
+	cal, err := b.Backend.GetCalendar(ctx, calPath)
+	if internal.IsNotFound(err) || (err == nil && cal == nil) {
+		// A PUT without its parent collection fails with 409 Conflict (RFC
+		// 4918 section 9.7.1), not with the 404 Not Found of the calendar
+		return internal.HTTPErrorf(http.StatusConflict, "caldav: no calendar at %q", calPath)
+	} else if err != nil {
 		return err
 	}
 	for _, name := range cal.SupportedComponentSet {
