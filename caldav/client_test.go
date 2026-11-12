@@ -72,7 +72,7 @@ func TestQueryCalendarIsNotDefined(t *testing.T) {
 		},
 	})
 
-	vcal := cq.Filter.CompFilter
+	vcal := cq.Filter.CompFilters[0]
 	if vcal.Name != "VCALENDAR" || vcal.IsNotDefined != nil || len(vcal.CompFilters) != 1 {
 		t.Fatalf("unexpected VCALENDAR comp-filter: %+v", vcal)
 	}
@@ -93,7 +93,7 @@ func TestQueryCalendarIsNotDefined(t *testing.T) {
 	if status.Name != "STATUS" || status.IsNotDefined != nil {
 		t.Errorf("unexpected STATUS prop-filter: %+v", status)
 	}
-	if tm := status.TextMatch; tm == nil || tm.Text != "CANCELLED" || !tm.NegateCondition {
+	if tm := status.TextMatch; len(tm) != 1 || tm[0].Text != "CANCELLED" || !tm[0].NegateCondition {
 		t.Errorf("STATUS prop-filter has text-match %+v, want negated CANCELLED", tm)
 	}
 
@@ -106,8 +106,8 @@ func TestQueryCalendarIsNotDefined(t *testing.T) {
 	}
 
 	// The server side must read the same filter back.
-	if _, err := decodeCompFilter(&cq.Filter.CompFilter); err != nil {
-		t.Errorf("decodeCompFilter() = %v", err)
+	if _, err := decodeFilter(cq.Filter); err != nil {
+		t.Errorf("decodeFilter() = %v", err)
 	}
 }
 
@@ -152,7 +152,7 @@ func TestQueryCalendarIsNotDefinedAlone(t *testing.T) {
 		},
 	})
 
-	vevent := cq.Filter.CompFilter.CompFilters[0]
+	vevent := cq.Filter.CompFilters[0].CompFilters[0]
 
 	valarm := vevent.CompFilters[0]
 	if valarm.IsNotDefined == nil || valarm.TimeRange != nil || len(valarm.PropFilters) != 0 || len(valarm.CompFilters) != 0 {
@@ -170,7 +170,108 @@ func TestQueryCalendarIsNotDefinedAlone(t *testing.T) {
 		t.Errorf("PARTSTAT param-filter = %+v, want only is-not-defined", partstat)
 	}
 
-	if _, err := decodeCompFilter(&cq.Filter.CompFilter); err != nil {
-		t.Errorf("decodeCompFilter() = %v", err)
+	if _, err := decodeFilter(cq.Filter); err != nil {
+		t.Errorf("decodeFilter() = %v", err)
+	}
+}
+
+// The client refuses, without sending it, a filter the server would answer
+// with CALDAV:valid-filter: one which breaks the grammar of RFC 4791 sections
+// 9.7 to 9.7.3, or with a time range whose end isn't after its start once
+// both are truncated to the second, as section 9.9 requires.
+func TestQueryCalendarInvalidFilter(t *testing.T) {
+	var sent bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sent = true
+		http.Error(w, "unexpected request", http.StatusBadRequest)
+	}))
+	defer ts.Close()
+
+	c, err := NewClient(nil, ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both are 20060103T000000Z on the wire
+	subStart := jan2006(3).Add(100 * time.Millisecond)
+	subEnd := subStart.Add(500 * time.Millisecond)
+	vevent := func(cf CompFilter) CompFilter {
+		cf.Name = "VEVENT"
+		return CompFilter{Name: "VCALENDAR", Comps: []CompFilter{cf}}
+	}
+	for _, tc := range []struct {
+		name   string
+		filter CompFilter
+	}{
+		{"comp-filter ending before its start", vevent(CompFilter{Start: jan2006(5), End: jan2006(3)})},
+		{"comp-filter ending at its start", vevent(CompFilter{Start: jan2006(3), End: jan2006(3)})},
+		{"comp-filter shorter than a second", vevent(CompFilter{Start: subStart, End: subEnd})},
+		{"prop-filter ending before its start", vevent(CompFilter{Props: []PropFilter{{
+			Name:  "DTSTAMP",
+			Start: jan2006(5),
+			End:   jan2006(3),
+		}}})},
+		{"prop-filter shorter than a second", vevent(CompFilter{Props: []PropFilter{{
+			Name:  "DTSTAMP",
+			Start: subStart,
+			End:   subEnd,
+		}}})},
+		{"prop-filter with a time range and a text match", vevent(CompFilter{Props: []PropFilter{{
+			Name:      "DTSTAMP",
+			Start:     jan2006(3),
+			TextMatch: &TextMatch{Text: "2006"},
+		}}})},
+		{"VEVENT at the top", CompFilter{Name: "VEVENT"}},
+		{"comp-filter without a name", CompFilter{Name: "VCALENDAR", Comps: []CompFilter{{}}}},
+		{"prop-filter without a name", vevent(CompFilter{Props: []PropFilter{{TextMatch: &TextMatch{Text: "Meet"}}}})},
+		{"param-filter without a name", vevent(CompFilter{Props: []PropFilter{{
+			Name:        "ATTENDEE",
+			ParamFilter: []ParamFilter{{IsNotDefined: true}},
+		}}})},
+	} {
+		sent = false
+		_, err := c.QueryCalendar(context.Background(), "/user/calendars/cal/", &CalendarQuery{CompFilter: tc.filter})
+		if err == nil {
+			t.Errorf("%v: QueryCalendar() succeeded", tc.name)
+		}
+		if sent {
+			t.Errorf("%v: QueryCalendar() sent the request, and got: %v", tc.name, err)
+		}
+	}
+}
+
+// The outer comp-filter is the calendar object (RFC 4791 section 9.7.1), so
+// a CompFilter without a name is sent as VCALENDAR, as a CalendarCompRequest
+// is.
+func TestQueryCalendarFilterDefaultName(t *testing.T) {
+	cq := queryCalendarRequest(t, &CalendarQuery{
+		CompFilter: CompFilter{Comps: []CompFilter{{Name: "VEVENT"}}},
+	})
+	if _, err := decodeFilter(cq.Filter); err != nil {
+		t.Errorf("decodeFilter() = %v", err)
+	}
+	vcal := cq.Filter.CompFilters[0]
+	if vcal.Name != "VCALENDAR" || len(vcal.CompFilters) != 1 || vcal.CompFilters[0].Name != "VEVENT" {
+		t.Errorf("comp-filter = %+v, want VEVENT in VCALENDAR", vcal)
+	}
+}
+
+// A time range shorter than a second which crosses a second boundary is
+// valid on the wire, and goes out with each bound truncated to the second.
+func TestQueryCalendarFilterSubSecondTimeRange(t *testing.T) {
+	start := jan2006(3).Add(900 * time.Millisecond)
+	end := start.Add(200 * time.Millisecond)
+	cq := queryCalendarRequest(t, &CalendarQuery{
+		CompFilter: CompFilter{
+			Name:  "VCALENDAR",
+			Comps: []CompFilter{{Name: "VEVENT", Start: start, End: end}},
+		},
+	})
+	cf, err := decodeFilter(cq.Filter)
+	if err != nil {
+		t.Fatalf("decodeFilter() = %v", err)
+	}
+	wantStart, wantEnd := jan2006(3), jan2006(3).Add(time.Second)
+	if c := cf.Comps[0]; !c.Start.Equal(wantStart) || !c.End.Equal(wantEnd) {
+		t.Errorf("sent time range [%v, %v), want [%v, %v)", c.Start, c.End, wantStart, wantEnd)
 	}
 }

@@ -466,64 +466,119 @@ func encodeCalendarReq(c *CalendarCompRequest) (*internal.Prop, error) {
 	return internal.EncodeProp(&calDataReq, getLastModReq, getETagReq, getContentLengthReq)
 }
 
-func encodeCompFilter(filter *CompFilter) *compFilter {
+// encodeFilter returns the filter of a calendar-query whose comp-filter is
+// cf. That comp-filter targets the calendar object (RFC 4791 section 9.7.1):
+// without a name, it's VCALENDAR, and any other name is refused, as the
+// server refuses it.
+func encodeFilter(cf *CompFilter) (*filter, error) {
+	if cf.Name == "" {
+		withName := *cf
+		withName.Name = ical.CompCalendar
+		cf = &withName
+	} else if !strings.EqualFold(cf.Name, ical.CompCalendar) {
+		return nil, fmt.Errorf("caldav: the outer CompFilter must be %v, not %q", ical.CompCalendar, cf.Name)
+	}
+	encoded, err := encodeCompFilter(cf)
+	if err != nil {
+		return nil, err
+	}
+	return &filter{CompFilters: []compFilter{*encoded}}, nil
+}
+
+// encodeCompFilter returns the comp-filter element for filter. Like its
+// prop-filter and param-filter elements, it's checked as the server checks
+// it: RFC 4791 sections 9.7.1 to 9.7.3 require a name, and section 9.9 a
+// time range whose end is after its start.
+func encodeCompFilter(filter *CompFilter) (*compFilter, error) {
+	if filter.Name == "" {
+		return nil, fmt.Errorf("caldav: a CompFilter requires a Name")
+	}
 	encoded := compFilter{Name: filter.Name}
 	if filter.IsNotDefined {
 		// is-not-defined can't have siblings, see RFC 4791 section 9.7.1
-		encoded.IsNotDefined = &struct{}{}
-		return &encoded
+		encoded.IsNotDefined = []struct{}{{}}
+		return &encoded, nil
 	}
 	if !filter.Start.IsZero() || !filter.End.IsZero() {
-		encoded.TimeRange = newTimeRange(filter.Start, filter.End)
+		tr := newTimeRange(filter.Start, filter.End)
+		if err := tr.check(); err != nil {
+			return nil, err
+		}
+		encoded.TimeRange = []timeRange{tr}
 	}
 	for _, child := range filter.Comps {
-		encoded.CompFilters = append(encoded.CompFilters, *encodeCompFilter(&child))
+		el, err := encodeCompFilter(&child)
+		if err != nil {
+			return nil, err
+		}
+		encoded.CompFilters = append(encoded.CompFilters, *el)
 	}
 	for _, pf := range filter.Props {
-		encoded.PropFilters = append(encoded.PropFilters, *encodePropFilter(&pf))
+		el, err := encodePropFilter(&pf)
+		if err != nil {
+			return nil, err
+		}
+		encoded.PropFilters = append(encoded.PropFilters, *el)
 	}
-	return &encoded
+	return &encoded, nil
 }
 
-func encodePropFilter(filter *PropFilter) *propFilter {
+func encodePropFilter(filter *PropFilter) (*propFilter, error) {
+	if filter.Name == "" {
+		return nil, fmt.Errorf("caldav: a PropFilter requires a Name")
+	}
 	encoded := propFilter{Name: filter.Name}
 	if filter.IsNotDefined {
 		// is-not-defined can't have siblings, see RFC 4791 section 9.7.2
-		encoded.IsNotDefined = &struct{}{}
-		return &encoded
+		encoded.IsNotDefined = []struct{}{{}}
+		return &encoded, nil
 	}
 	if !filter.Start.IsZero() || !filter.End.IsZero() {
-		encoded.TimeRange = newTimeRange(filter.Start, filter.End)
+		// (time-range | text-match)?, see RFC 4791 section 9.7.2
+		if filter.TextMatch != nil {
+			return nil, fmt.Errorf("caldav: PropFilter %v can't have both a time range and a TextMatch", filter.Name)
+		}
+		tr := newTimeRange(filter.Start, filter.End)
+		if err := tr.check(); err != nil {
+			return nil, err
+		}
+		encoded.TimeRange = []timeRange{tr}
 	}
 	encoded.TextMatch = encodeTextMatch(filter.TextMatch)
 	for _, pf := range filter.ParamFilter {
-		encoded.ParamFilter = append(encoded.ParamFilter, encodeParamFilter(pf))
+		el, err := encodeParamFilter(pf)
+		if err != nil {
+			return nil, err
+		}
+		encoded.ParamFilter = append(encoded.ParamFilter, el)
 	}
-	return &encoded
+	return &encoded, nil
 }
 
-func encodeParamFilter(pf ParamFilter) paramFilter {
+func encodeParamFilter(pf ParamFilter) (paramFilter, error) {
+	if pf.Name == "" {
+		return paramFilter{}, fmt.Errorf("caldav: a ParamFilter requires a Name")
+	}
 	encoded := paramFilter{Name: pf.Name}
 	if pf.IsNotDefined {
 		// is-not-defined can't have siblings, see RFC 4791 section 9.7.3
-		encoded.IsNotDefined = &struct{}{}
-		return encoded
+		encoded.IsNotDefined = []struct{}{{}}
+		return encoded, nil
 	}
 	encoded.TextMatch = encodeTextMatch(pf.TextMatch)
-	return encoded
+	return encoded, nil
 }
 
-func encodeTextMatch(tm *TextMatch) *textMatch {
+// encodeTextMatch returns the text-match elements for tm: none if tm is nil.
+func encodeTextMatch(tm *TextMatch) []textMatch {
 	if tm == nil {
 		return nil
 	}
-
-	encoded := &textMatch{
+	return []textMatch{{
 		Text:            tm.Text,
 		Collation:       tm.Collation,
 		NegateCondition: negateCondition(tm.NegateCondition),
-	}
-	return encoded
+	}}
 }
 
 // doCalendarObjectList performs req, a calendar-query or calendar-multiget
@@ -587,8 +642,12 @@ func (c *Client) QueryCalendar(ctx context.Context, calendar string, query *Cale
 		return nil, err
 	}
 
-	calendarQuery := calendarQuery{Prop: propReq}
-	calendarQuery.Filter.CompFilter = *encodeCompFilter(&query.CompFilter)
+	filter, err := encodeFilter(&query.CompFilter)
+	if err != nil {
+		return nil, err
+	}
+
+	calendarQuery := calendarQuery{Prop: propReq, Filter: filter}
 	req, err := c.ic.NewXMLRequest("REPORT", calendar, &calendarQuery)
 	if err != nil {
 		return nil, err

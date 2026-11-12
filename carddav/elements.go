@@ -160,11 +160,15 @@ func (mt *matchType) UnmarshalText(b []byte) error {
 }
 
 // https://tools.ietf.org/html/rfc6352#section-10.5.2
+//
+// The param-filter holds at most one text-match. TextMatch is a slice to tell
+// a repeated one, which encoding/xml would decode onto the first one, from a
+// single one.
 type paramFilter struct {
-	XMLName      xml.Name   `xml:"urn:ietf:params:xml:ns:carddav param-filter"`
-	Name         string     `xml:"name,attr"`
-	IsNotDefined *struct{}  `xml:"is-not-defined"`
-	TextMatch    *textMatch `xml:"text-match"`
+	XMLName      xml.Name    `xml:"urn:ietf:params:xml:ns:carddav param-filter"`
+	Name         string      `xml:"name,attr"`
+	IsNotDefined *struct{}   `xml:"is-not-defined"`
+	TextMatch    []textMatch `xml:"text-match"`
 }
 
 // https://tools.ietf.org/html/rfc6352#section-10.6

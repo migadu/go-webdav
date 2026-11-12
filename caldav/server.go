@@ -339,17 +339,25 @@ func newSupportedCollationSet() *supportedCollationSet {
 	return &supportedCollationSet{Collations: internal.SupportedCollations()}
 }
 
-func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {
-	pf := &ParamFilter{Name: el.Name}
-	if el.IsNotDefined != nil {
-		// RFC 4791 section 9.7.3: (is-not-defined | text-match?)
-		if el.TextMatch != nil {
-			return nil, newPreconditionError(http.StatusForbidden, PreconditionValidFilter)
-		}
-		pf.IsNotDefined = true
+// decodeTimeRange returns the bounds of a time-range filter, zero when
+// unbounded. They're compared as they were parsed, which is how the backend
+// gets them.
+func decodeTimeRange(tr *timeRange) (start, end time.Time, err error) {
+	if err := tr.check(); err != nil {
+		return time.Time{}, time.Time{}, newPreconditionError(http.StatusForbidden, PreconditionValidFilter)
 	}
-	if el.TextMatch != nil {
-		tm, err := decodeTextMatch(el.TextMatch)
+	start, end = tr.bounds()
+	return start, end, nil
+}
+
+func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {
+	// RFC 4791 section 9.7.3: (is-not-defined | text-match?), and a name
+	if el.Name == "" || len(el.IsNotDefined)+len(el.TextMatch) > 1 {
+		return nil, newPreconditionError(http.StatusForbidden, PreconditionValidFilter)
+	}
+	pf := &ParamFilter{Name: el.Name, IsNotDefined: len(el.IsNotDefined) > 0}
+	if len(el.TextMatch) > 0 {
+		tm, err := decodeTextMatch(&el.TextMatch[0])
 		if err != nil {
 			return nil, err
 		}
@@ -359,24 +367,25 @@ func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {
 }
 
 func decodePropFilter(el *propFilter) (*PropFilter, error) {
-	pf := &PropFilter{Name: el.Name}
-	if el.IsNotDefined != nil {
-		// RFC 4791 section 9.7.2: (is-not-defined | ((time-range |
-		// text-match)?, param-filter*))
-		if el.TextMatch != nil || el.TimeRange != nil || len(el.ParamFilter) > 0 {
-			return nil, newPreconditionError(http.StatusForbidden, PreconditionValidFilter)
-		}
-		pf.IsNotDefined = true
+	// RFC 4791 section 9.7.2: (is-not-defined | ((time-range |
+	// text-match)?, param-filter*)), and a name
+	n := len(el.IsNotDefined) + len(el.TimeRange) + len(el.TextMatch)
+	if el.Name == "" || n > 1 || (len(el.IsNotDefined) > 0 && len(el.ParamFilter) > 0) {
+		return nil, newPreconditionError(http.StatusForbidden, PreconditionValidFilter)
 	}
-	if el.TextMatch != nil {
-		tm, err := decodeTextMatch(el.TextMatch)
+	pf := &PropFilter{Name: el.Name, IsNotDefined: len(el.IsNotDefined) > 0}
+	if len(el.TextMatch) > 0 {
+		tm, err := decodeTextMatch(&el.TextMatch[0])
 		if err != nil {
 			return nil, err
 		}
 		pf.TextMatch = tm
 	}
-	if el.TimeRange != nil {
-		pf.Start, pf.End = el.TimeRange.bounds()
+	if len(el.TimeRange) > 0 {
+		var err error
+		if pf.Start, pf.End, err = decodeTimeRange(&el.TimeRange[0]); err != nil {
+			return nil, err
+		}
 	}
 	for _, paramEl := range el.ParamFilter {
 		paramFi, err := decodeParamFilter(&paramEl)
@@ -389,17 +398,18 @@ func decodePropFilter(el *propFilter) (*PropFilter, error) {
 }
 
 func decodeCompFilter(el *compFilter) (*CompFilter, error) {
-	cf := &CompFilter{Name: el.Name}
-	if el.IsNotDefined != nil {
-		// RFC 4791 section 9.7.1: (is-not-defined | (time-range?,
-		// prop-filter*, comp-filter*))
-		if el.TimeRange != nil || len(el.PropFilters) > 0 || len(el.CompFilters) > 0 {
-			return nil, newPreconditionError(http.StatusForbidden, PreconditionValidFilter)
-		}
-		cf.IsNotDefined = true
+	// RFC 4791 section 9.7.1: (is-not-defined | (time-range?, prop-filter*,
+	// comp-filter*)), and a name
+	n := len(el.IsNotDefined) + len(el.TimeRange)
+	if el.Name == "" || n > 1 || (len(el.IsNotDefined) > 0 && (len(el.PropFilters) > 0 || len(el.CompFilters) > 0)) {
+		return nil, newPreconditionError(http.StatusForbidden, PreconditionValidFilter)
 	}
-	if el.TimeRange != nil {
-		cf.Start, cf.End = el.TimeRange.bounds()
+	cf := &CompFilter{Name: el.Name, IsNotDefined: len(el.IsNotDefined) > 0}
+	if len(el.TimeRange) > 0 {
+		var err error
+		if cf.Start, cf.End, err = decodeTimeRange(&el.TimeRange[0]); err != nil {
+			return nil, err
+		}
 	}
 	for _, pfEl := range el.PropFilters {
 		pf, err := decodePropFilter(&pfEl)
@@ -416,6 +426,17 @@ func decodeCompFilter(el *compFilter) (*CompFilter, error) {
 		cf.Comps = append(cf.Comps, *child)
 	}
 	return cf, nil
+}
+
+// decodeFilter decodes the filter of a calendar-query. RFC 4791 section 9.5
+// requires one, and section 9.7 makes it hold a single comp-filter. That
+// comp-filter targets the calendar object (section 9.7.1), so it must be
+// VCALENDAR: the components of the calendar can only be nested in it.
+func decodeFilter(el *filter) (*CompFilter, error) {
+	if el == nil || len(el.CompFilters) != 1 || !strings.EqualFold(el.CompFilters[0].Name, ical.CompCalendar) {
+		return nil, newPreconditionError(http.StatusForbidden, PreconditionValidFilter)
+	}
+	return decodeCompFilter(&el.CompFilters[0])
 }
 
 func decodeComp(comp *comp) (*CalendarCompRequest, error) {
@@ -541,7 +562,7 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *cal
 		}
 		q.CompRequest = *req
 	}
-	cf, err := decodeCompFilter(&query.Filter.CompFilter)
+	cf, err := decodeFilter(query.Filter)
 	if err != nil {
 		return err
 	}

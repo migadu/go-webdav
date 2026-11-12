@@ -16,10 +16,10 @@ func TestDecodeFilterNegateCondition(t *testing.T) {
 			Name: "VEVENT",
 			PropFilters: []propFilter{{
 				Name:      "SUMMARY",
-				TextMatch: &textMatch{Text: "meeting", NegateCondition: true},
+				TextMatch: []textMatch{{Text: "meeting", NegateCondition: true}},
 				ParamFilter: []paramFilter{{
 					Name:      "LANGUAGE",
-					TextMatch: &textMatch{Text: "en", NegateCondition: true},
+					TextMatch: []textMatch{{Text: "en", NegateCondition: true}},
 				}},
 			}},
 		}},
@@ -50,7 +50,7 @@ func TestEncodeOpenTimeRange(t *testing.T) {
 		{"end only", time.Time{}, start, `end="20060104T000000Z"`, `start=`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cf := encodeCompFilter(&CompFilter{
+			cf, err := encodeCompFilter(&CompFilter{
 				Name: "VCALENDAR",
 				Comps: []CompFilter{{
 					Name:  "VEVENT",
@@ -59,6 +59,9 @@ func TestEncodeOpenTimeRange(t *testing.T) {
 					Props: []PropFilter{{Name: "DTSTAMP", Start: tc.start, End: tc.end}},
 				}},
 			})
+			if err != nil {
+				t.Fatalf("encodeCompFilter() = %v", err)
+			}
 			b, err := xml.Marshal(cf)
 			if err != nil {
 				t.Fatal(err)
@@ -84,5 +87,30 @@ func TestEncodeOpenTimeRange(t *testing.T) {
 				t.Errorf("decoded range [%v, %v), want [%v, %v)", c.Start, c.End, tc.start, tc.end)
 			}
 		})
+	}
+}
+
+// Component names are case-insensitive (RFC 5545 section 2), so is the
+// VCALENDAR of the outer comp-filter. A time range of a second is the
+// shortest the "date with UTC time" format can carry.
+func TestDecodeFilterValid(t *testing.T) {
+	body := `<C:calendar-query xmlns:C="urn:ietf:params:xml:ns:caldav"><C:filter>
+  <C:comp-filter name="vcalendar">
+    <C:comp-filter name="VEVENT">
+      <C:time-range start="20060104T000000Z" end="20060104T000001Z"/>
+    </C:comp-filter>
+  </C:comp-filter>
+</C:filter></C:calendar-query>`
+	var cq calendarQuery
+	if err := xml.Unmarshal([]byte(body), &cq); err != nil {
+		t.Fatal(err)
+	}
+	cf, err := decodeFilter(cq.Filter)
+	if err != nil {
+		t.Fatalf("decodeFilter() = %v", err)
+	}
+	start := time.Date(2006, 1, 4, 0, 0, 0, 0, time.UTC)
+	if c := cf.Comps[0]; !c.Start.Equal(start) || !c.End.Equal(start.Add(time.Second)) {
+		t.Errorf("decoded range [%v, %v), want [%v, %v)", c.Start, c.End, start, start.Add(time.Second))
 	}
 }
