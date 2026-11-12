@@ -52,6 +52,14 @@ END:VCALENDAR`,
 			wantUID:       "74855313FA803DA593CD579A@example.com",
 		},
 		{
+			// RFC 5545 section 3.6 allows an iCalendar object with only
+			// VTIMEZONE components, and VTIMEZONE has no UID
+			name:          "VTIMEZONE only",
+			data:          calendarTimezoneData,
+			wantEventType: ical.CompTimezone,
+			wantUID:       "",
+		},
+		{
 			// RFC 4791 appendix B, abcd2.ics without its VTIMEZONE: a
 			// recurring event with overridden instances sharing its UID
 			name: "valid recurring event",

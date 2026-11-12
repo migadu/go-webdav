@@ -14,11 +14,6 @@ func TestValidateCalendarObjectExtraConstraints(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "VTIMEZONE-only calendar without VEVENT/VTODO/VJOURNAL",
-			data:    calendarTimezoneData,
-			wantErr: "component",
-		},
-		{
 			name: "VEVENT with empty UID value",
 			data: `BEGIN:VCALENDAR
 VERSION:2.0
