@@ -742,7 +742,7 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 			if err != nil {
 				return nil, err
 			}
-			return &addressbookHomeSet{Href: &internal.Href{Path: homeSetPath}}, nil
+			return &addressbookHomeSet{Hrefs: []internal.Href{{Path: homeSetPath}}}, nil
 		},
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, internal.PrincipalName)),
 	}
