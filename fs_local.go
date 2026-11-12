@@ -146,9 +146,10 @@ func errFromOS(err error) error {
 // isNotExist reports whether err means that a path names no file: either it
 // doesn't exist, or a component of its parent path, or of the target of a
 // symbolic link it resolves through, isn't a directory but a file (ENOTDIR),
-// which iofs.ErrNotExist doesn't match.
+// or it resolves through symbolic links which loop or are more than os.Root
+// follows (errLoop), neither of which iofs.ErrNotExist matches.
 func isNotExist(err error) bool {
-	return errors.Is(err, iofs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+	return errors.Is(err, iofs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, errLoop)
 }
 
 // isPathEscapesError reports whether an os.Root method failed because the path
@@ -416,12 +417,19 @@ func (fs LocalFileSystem) RemoveAll(ctx context.Context, name string, opts *Remo
 
 	// WebDAV semantics are that it should return a "404 Not Found" error in
 	// case the resource doesn't exist. We need to Stat before RemoveAll.
-	fi, err := statRoot(root, p, name)
+	fi, err := root.Stat(p)
+	if isNotExist(err) {
+		// A symbolic link which doesn't resolve is still listed in its
+		// collection, which ReadDir lists with Lstat: it can be deleted
+		if lfi, lerr := root.Lstat(p); lerr == nil && lfi.Mode()&os.ModeSymlink != 0 {
+			fi, err = lfi, nil
+		}
+	}
 	if err != nil {
-		return err
+		return errFromOS(err)
 	}
 
-	if err := checkConditionalMatches(fi, opts.IfMatch, opts.IfNoneMatch); err != nil {
+	if err := checkConditionalMatches(fileInfoFromOS(name, fi), opts.IfMatch, opts.IfNoneMatch); err != nil {
 		return err
 	}
 

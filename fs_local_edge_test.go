@@ -3,12 +3,14 @@ package webdav_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -246,9 +248,31 @@ func TestLocalFileSystemPathThroughFileNotFound(t *testing.T) {
 	checkTestFile(t, filepath.Join(dir, "file.txt"), "hello")
 }
 
+// brokenLinkTargets are targets of a symbolic link named link, as created by
+// writeBrokenLinkTestDir, which make it a link which doesn't resolve: to a
+// missing file, to a path through a file, to itself, to a link to it, and
+// to a chain of more links than os.Root follows.
+var brokenLinkTargets = []string{"missing", "file.txt/sub", "link", "cycle", "chain1"}
+
+// writeBrokenLinkTestDir creates a directory holding file.txt, src.txt, and a
+// symbolic link named link pointing to target, one of brokenLinkTargets.
+func writeBrokenLinkTestDir(t *testing.T, target string) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "file.txt"), "hello")
+	writeTestFile(t, filepath.Join(dir, "src.txt"), "src")
+	writeTestSymlink(t, filepath.Join(dir, "cycle"), "link")
+	for i := 1; i < 9; i++ {
+		writeTestSymlink(t, filepath.Join(dir, fmt.Sprintf("chain%d", i)), fmt.Sprintf("chain%d", i+1))
+	}
+	writeTestSymlink(t, filepath.Join(dir, "chain9"), "file.txt")
+	writeTestSymlink(t, filepath.Join(dir, "link"), target)
+	return dir
+}
+
 // A symbolic link which doesn't resolve is replaced by PUT, COPY and MOVE
-// like any other destination, whether what it points to is missing or a path
-// through a file.
+// like any other destination, whether what it points to is missing, a path
+// through a file, or links which loop or are too many to follow.
 func TestLocalFileSystemOverwriteBrokenLink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symbolic links")
@@ -272,12 +296,9 @@ func TestLocalFileSystemOverwriteBrokenLink(t *testing.T) {
 		}},
 	}
 	for _, op := range ops {
-		for _, target := range []string{"missing", "file.txt/sub"} {
+		for _, target := range brokenLinkTargets {
 			t.Run(op.name+" onto a link to "+target, func(t *testing.T) {
-				dir := t.TempDir()
-				writeTestFile(t, filepath.Join(dir, "file.txt"), "hello")
-				writeTestFile(t, filepath.Join(dir, "src.txt"), "src")
-				writeTestSymlink(t, filepath.Join(dir, "link"), target)
+				dir := writeBrokenLinkTestDir(t, target)
 				fs := webdav.LocalFileSystem(dir)
 
 				// The link doesn't name an existing resource, but
@@ -296,5 +317,77 @@ func TestLocalFileSystemOverwriteBrokenLink(t *testing.T) {
 				checkTestFile(t, filepath.Join(dir, "file.txt"), "hello")
 			})
 		}
+	}
+}
+
+// A symbolic link which doesn't resolve names no resource to read: GET, HEAD,
+// PROPFIND and COPY of it fail with 404 Not Found, and requests for paths
+// beneath it with 409 Conflict, as it's no collection (RFC 4918 sections
+// 9.3.1, 9.7.1, 9.8.5 and 9.9.4). But it's listed in its collection, and
+// DELETE removes it.
+func TestLocalFileSystemBrokenLink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symbolic links")
+	}
+	ctx := context.Background()
+	for _, target := range brokenLinkTargets {
+		t.Run("link to "+target, func(t *testing.T) {
+			dir := writeBrokenLinkTestDir(t, target)
+			fs := webdav.LocalFileSystem(dir)
+			h := &webdav.Handler{FileSystem: fs}
+
+			for _, tc := range []struct {
+				method, path, dest string
+				want               int
+			}{
+				{method: http.MethodGet, path: "/link", want: http.StatusNotFound},
+				{method: http.MethodHead, path: "/link", want: http.StatusNotFound},
+				{method: "PROPFIND", path: "/link", want: http.StatusNotFound},
+				{method: "COPY", path: "/link", dest: "/copy", want: http.StatusNotFound},
+				{method: http.MethodPut, path: "/link/new.txt", want: http.StatusConflict},
+				{method: "MKCOL", path: "/link/sub", want: http.StatusConflict},
+				{method: "COPY", path: "/src.txt", dest: "/link/copy.txt", want: http.StatusConflict},
+				{method: "MOVE", path: "/src.txt", dest: "/link/moved.txt", want: http.StatusConflict},
+			} {
+				var body io.Reader
+				if tc.method == http.MethodPut {
+					body = strings.NewReader("x")
+				}
+				req := httptest.NewRequest(tc.method, tc.path, body)
+				if tc.dest != "" {
+					req.Header.Set("Destination", tc.dest)
+				}
+				if tc.method == "PROPFIND" {
+					req.Header.Set("Depth", "0")
+				}
+				w := httptest.NewRecorder()
+				h.ServeHTTP(w, req)
+				if w.Code != tc.want {
+					t.Errorf("%v %v: status = %d, want %d; body: %s", tc.method, tc.path, w.Code, tc.want, strings.TrimSpace(w.Body.String()))
+				}
+			}
+
+			if paths := readDirPaths(t, fs, "/", false); !slices.Contains(paths, "/link") {
+				t.Errorf("ReadDir(/) = %v, want /link listed", paths)
+			}
+
+			err := fs.RemoveAll(ctx, "/link", &webdav.RemoveAllOptions{IfMatch: `"nope"`})
+			checkHTTPErrorCode(t, err, http.StatusPreconditionFailed)
+
+			req := httptest.NewRequest(http.MethodDelete, "/link", nil)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != http.StatusNoContent {
+				t.Errorf("DELETE /link: status = %d, want 204; body: %s", w.Code, strings.TrimSpace(w.Body.String()))
+			}
+			checkNotExist(t, filepath.Join(dir, "link"))
+			checkTestFile(t, filepath.Join(dir, "file.txt"), "hello")
+			checkTestFile(t, filepath.Join(dir, "src.txt"), "src")
+			for _, name := range []string{"cycle", "chain1", "chain9"} {
+				if fi, err := os.Lstat(filepath.Join(dir, name)); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+					t.Errorf("%v is gone (%v)", name, err)
+				}
+			}
+		})
 	}
 }
