@@ -317,11 +317,6 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *add
 		AllProp:  query.AllProp,
 		PropName: query.PropName,
 	}
-	// Check it before the backend is queried: otherwise the request fails
-	// only if an object matches
-	if err := internal.CheckPropFind(&propfind); err != nil {
-		return err
-	}
 
 	var q AddressBookQuery
 	if query.Prop != nil {
@@ -392,10 +387,6 @@ func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multige
 		Prop:     multiget.Prop,
 		AllProp:  multiget.AllProp,
 		PropName: multiget.PropName,
-	}
-	// Check it before the responses for missing objects are written
-	if err := internal.CheckPropFind(&propfind); err != nil {
-		return err
 	}
 
 	var dataReq AddressDataRequest
@@ -870,6 +861,14 @@ func (b *backend) propFindAllAddressBooks(ctx context.Context, mw *internal.Mult
 }
 
 func (b *backend) propFindAddressObject(ctx context.Context, propfind *internal.PropFind, report bool, ao *AddressObject) (*internal.Response, error) {
+	// Unlike a PROPFIND request, an addressbook-query or addressbook-multiget
+	// REPORT doesn't have to ask for properties (RFC 6352 sections 10.3 and
+	// 10.7). Each object found still gets a response, with only a status
+	// (RFC 4918 section 14.24).
+	if report && !propfind.AsksForProps() {
+		return internal.NewOKResponse(ao.Path), nil
+	}
+
 	props := map[xml.Name]internal.PropFindFunc{
 		internal.CurrentUserPrincipalName: func(*internal.RawXMLValue) (interface{}, error) {
 			path, err := b.Backend.CurrentUserPrincipal(ctx)

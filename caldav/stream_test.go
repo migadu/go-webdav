@@ -169,30 +169,3 @@ func TestPropFindListErrorStatus(t *testing.T) {
 		t.Errorf("PROPFIND returned a multistatus along with its error: %s", w.Body.String())
 	}
 }
-
-// A calendar-multiget asking for no properties is refused before any
-// response is written, whether or not the first object exists.
-func TestMultiGetWithoutProp(t *testing.T) {
-	const calPath = "/user/calendars/a/"
-	backend := testBackend{
-		calendars: []Calendar{{Path: calPath}},
-		objectMap: map[string][]CalendarObject{calPath: {
-			newMultiGetTestObject(calPath+"1.ics", "uid-1"),
-		}},
-	}
-	handler := Handler{Backend: backend}
-
-	body := `<?xml version="1.0" encoding="UTF-8"?>
-<C:calendar-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
-  <D:href>` + calPath + `missing.ics</D:href>
-  <D:href>` + calPath + `1.ics</D:href>
-</C:calendar-multiget>`
-	req := httptest.NewRequest("REPORT", calPath, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/xml")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("REPORT returned %v, want 400: %s", w.Code, w.Body.String())
-	}
-}

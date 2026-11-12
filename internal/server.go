@@ -617,11 +617,17 @@ func isAllProp(name xml.Name, include *Include) bool {
 	return false
 }
 
+// AsksForProps reports whether a request asks for properties: whether it has
+// a propname, an allprop or a prop element.
+func (propfind *PropFind) AsksForProps() bool {
+	return propfind.PropName != nil || propfind.AllProp != nil || propfind.Prop != nil
+}
+
 // CheckPropFind returns the error NewPropFindResponse fails with for a request
 // which doesn't ask for any properties: one with neither a propname, an
 // allprop nor a prop element.
 func CheckPropFind(propfind *PropFind) error {
-	if propfind.PropName == nil && propfind.AllProp == nil && propfind.Prop == nil {
+	if !propfind.AsksForProps() {
 		return HTTPErrorf(http.StatusBadRequest, "webdav: request missing propname, allprop or prop element")
 	}
 	return nil
