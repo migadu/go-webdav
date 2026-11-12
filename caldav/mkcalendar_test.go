@@ -3,6 +3,7 @@ package caldav
 import (
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -78,6 +79,29 @@ func TestMkcalendar(t *testing.T) {
 	}
 }
 
+// The component types of a calendar are those of RFC 5545 section 3.6 and RFC
+// 7953 section 3.1, or experimental ones (x-comp), whatever their case.
+func TestMkcalendarComponentSet(t *testing.T) {
+	backend := &createBackend{}
+	handler := Handler{Backend: backend}
+
+	req := httptest.NewRequest("MKCALENDAR", "/user/calendars/default/", strings.NewReader(mkcalendarBody(`<C:supported-calendar-component-set>
+  <C:comp name="VEVENT"/><C:comp name="vtodo"/><C:comp name="VJOURNAL"/><C:comp name="VFREEBUSY"/>
+  <C:comp name="VTIMEZONE"/><C:comp name="VAVAILABILITY"/><C:comp name="X-EXAMPLE-COMP"/>
+</C:supported-calendar-component-set>`)))
+	req.Header.Set("Content-Type", "application/xml")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("MKCALENDAR returned %v: %s", w.Code, w.Body.String())
+	}
+	want := []string{"VEVENT", "vtodo", "VJOURNAL", "VFREEBUSY", "VTIMEZONE", "VAVAILABILITY", "X-EXAMPLE-COMP"}
+	if len(backend.created) != 1 || !reflect.DeepEqual(backend.created[0].SupportedComponentSet, want) {
+		t.Errorf("created calendars %+v, want one with components %v", backend.created, want)
+	}
+}
+
 func TestMkcalendarEmptyBody(t *testing.T) {
 	backend := &createBackend{}
 	handler := Handler{Backend: backend}
@@ -149,6 +173,36 @@ func TestMkcalendarErrors(t *testing.T) {
 <A:calendar-order>2</A:calendar-order>`),
 			wantCode: http.StatusMultiStatus,
 			wantBody: "multistatus /user/calendars/work/ 409 {urn:ietf:params:xml:ns:caldav}calendar-timezone error {urn:ietf:params:xml:ns:caldav}valid-calendar-data; 424 {DAV:}displayname,{http://apple.com/ns/ical/}calendar-order",
+		},
+		{
+			// "403 (Forbidden) - The client, for reasons the server
+			// chooses not to specify, cannot alter one of the
+			// properties", with DAV:cannot-modify-protected-property (RFC
+			// 4918 section 9.2.1)
+			name:     "protected property",
+			body:     mkcalendarBody(`<D:displayname>Work</D:displayname><D:sync-token>http://example.com/ns/sync/1</D:sync-token>`),
+			wantCode: http.StatusMultiStatus,
+			wantBody: "multistatus /user/calendars/work/ 403 {DAV:}sync-token error {DAV:}cannot-modify-protected-property; 424 {DAV:}displayname",
+		},
+		{
+			name:     "protected CalDAV property",
+			body:     mkcalendarBody(`<C:max-resource-size>1024</C:max-resource-size>`),
+			wantCode: http.StatusMultiStatus,
+			wantBody: "multistatus /user/calendars/work/ 403 {urn:ietf:params:xml:ns:caldav}max-resource-size error {DAV:}cannot-modify-protected-property",
+		},
+		{
+			// "409 (Conflict) - The client has provided a value whose
+			// semantics are not appropriate for the property"
+			name:     "empty component set",
+			body:     mkcalendarBody(`<D:displayname>Work</D:displayname><C:supported-calendar-component-set/>`),
+			wantCode: http.StatusMultiStatus,
+			wantBody: "multistatus /user/calendars/work/ 409 {urn:ietf:params:xml:ns:caldav}supported-calendar-component-set; 424 {DAV:}displayname",
+		},
+		{
+			name:     "unknown component",
+			body:     mkcalendarBody(`<C:supported-calendar-component-set><C:comp name="VFOO"/></C:supported-calendar-component-set>`),
+			wantCode: http.StatusMultiStatus,
+			wantBody: "multistatus /user/calendars/work/ 409 {urn:ietf:params:xml:ns:caldav}supported-calendar-component-set",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

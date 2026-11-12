@@ -262,12 +262,3 @@ func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 
 	return d.DecodeElement(v, &start)
 }
-
-// mkcolProp holds the properties of an extended MKCOL request which the server
-// reads (RFC 6352 section 6.3.1). The request also sets DAV:resourcetype,
-// which internal.Mkcol.CheckResourceType checks.
-type mkcolProp struct {
-	DisplayName string                 `xml:"DAV: displayname"`
-	Description addressbookDescription `xml:"urn:ietf:params:xml:ns:carddav addressbook-description"`
-	// TODO this could theoretically contain all addressbook properties?
-}

@@ -1139,15 +1139,59 @@ func (b *backend) Mkcol(r *http.Request) error {
 		return newPreconditionError(http.StatusForbidden, PreconditionAddressBookCollectionLocationOk)
 	}
 
-	var prop mkcolProp
-	if err := m.DecodeProp(&prop); err != nil {
-		return err
+	ab := AddressBook{Path: r.URL.Path}
+	if propStats := m.SetProps(func(raw *internal.RawXMLValue) error {
+		return setAddressBookProp(&ab, raw)
+	}); propStats != nil {
+		return m.PropError(propStats)
 	}
-	return b.Backend.CreateAddressBook(r.Context(), &AddressBook{
-		Path:        r.URL.Path,
-		Name:        prop.DisplayName,
-		Description: prop.Description.Description,
-	})
+	return b.Backend.CreateAddressBook(r.Context(), &ab)
+}
+
+// setAddressBookProp sets the field of ab for raw, a property set by an
+// extended MKCOL request (RFC 6352 section 6.3.1). A value the property can't
+// have is a 409 Conflict error, and a protected property, which the client
+// can't set, a 403 Forbidden one (RFC 4918 section 9.2.1).
+//
+// The other properties the server doesn't store are ignored, as for the
+// calendars of the caldav package: refusing the request would leave clients
+// which set properties only meaningful to them unable to create address
+// books. DAV:resourcetype is checked by internal.Mkcol.CheckResourceType.
+func setAddressBookProp(ab *AddressBook, raw *internal.RawXMLValue) error {
+	name, _ := raw.XMLName()
+	switch name {
+	case internal.DisplayNameName:
+		var v internal.DisplayName
+		if err := raw.Decode(&v); err != nil {
+			return &internal.HTTPError{Code: http.StatusConflict, Err: err}
+		}
+		ab.Name = v.Name
+	case addressBookDescriptionName:
+		var v addressbookDescription
+		if err := raw.Decode(&v); err != nil {
+			return &internal.HTTPError{Code: http.StatusConflict, Err: err}
+		}
+		ab.Description = v.Description
+	case internal.ResourceTypeName:
+	default:
+		if internal.IsProtectedProp(name, protectedAddressBookProps...) {
+			return internal.NewProtectedPropError()
+		}
+	}
+	return nil
+}
+
+// protectedAddressBookProps lists the protected properties of address books
+// besides those of internal.IsProtectedProp: those RFC 6352 sections 6.2.2,
+// 6.2.3 and 8.3.1 say MUST be protected, and the WebDAV-Push properties,
+// which the server computes.
+var protectedAddressBookProps = []xml.Name{
+	supportedAddressDataName,
+	maxResourceSizeName,
+	supportedCollationSetName,
+	push.TransportsName,
+	push.TopicName,
+	push.SupportedTriggersName,
 }
 
 // inPrefix reports whether p is under the prefix of the Handler.

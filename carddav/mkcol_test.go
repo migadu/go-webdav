@@ -150,6 +150,24 @@ func TestMkcolErrors(t *testing.T) {
 			wantCode: http.StatusForbidden,
 			wantBody: "error {urn:ietf:params:xml:ns:carddav}addressbook-collection-location-ok",
 		},
+		{
+			// RFC 4918 section 9.2.1: "403 (Forbidden): The client has
+			// attempted to set a protected property, such as
+			// DAV:getetag."
+			name:     "protected property",
+			body:     mkcolBody(mkcolAddressBookType + `<D:displayname>Work</D:displayname><D:getetag>"1"</D:getetag>`),
+			wantCode: http.StatusForbidden,
+			wantBody: "mkcol-response 403 {DAV:}getetag error {DAV:}cannot-modify-protected-property; 424 {DAV:}resourcetype,{DAV:}displayname",
+		},
+		{
+			// RFC 6352 section 6.2.2: "MUST be protected"
+			name: "protected CardDAV property",
+			body: mkcolBody(mkcolAddressBookType + `<CR:supported-address-data>
+  <CR:address-data-type content-type="text/vcard" version="3.0"/>
+</CR:supported-address-data>`),
+			wantCode: http.StatusForbidden,
+			wantBody: "mkcol-response 403 {urn:ietf:params:xml:ns:carddav}supported-address-data error {DAV:}cannot-modify-protected-property; 424 {DAV:}resourcetype",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			backend := &testBackend{}

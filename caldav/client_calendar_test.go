@@ -340,6 +340,27 @@ func TestClientCreateCalendarErrors(t *testing.T) {
 	if _, ok := backend.calendars["/user/calendars/tz/"]; ok {
 		t.Errorf("calendar with a name and two timezones was created")
 	}
+
+	// The server only accepts the component types of calendar object
+	// resources, and refuses the timezone all the same
+	err = c.CreateCalendar(ctx, &Calendar{
+		Path:                  "/user/calendars/comps/",
+		Name:                  "Comps",
+		SupportedComponentSet: []string{ical.CompEvent, ical.CompAlarm},
+		Timezone:              decodeICal(t, twoTimezones),
+	})
+	for _, want := range []string{
+		"<urn:ietf:params:xml:ns:caldav supported-calendar-component-set>: 409 Conflict",
+		"<urn:ietf:params:xml:ns:caldav calendar-timezone>: 409 Conflict",
+		"<DAV: displayname>: 424 Failed Dependency",
+	} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("CreateCalendar() with VALARM and two timezones = %v, want %q", err, want)
+		}
+	}
+	if _, ok := backend.calendars["/user/calendars/comps/"]; ok {
+		t.Errorf("calendar with VALARM was created")
+	}
 }
 
 func TestClientUpdateCalendarErrors(t *testing.T) {
