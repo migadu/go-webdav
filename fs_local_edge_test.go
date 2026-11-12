@@ -5,8 +5,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/emersion/go-webdav"
@@ -157,4 +159,87 @@ func TestLocalFileSystemEdgeCases(t *testing.T) {
 			t.Errorf("unexpected leftover files in dir after failed Create: %v", entries)
 		}
 	})
+}
+
+// A destination whose path runs through a file, not a collection, has no
+// parent collection either: PUT, MKCOL, COPY and MOVE fail with 409 Conflict
+// (RFC 4918 sections 9.7.1, 9.3.1, 9.8.5 and 9.9.4).
+func TestLocalFileSystemParentThroughFile(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "file.txt"), "hello")
+	writeTestFile(t, filepath.Join(dir, "src.txt"), "src")
+	writeTestFile(t, filepath.Join(dir, "col", "a.txt"), "a")
+	fs := webdav.LocalFileSystem(dir)
+
+	for _, parent := range []string{"/file.txt", "/file.txt/sub"} {
+		_, _, err := fs.Create(ctx, parent+"/new.txt", io.NopCloser(strings.NewReader("x")), &webdav.CreateOptions{})
+		checkHTTPErrorCode(t, err, http.StatusConflict)
+
+		checkHTTPErrorCode(t, fs.Mkdir(ctx, parent+"/new"), http.StatusConflict)
+
+		_, err = fs.Copy(ctx, "/src.txt", parent+"/copy.txt", &webdav.CopyOptions{})
+		checkHTTPErrorCode(t, err, http.StatusConflict)
+
+		_, err = fs.Copy(ctx, "/col", parent+"/col", &webdav.CopyOptions{})
+		checkHTTPErrorCode(t, err, http.StatusConflict)
+
+		_, err = fs.Move(ctx, "/src.txt", parent+"/moved.txt", &webdav.MoveOptions{})
+		checkHTTPErrorCode(t, err, http.StatusConflict)
+	}
+	checkTestFile(t, filepath.Join(dir, "file.txt"), "hello")
+	checkTestFile(t, filepath.Join(dir, "src.txt"), "src")
+	checkTestFile(t, filepath.Join(dir, "col", "a.txt"), "a")
+
+	h := &webdav.Handler{FileSystem: fs}
+	for _, tc := range []struct {
+		method, path, dest string
+	}{
+		{method: http.MethodPut, path: "/file.txt/sub/new.txt"},
+		{method: "MKCOL", path: "/file.txt/sub/new"},
+		{method: "COPY", path: "/src.txt", dest: "/file.txt/sub/copy.txt"},
+		{method: "MOVE", path: "/src.txt", dest: "/file.txt/sub/moved.txt"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("x"))
+		if tc.dest != "" {
+			req.Header.Set("Destination", tc.dest)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusConflict {
+			t.Errorf("%v %v: status = %d, want 409; body: %s", tc.method, tc.path, w.Code, strings.TrimSpace(w.Body.String()))
+		}
+	}
+}
+
+// A path running through a file maps to no resource: it's 404 Not Found
+// (RFC 9110 section 15.5.5).
+func TestLocalFileSystemPathThroughFileNotFound(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "file.txt"), "hello")
+	fs := webdav.LocalFileSystem(dir)
+
+	_, err := fs.Open(ctx, "/file.txt/x")
+	checkHTTPErrorCode(t, err, http.StatusNotFound)
+	_, err = fs.Stat(ctx, "/file.txt/x")
+	checkHTTPErrorCode(t, err, http.StatusNotFound)
+	_, err = fs.ReadDir(ctx, "/file.txt/x", false)
+	checkHTTPErrorCode(t, err, http.StatusNotFound)
+	checkHTTPErrorCode(t, fs.RemoveAll(ctx, "/file.txt/x", &webdav.RemoveAllOptions{}), http.StatusNotFound)
+	_, err = fs.Copy(ctx, "/file.txt/x", "/copy.txt", &webdav.CopyOptions{})
+	checkHTTPErrorCode(t, err, http.StatusNotFound)
+	_, err = fs.Move(ctx, "/file.txt/x", "/moved.txt", &webdav.MoveOptions{})
+	checkHTTPErrorCode(t, err, http.StatusNotFound)
+
+	h := &webdav.Handler{FileSystem: fs}
+	for _, method := range []string{http.MethodGet, "PROPFIND", http.MethodDelete} {
+		req := httptest.NewRequest(method, "/file.txt/x", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%v /file.txt/x: status = %d, want 404; body: %s", method, w.Code, strings.TrimSpace(w.Body.String()))
+		}
+	}
+	checkTestFile(t, filepath.Join(dir, "file.txt"), "hello")
 }

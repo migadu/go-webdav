@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/emersion/go-webdav/internal"
 )
@@ -124,7 +125,7 @@ func errFromOS(err error) error {
 		err = fmt.Errorf("%s: %w", perr.Op, perr.Err)
 	}
 
-	if errors.Is(err, iofs.ErrNotExist) {
+	if isNotExist(err) {
 		return NewHTTPError(http.StatusNotFound, err)
 	} else if errors.Is(err, iofs.ErrPermission) || isPathEscapesError(err) {
 		return NewHTTPError(http.StatusForbidden, err)
@@ -133,6 +134,13 @@ func errFromOS(err error) error {
 	} else {
 		return err
 	}
+}
+
+// isNotExist reports whether err means that a path names no file: either it
+// doesn't exist, or a component of its parent path isn't a directory but a
+// file (ENOTDIR), which iofs.ErrNotExist doesn't match.
+func isNotExist(err error) bool {
+	return errors.Is(err, iofs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
 
 // isPathEscapesError reports whether an os.Root method failed because the path
@@ -267,7 +275,7 @@ func checkParentDir(root *os.Root, p string) error {
 	}
 	fi, err := root.Stat(parent)
 	if err != nil {
-		if errors.Is(err, iofs.ErrNotExist) {
+		if isNotExist(err) {
 			return NewHTTPError(http.StatusConflict, err)
 		}
 		return errFromOS(err)
