@@ -189,8 +189,15 @@ type Condition struct {
 	ETag string
 }
 
+// maxConditions is the maximum number of conditions in an If header field.
+// Each one may need the state of another resource from the LockSystem or the
+// FileSystem. Clients use a handful of them; litmus, the WebDAV test suite,
+// at most 4.
+const maxConditions = 100
+
 type conditionParser struct {
 	s string
+	n int // number of conditions
 }
 
 func (p *conditionParser) acceptByte(ch byte) bool {
@@ -291,6 +298,10 @@ func (p *conditionParser) list() ([]Condition, error) {
 
 	var l []Condition
 	for !p.acceptByte(')') {
+		if p.n == maxConditions {
+			return nil, fmt.Errorf("webdav: invalid If value: more than %v conditions", maxConditions)
+		}
+		p.n++
 		cond, err := p.condition()
 		if err != nil {
 			return nil, err
@@ -378,9 +389,10 @@ func checkSimpleRef(s string) error {
 
 // ParseConditions parses an If header field (RFC 4918 section 10.4). It
 // returns the lists of conditions: the If header field evaluates to true if
-// all the conditions of any list evaluate to true.
+// all the conditions of any list evaluate to true. A field with more than 100
+// conditions is refused as malformed.
 func ParseConditions(s string) ([][]Condition, error) {
-	p := conditionParser{s}
+	p := conditionParser{s: s}
 	return p.parse()
 }
 

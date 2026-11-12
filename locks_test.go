@@ -178,7 +178,7 @@ func TestMemLockSystemLocks(t *testing.T) {
 func TestMemLockSystemTimeout(t *testing.T) {
 	ctx := context.Background()
 	clock := newFakeClock()
-	ls := &MemLockSystem{now: clock.now}
+	ls := &MemLockSystem{MaxTimeout: -1, now: clock.now}
 
 	lock, err := ls.Create(ctx, Lock{Root: "/a", Timeout: 10 * time.Second})
 	if err != nil {

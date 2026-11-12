@@ -508,6 +508,12 @@ func (b *backend) lockConflictError(r *http.Request, lock *Lock) error {
 	return newPreconditionError(http.StatusLocked, "no-conflicting-lock", append(hrefs, members...)...)
 }
 
+// maxLockOwnerSize is the maximum size of the DAV:owner element of a lock, as
+// encoded in Lock.Owner. The element is returned in the lockdiscovery
+// property of every resource in the scope of the lock. Clients put a name or
+// a URL there, well under a kilobyte.
+const maxLockOwnerSize = 4096
+
 // Lock creates or refreshes a lock (RFC 4918 section 9.10).
 func (b lockingBackend) Lock(r *http.Request, req *internal.LockRequest) (string, *internal.LockDiscovery, bool, error) {
 	p := path.Clean(r.URL.Path)
@@ -568,6 +574,8 @@ func (b lockingBackend) Lock(r *http.Request, req *internal.LockRequest) (string
 		lock.Owner, err = internal.MarshalRawXML(req.Info.Owner)
 		if err != nil {
 			return "", nil, false, &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
+		} else if len(lock.Owner) > maxLockOwnerSize {
+			return "", nil, false, internal.HTTPErrorf(http.StatusRequestEntityTooLarge, "webdav: DAV:owner element larger than %v bytes", maxLockOwnerSize)
 		}
 	}
 	granted, err := b.locks.Create(r.Context(), lock)
