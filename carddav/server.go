@@ -756,6 +756,12 @@ func (b *backend) addMeCardProp(ctx context.Context, propfind *internal.PropFind
 	}
 	p, err := mb.MeCardPath(ctx)
 	if err != nil {
+		// A propname response lists names without calling the PropFindFuncs,
+		// so it can't carry the error, and whether there's a me card is
+		// unknown: leave the property out
+		if propfind.PropName != nil {
+			return
+		}
 		props[meCardName] = func(*internal.RawXMLValue) (interface{}, error) {
 			return nil, err
 		}
