@@ -28,11 +28,12 @@ func (c *basicAuthHTTPClient) Do(req *http.Request) (*http.Response, error) {
 }
 
 // HTTPClientWithBasicAuth returns an HTTP client that adds basic
-// authentication to all outgoing requests. If c is nil, http.DefaultClient is
-// used.
+// authentication to all outgoing requests. If c is nil, a copy of
+// http.DefaultClient is used, which doesn't follow a redirect from an https
+// URL to an http one (see NewClient).
 func HTTPClientWithBasicAuth(c HTTPClient, username, password string) HTTPClient {
 	if c == nil {
-		c = http.DefaultClient
+		c = internal.DefaultHTTPClient()
 	}
 	return &basicAuthHTTPClient{c, username, password}
 }
@@ -44,7 +45,13 @@ type Client struct {
 
 // NewClient creates a new WebDAV client.
 //
-// If the HTTPClient is nil, http.DefaultClient is used.
+// If the HTTPClient is nil, a copy of http.DefaultClient is used, which
+// doesn't follow a redirect from an https URL to an http one: http.Client
+// would send the request there with the Authorization and Cookie header
+// fields of the first one if it's on the same domain, in cleartext. The error
+// returned for such a redirect wraps an *HTTPError with its status. Other
+// redirects are followed, 10 at most. A given *http.Client follows its own
+// CheckRedirect.
 //
 // To use HTTP basic authentication, HTTPClientWithBasicAuth can be used.
 //

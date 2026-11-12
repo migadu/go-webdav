@@ -149,3 +149,90 @@ func TestClientRedirectCreate(t *testing.T) {
 		t.Errorf("PUT body at /dir/sub/ = %q, want no PUT request there", s.putBody)
 	}
 }
+
+// TestClientRedirectDowngradeDefaultClient checks that the HTTP client used
+// when none is given, here by HTTPClientWithBasicAuth, doesn't follow a
+// redirect from an https URL to an http one. http.Client sends the header
+// fields of the request with it, the Authorization one included, if the host
+// name is the same: the credentials would go in cleartext.
+func TestClientRedirectDowngradeDefaultClient(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		plain []string // requests over plain HTTP, with their Authorization
+	)
+	plainServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		plain = append(plain, r.Method+" "+r.URL.Path+" "+r.Header.Get("Authorization"))
+		mu.Unlock()
+		io.WriteString(w, "plain")
+	}))
+	defer plainServer.Close()
+	// Both servers listen on 127.0.0.1, on different ports
+	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/file":
+			io.WriteString(w, "secure")
+		case "/loop":
+			http.Redirect(w, r, "/loop", http.StatusFound)
+		case "/moved":
+			http.Redirect(w, r, "/file", http.StatusFound)
+		default:
+			http.Redirect(w, r, plainServer.URL+r.URL.Path, http.StatusFound)
+		}
+	}))
+	defer tlsServer.Close()
+
+	// The default client is based on http.DefaultClient: make it trust the
+	// certificate of tlsServer
+	defaultClient := http.DefaultClient
+	http.DefaultClient = tlsServer.Client()
+	defer func() { http.DefaultClient = defaultClient }()
+
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		hc   webdav.HTTPClient
+	}{
+		{"HTTPClientWithBasicAuth(nil)", webdav.HTTPClientWithBasicAuth(nil, "user", "secret")},
+		{"nil", nil},
+	} {
+		mu.Lock()
+		plain = nil
+		mu.Unlock()
+		c, err := webdav.NewClient(tc.hc, tlsServer.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var httpErr *webdav.HTTPError
+		if rc, err := c.Open(ctx, "/downgrade"); err == nil {
+			rc.Close()
+			t.Errorf("%v: Open() succeeded, want an HTTP error 302", tc.name)
+		} else if !errors.As(err, &httpErr) || httpErr.Code != http.StatusFound {
+			t.Errorf("%v: Open() = %v, want an HTTP error 302", tc.name, err)
+		}
+		// http.Client follows the 302 with a GET request itself
+		if _, err := c.Stat(ctx, "/dir"); !errors.As(err, &httpErr) || httpErr.Code != http.StatusFound {
+			t.Errorf("%v: Stat() = %v, want an HTTP error 302", tc.name, err)
+		}
+		mu.Lock()
+		if len(plain) > 0 {
+			t.Errorf("%v: requests over plain HTTP = %q, want none", tc.name, plain)
+		}
+		mu.Unlock()
+
+		// Other redirects are followed, at most 10
+		if rc, err := c.Open(ctx, "/moved"); err != nil {
+			t.Errorf("%v: Open() of a resource redirected over https = %v", tc.name, err)
+		} else {
+			b, _ := io.ReadAll(rc)
+			rc.Close()
+			if string(b) != "secure" {
+				t.Errorf("%v: Open() of a resource redirected over https = %q, want %q", tc.name, b, "secure")
+			}
+		}
+		if _, err := c.Open(ctx, "/loop"); err == nil || !strings.Contains(err.Error(), "stopped after 10 redirects") {
+			t.Errorf("%v: Open() of a redirect loop = %v, want an error after 10 redirects", tc.name, err)
+		}
+	}
+}
