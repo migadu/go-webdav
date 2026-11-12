@@ -6,9 +6,11 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"maps"
 	"mime"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -461,6 +463,17 @@ func decodeComp(comp *comp) (*CalendarCompRequest, error) {
 	}
 	for _, p := range comp.Prop {
 		req.Props = append(req.Props, p.Name)
+		if !bool(p.NoValue) || containsFold(req.NoValue, p.Name) {
+			continue
+		}
+		// A property requested both with and without novalue is returned
+		// with its value
+		withValue := slices.ContainsFunc(comp.Prop, func(q prop) bool {
+			return !bool(q.NoValue) && strings.EqualFold(q.Name, p.Name)
+		})
+		if !withValue {
+			req.NoValue = append(req.NoValue, p.Name)
+		}
 	}
 	for _, c := range comp.Comp {
 		comp, err := decodeComp(&c)
@@ -584,7 +597,7 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *cal
 	b := h.newBackend()
 	return internal.StreamMultiStatus(w, r, func(mw *internal.MultiStatusWriter) error {
 		for i := range cos {
-			resp, err := b.propFindCalendarObject(r.Context(), &propfind, true, &cos[i])
+			resp, err := b.propFindCalendarObject(r.Context(), &propfind, &q.CompRequest, &cos[i])
 			if err != nil {
 				return err
 			}
@@ -696,7 +709,7 @@ func (h *Handler) handleMultiget(r *http.Request, w http.ResponseWriter, multige
 			var resp *internal.Response
 			if err != nil {
 				resp = internal.NewErrorResponse(href.Path, err)
-			} else if resp, err = b.propFindCalendarObject(ctx, &propfind, true, co); err != nil {
+			} else if resp, err = b.propFindCalendarObject(ctx, &propfind, &dataReq, co); err != nil {
 				return err
 			}
 			if err := mw.WriteResponse(resp); err != nil {
@@ -951,7 +964,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		if err != nil {
 			return err
 		}
-		resp, err := b.propFindCalendarObject(ctx, propfind, false, co)
+		resp, err := b.propFindCalendarObject(ctx, propfind, nil, co)
 		if err != nil {
 			return err
 		}
@@ -1248,12 +1261,14 @@ func (b *backend) propFindAllCalendars(ctx context.Context, mw *internal.MultiSt
 	return mw.WriteResponses(errResps)
 }
 
-func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal.PropFind, report bool, co *CalendarObject) (*internal.Response, error) {
+// propFindCalendarObject returns the response for co to a PROPFIND request,
+// or to a REPORT request whose calendar-data is dataReq, nil for PROPFIND.
+func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal.PropFind, dataReq *CalendarCompRequest, co *CalendarObject) (*internal.Response, error) {
 	// Unlike a PROPFIND request, a calendar-query or calendar-multiget
 	// REPORT doesn't have to ask for properties (RFC 4791 sections 9.5 and
 	// 9.10). Each object found still gets a response, with only a status
 	// (RFC 4918 section 14.24).
-	if report && !propfind.AsksForProps() {
+	if dataReq != nil && !propfind.AsksForProps() {
 		return internal.NewOKResponse(co.Path), nil
 	}
 
@@ -1273,14 +1288,16 @@ func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal
 
 	// calendar-data is not a property: it is only returned by REPORT
 	// requests, not by PROPFIND (RFC 4791 section 9.6)
-	if report {
+	if dataReq != nil {
 		props[calendarDataName] = func(*internal.RawXMLValue) (interface{}, error) {
-			var buf bytes.Buffer
-			if err := ical.NewEncoder(&buf).Encode(co.Data); err != nil {
+			// Only the requested parts are returned (RFC 4791 section
+			// 9.6), whatever the backend returned. Filtering again what
+			// Filter already filtered changes nothing.
+			data, err := encodeCalendarData(dataReq, co.Data)
+			if err != nil {
 				return nil, err
 			}
-
-			return &calendarDataResp{Data: buf.Bytes()}, nil
+			return &calendarDataResp{Data: data}, nil
 		}
 	}
 
@@ -1305,6 +1322,75 @@ func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal
 	return internal.NewPropFindResponse(co.Path, propfind, props)
 }
 
+// encodeCalendarData encodes the parts of cal req asks for, the calendar data
+// of a REPORT response.
+//
+// A whole calendar object is encoded with ical.Encoder, which checks that
+// it's valid. The parts of one may not make a valid iCalendar object (RFC
+// 4791 section 9.6), lacking DTSTAMP or PRODID for instance, which
+// ical.Encoder refuses: they're written as it would write them, without
+// these checks.
+func encodeCalendarData(req *CalendarCompRequest, cal *ical.Calendar) ([]byte, error) {
+	var buf bytes.Buffer
+	if parts := filterCalendar(req, cal); parts == cal {
+		if err := ical.NewEncoder(&buf).Encode(cal); err != nil {
+			return nil, err
+		}
+	} else if err := writeComponent(&buf, parts.Component); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// writeComponent writes comp as ical.Encoder does, without checking its
+// properties and components.
+func writeComponent(buf *bytes.Buffer, comp *ical.Component) error {
+	if err := writeProp(buf, &ical.Prop{Name: "BEGIN", Value: comp.Name}); err != nil {
+		return err
+	}
+	for _, name := range slices.Sorted(maps.Keys(comp.Props)) {
+		for i := range comp.Props[name] {
+			if err := writeProp(buf, &comp.Props[name][i]); err != nil {
+				return err
+			}
+		}
+	}
+	for _, child := range comp.Children {
+		if err := writeComponent(buf, child); err != nil {
+			return err
+		}
+	}
+	return writeProp(buf, &ical.Prop{Name: "END", Value: comp.Name})
+}
+
+// writeProp writes the content line of prop as ical.Encoder does. It fails as
+// ical.Encoder does for what can't be written: a parameter value with a
+// double quote, or a value with a CR or LF.
+func writeProp(buf *bytes.Buffer, prop *ical.Prop) error {
+	buf.WriteString(prop.Name)
+	for _, name := range slices.Sorted(maps.Keys(prop.Params)) {
+		buf.WriteString(";" + name + "=")
+		for i, v := range prop.Params[name] {
+			if i > 0 {
+				buf.WriteString(",")
+			}
+			if strings.ContainsRune(v, '"') {
+				return fmt.Errorf("caldav: failed to encode param value: contains a double-quote")
+			}
+			if strings.ContainsAny(v, ";:,") {
+				buf.WriteString(`"` + v + `"`)
+			} else {
+				buf.WriteString(v)
+			}
+		}
+	}
+	if strings.ContainsAny(prop.Value, "\r\n") {
+		return fmt.Errorf("caldav: failed to encode property value: contains a CR or LF")
+	}
+	buf.WriteString(":" + prop.Value + "\r\n")
+	return nil
+}
+
 // propFindAllCalendarObjects writes resp, the response for the collection at
 // path, followed by the responses for its members, the calendar objects. The
 // members are listed before resp is written.
@@ -1320,7 +1406,7 @@ func (b *backend) propFindAllCalendarObjects(ctx context.Context, mw *internal.M
 		return err
 	}
 	for i := range cos {
-		resp, err := b.propFindCalendarObject(ctx, propfind, false, &cos[i])
+		resp, err := b.propFindCalendarObject(ctx, propfind, nil, &cos[i])
 		if err != nil {
 			return err
 		}

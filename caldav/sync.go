@@ -97,7 +97,7 @@ func (h *Handler) handleSyncCollection(r *http.Request, w http.ResponseWriter, s
 	propfind := internal.PropFind{Prop: sc.Prop}
 	return internal.ServeSyncCollection(w, r, res.SyncToken, res.Deleted, res.Truncated, func(mw *internal.MultiStatusWriter) error {
 		for i := range res.Updated {
-			resp, err := b.propFindCalendarObject(r.Context(), &propfind, true, &res.Updated[i])
+			resp, err := b.propFindCalendarObject(r.Context(), &propfind, &query.CompRequest, &res.Updated[i])
 			if err != nil {
 				return err
 			}

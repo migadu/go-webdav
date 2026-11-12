@@ -358,7 +358,29 @@ type limitFreeBusySet struct {
 type prop struct {
 	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav prop"`
 	Name    string   `xml:"name,attr"`
-	// TODO: novalue
+	NoValue noValue  `xml:"novalue,attr,omitempty"`
+}
+
+// noValue is the novalue attribute of CALDAV:prop, "yes" or "no".
+type noValue bool
+
+func (nv *noValue) UnmarshalText(b []byte) error {
+	switch s := string(b); s {
+	case "yes":
+		*nv = true
+	case "no":
+		*nv = false
+	default:
+		return fmt.Errorf("caldav: invalid novalue value: %q", s)
+	}
+	return nil
+}
+
+func (nv noValue) MarshalText() ([]byte, error) {
+	if nv {
+		return []byte("yes"), nil
+	}
+	return []byte("no"), nil
 }
 
 // Response variant of https://tools.ietf.org/html/rfc4791#section-9.6

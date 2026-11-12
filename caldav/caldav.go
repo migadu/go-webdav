@@ -131,18 +131,47 @@ type CalendarUpdate struct {
 	RemoveTimezone bool
 }
 
+// CalendarCompRequest is the CALDAV:calendar-data element of a REPORT
+// request (RFC 4791 section 9.6): the parts of the calendar objects to
+// return, as a request for the VCALENDAR component, whose Comps are the
+// requests for the components it holds. Whatever the backend returns, the
+// Handler only writes the requested parts in the calendar data, so backends
+// may return whole objects.
+//
+// A request with none of AllProps, Props, AllComps and Comps asks for the
+// whole component: the zero CalendarCompRequest for the whole object, as
+// calendar-data without a comp element, and a request with only a Name for
+// the whole component, as <C:comp name="VTIMEZONE"/> in the example of
+// section 7.8.1. Otherwise, only the listed properties and components are
+// returned: none of the properties without AllProps or Props, none of the
+// components without AllComps or Comps (section 9.6.1). The parts may not
+// make a valid iCalendar object, missing a DTSTAMP for instance, which
+// section 9.6 allows: the client is to ask for what it needs.
 type CalendarCompRequest struct {
+	// Name is the name of the component, compared case-insensitively. That
+	// of the outermost request isn't checked: a Client sends VCALENDAR for
+	// an empty one.
 	Name string
 
 	AllProps bool
-	Props    []string
+	// Props lists the names of the properties to return, compared
+	// case-insensitively.
+	Props []string
+	// NoValue lists the names of Props requested with novalue="yes": the
+	// properties they name are returned with their parameters, but with an
+	// empty value (RFC 4791 section 9.6.4). The Handler leaves out a name
+	// also requested without novalue.
+	NoValue []string
 
 	AllComps bool
-	Comps    []CalendarCompRequest
+	// Comps lists the requests for the components to return. A component
+	// is returned as the first request with its name asks for it.
+	Comps []CalendarCompRequest
 
 	// The fields below apply to the whole calendar data, so only the
 	// outermost request has them. The server passes them on: applying them
-	// to the calendar objects returned is up to the backend.
+	// to the calendar objects returned is up to the backend. The Handler
+	// then writes the requested parts of these objects.
 
 	// Expand asks for recurring components to be expanded into the instances
 	// overlapping the time range (RFC 4791 section 9.6.5).
